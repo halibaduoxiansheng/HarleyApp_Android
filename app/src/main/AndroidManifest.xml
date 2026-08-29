@@ -9,6 +9,8 @@
         android:name="android.permission.PACKAGE_USAGE_STATS"
         tools:ignore="ProtectedPermissions" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 允许高重要性提醒渠道在用户未关闭系统或渠道振动时提供振动反馈。 -->
+    <uses-permission android:name="android.permission.VIBRATE" />
     <!-- OTA下载完成后仍由用户在Android系统安装界面确认，不执行静默安装。 -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <!-- Android 12及以上需要用户在系统页面单独允许，定时提醒才能避开较大的非精确时间窗口。 -->
@@ -100,13 +102,15 @@
             android:name=".reminder.ReminderReceiver"
             android:exported="false" />
 
-        <!-- 重启后恢复通用一次性通知和按间隔天数重复的通知计划。 -->
+        <!-- 重启、应用升级或重新获得精确闹钟权限后，恢复通用提醒和微信等待提醒。 -->
         <receiver
             android:name=".reminder.ReminderBootReceiver"
             android:enabled="true"
             android:exported="false">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.app.action.SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED" />
             </intent-filter>
         </receiver>
 

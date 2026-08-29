@@ -168,7 +168,7 @@ class WechatReminderScheduler(context: Context) {
     companion object {
         const val ACTION_SHOW_WECHAT_REMINDER =
             "com.example.harleyapp.action.SHOW_WECHAT_UNREAD_REMINDER"
-        const val CHANNEL_ID = "wechat_unread_reminder"
+        const val CHANNEL_ID = NotificationAlertChannels.WECHAT_REMINDER_CHANNEL_ID
         const val NOTIFICATION_ID = 41_082
         private const val TAG = "WechatReminder"
         private const val REMINDER_REQUEST_CODE = 41_081

@@ -2,7 +2,6 @@ package com.example.harleyapp.reminder
 
 import android.Manifest
 import android.app.Notification
-import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
@@ -15,6 +14,7 @@ import androidx.core.content.ContextCompat
 import com.example.harleyapp.MainActivity
 import com.example.harleyapp.R
 import com.example.harleyapp.data.ReminderRepository
+import com.example.harleyapp.notification.NotificationAlertChannels
 
 /**
  * 接收系统到点Alarm，推进重复计划并展示用户自定义内容的本地通知。
@@ -57,7 +57,7 @@ class ReminderReceiver : BroadcastReceiver() {
         }
 
         val notificationManager = context.getSystemService(NotificationManager::class.java)
-        createNotificationChannel(notificationManager)
+        NotificationAlertChannels.createScheduledReminderChannel(notificationManager)
         if (!notificationManager.areNotificationsEnabled()) {
             Log.w(TAG, "App notifications disabled for local reminder")
             scheduler.scheduleRetry(reminder.id, NOTIFICATION_RETRY_DELAY_MILLIS)
@@ -73,7 +73,10 @@ class ReminderReceiver : BroadcastReceiver() {
             openAppIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-        val notification = Notification.Builder(context, CHANNEL_ID)
+        val notification = Notification.Builder(
+            context,
+            NotificationAlertChannels.SCHEDULED_REMINDER_CHANNEL_ID
+        )
             .setSmallIcon(R.drawable.ic_notification_reminder)
             .setContentTitle("定时提醒")
             .setContentText(reminder.content)
@@ -123,25 +126,6 @@ class ReminderReceiver : BroadcastReceiver() {
     }
 
     /**
-     * 创建Android 8.0及以上使用的通用定时提醒通知渠道。
-     *
-     * @param notificationManager 系统NotificationManager。
-     *
-     * @return 无返回值；渠道已存在时系统保留用户此前设置的声音与振动选项。
-     */
-    private fun createNotificationChannel(notificationManager: NotificationManager) {
-        val channel = NotificationChannel(
-            CHANNEL_ID,
-            "定时提醒",
-            NotificationManager.IMPORTANCE_HIGH
-        ).apply {
-            description = "按自定义日期、时间和重复间隔展示本地提醒"
-            lockscreenVisibility = Notification.VISIBILITY_PRIVATE
-        }
-        notificationManager.createNotificationChannel(channel)
-    }
-
-    /**
      * 将64位计划编号转换为与微信提醒区分的稳定通知编号。
      *
      * @return 同一通用通知计划固定一致的32位通知编号。
@@ -152,7 +136,6 @@ class ReminderReceiver : BroadcastReceiver() {
 
     private companion object {
         const val TAG = "ReminderReceiver"
-        const val CHANNEL_ID = "scheduled_local_reminders"
         const val EARLY_ALARM_TOLERANCE_MILLIS = 60_000L
         const val NOTIFICATION_RETRY_DELAY_MILLIS = 60_000L
     }

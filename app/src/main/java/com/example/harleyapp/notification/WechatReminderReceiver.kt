@@ -2,7 +2,6 @@ package com.example.harleyapp.notification
 
 import android.Manifest
 import android.app.Notification
-import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
@@ -71,7 +70,7 @@ class WechatReminderReceiver : BroadcastReceiver() {
 
         val notificationManager =
             applicationContext.getSystemService(NotificationManager::class.java)
-        createNotificationChannel(notificationManager)
+        NotificationAlertChannels.createWechatReminderChannel(notificationManager)
         if (!notificationManager.areNotificationsEnabled()) {
             Log.w(TAG, "App notifications disabled for WeChat unread reminder")
             scheduler.schedule(settings.intervalMinutes)
@@ -119,25 +118,6 @@ class WechatReminderReceiver : BroadcastReceiver() {
             scheduler.schedule(settings.intervalMinutes)
         }
         Log.i(TAG, "WeChat waiting reminder displayed")
-    }
-
-    /**
-     * 创建高重要性微信未查看消息提醒渠道。
-     *
-     * @param notificationManager 系统NotificationManager。
-     *
-     * @return 无返回值；渠道已存在时系统保留用户自己的声音、振动和重要性设置。
-     */
-    private fun createNotificationChannel(notificationManager: NotificationManager) {
-        val channel = NotificationChannel(
-            WechatReminderScheduler.CHANNEL_ID,
-            "微信未查看消息提醒",
-            NotificationManager.IMPORTANCE_HIGH
-        ).apply {
-            description = "按自定义间隔提醒仍保留在通知栏中的普通微信消息"
-            lockscreenVisibility = Notification.VISIBILITY_PRIVATE
-        }
-        notificationManager.createNotificationChannel(channel)
     }
 
     /**
