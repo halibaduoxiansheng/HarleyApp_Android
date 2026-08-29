@@ -1,0 +1,268 @@
+package com.example.harleyapp.model
+
+import android.graphics.Bitmap
+
+/**
+ * 账目收支类型。
+ *
+ * @property INCOME 收入记录。
+ * @property EXPENSE 支出记录。
+ * @property TRANSFER 提现、充值等账户之间的内部资金转移，不计入收入或支出。
+ */
+enum class LedgerType {
+    INCOME,
+    EXPENSE,
+    TRANSFER
+}
+
+/**
+ * 账目产生来源。
+ *
+ * @property MANUAL 用户手动录入。
+ * @property WECHAT_NOTIFICATION 从微信支付相关系统通知自动识别。
+ * @property WECHAT_IMPORT 从用户选择的微信账单文件导入。
+ */
+enum class LedgerSource {
+    MANUAL,
+    WECHAT_NOTIFICATION,
+    WECHAT_IMPORT
+}
+
+/**
+ * 微信自动回复的快捷回复兼容状态。
+ *
+ * @property NOT_TESTED 尚未收到可用于检测的普通微信聊天通知。
+ * @property SUPPORTED 最近一次检测到微信通知包含Android系统快捷回复入口。
+ * @property NO_REPLY_ACTION 最近一次普通聊天通知没有提供快捷回复入口。
+ * @property SEND_FAILED 找到了快捷回复入口，但系统拒绝或取消了发送。
+ */
+enum class AutoReplyCompatibility {
+    NOT_TESTED,
+    SUPPORTED,
+    NO_REPLY_ACTION,
+    SEND_FAILED
+}
+
+/**
+ * 微信定时自动回复配置。
+ *
+ * 使用方法：
+ * 页面通过AutoReplySettingsRepository读取和保存本配置；通知监听服务每次处理微信通知前
+ * 都会重新读取配置，因此修改后无需重新启动App或服务。
+ *
+ * @param enabled 是否启用自动回复总开关。
+ * @param replyText 发送给联系人的自定义回复内容。
+ * @param startMinuteOfDay 每日开始时间，从当天00:00起计算的分钟数，范围0到1439。
+ * @param endMinuteOfDay 每日结束时间，从当天00:00起计算的分钟数，范围0到1439；与开始时间相同表示全天。
+ * @param cooldownMinutes 同一会话两次自动回复之间的最短间隔分钟数。
+ * @param dailyLimit 每个自然日允许自动发送的最大条数。
+ * @param replyToGroups 是否允许回复群聊；默认关闭以避免在群内重复打扰多人。
+ */
+data class AutoReplySettings(
+    val enabled: Boolean = false,
+    val replyText: String = "您好，我现在不方便回复，稍后联系您。",
+    val startMinuteOfDay: Int = 9 * 60,
+    val endMinuteOfDay: Int = 18 * 60,
+    val cooldownMinutes: Int = 30,
+    val dailyLimit: Int = 30,
+    val replyToGroups: Boolean = false
+)
+
+/**
+ * 微信自动回复最近一次兼容性检测和发送统计。
+ *
+ * @param compatibility 最近一次有效检测结果。
+ * @param lastCheckedAtMillis 最近一次检查微信快捷回复入口的时间戳。
+ * @param lastReplyAtMillis 最近一次成功发送自动回复的时间戳；尚未发送时为0。
+ * @param repliesToday 当前自然日已经成功发送的自动回复数量。
+ * @param detailCode 不包含联系人或消息正文的状态代码，用于界面显示具体失败原因。
+ */
+data class AutoReplyStatus(
+    val compatibility: AutoReplyCompatibility = AutoReplyCompatibility.NOT_TESTED,
+    val lastCheckedAtMillis: Long = 0L,
+    val lastReplyAtMillis: Long = 0L,
+    val repliesToday: Int = 0,
+    val detailCode: String = ""
+)
+
+/**
+ * 一条需要到点提醒并交由用户确认分享到微信的图文消息。
+ *
+ * 使用方法：
+ * 新建时将id设为0，ScheduledMessageRepository会生成唯一编号；编辑时保留原id。
+ * imageUri为空表示纯文字提醒。联系人备注仅用于通知中核对目标，不会自动匹配微信好友。
+ *
+ * @param id 本地唯一编号，0表示尚未保存的新计划。
+ * @param contactNote 用户填写的联系人或群聊备注，只用于提醒显示。
+ * @param messageText 要复制到剪贴板并随分享Intent传递的文字，可为空但不能与图片同时为空。
+ * @param scheduledAtMillis 计划提醒的Unix毫秒时间戳。
+ * @param imageUri 用户通过系统文件选择器授予长期只读权限的可选图片URI。
+ * @param createdAtMillis 计划创建时间戳，用于稳定排序和生成唯一编号。
+ * @param reminderShownAtMillis 系统已经成功展示提醒通知的时间戳；未提醒时为0。
+ * @param shareOpenedAtMillis 用户点击提醒并打开微信分享流程的时间戳；尚未打开时为0。
+ */
+data class ScheduledWechatMessage(
+    val id: Long,
+    val contactNote: String,
+    val messageText: String,
+    val scheduledAtMillis: Long,
+    val imageUri: String = "",
+    val createdAtMillis: Long = System.currentTimeMillis(),
+    val reminderShownAtMillis: Long = 0L,
+    val shareOpenedAtMillis: Long = 0L
+)
+
+/**
+ * 本应用安全缓存清理的最近状态。
+ *
+ * @param automaticEnabled 是否在App启动时每天最多自动检查一次过期缓存。
+ * @param lastCleanupAtMillis 最近一次自动或手动清理时间戳；尚未执行时为0。
+ * @param lastFreedBytes 最近一次实际释放的缓存字节数。
+ */
+data class LocalCleanupStatus(
+    val automaticEnabled: Boolean = true,
+    val lastCleanupAtMillis: Long = 0L,
+    val lastFreedBytes: Long = 0L
+)
+
+/**
+ * 一次本应用缓存清理的执行结果。
+ *
+ * @param freedBytes 本次实际释放的缓存字节数。
+ * @param removedExpiredCaptures 删除的过期待确认微信支付通知数量。
+ * @param errorMessage 执行错误说明，成功时为空。
+ */
+data class LocalCleanupResult(
+    val freedBytes: Long = 0L,
+    val removedExpiredCaptures: Int = 0,
+    val errorMessage: String = ""
+)
+
+/**
+ * 单条账目数据。
+ *
+ * 使用方法：
+ * 新增账目时将id设置为0，LedgerRepository会自动生成唯一编号；编辑时保留原id。
+ * 金额使用“分”为单位保存，避免使用浮点数造成金额精度误差。
+ *
+ * @param id 账目唯一编号，0表示尚未持久化的新记录。
+ * @param type 收入或支出类型。
+ * @param amountCents 金额，单位为分，必须大于0。
+ * @param category 用户选择或输入的分类。
+ * @param note 可选备注。
+ * @param dateEpochDay 账目日期，从1970-01-01开始计算的天数。
+ * @param createdAtMillis 创建时间戳，用于保证同一天记录的稳定排序。
+ * @param source 账目来源。
+ * @param counterparty 交易对方或商户名称。
+ * @param rawText 自动识别时保留的原始摘要，仅存本机，手动记录通常为空。
+ * @param externalKey 微信通知或账单交易的去重键，手动记录为空。
+ */
+data class LedgerEntry(
+    val id: Long,
+    val type: LedgerType,
+    val amountCents: Long,
+    val category: String,
+    val note: String,
+    val dateEpochDay: Long,
+    val createdAtMillis: Long,
+    val source: LedgerSource = LedgerSource.MANUAL,
+    val counterparty: String = "",
+    val rawText: String = "",
+    val externalKey: String = ""
+)
+
+/**
+ * 无法安全自动入账的微信支付相关通知。
+ *
+ * 使用方法：
+ * 通知金额缺失或收支方向不明确时保存为WechatCapture，在“待确认”页面由用户补充后转为账目。
+ *
+ * @param externalKey 通知去重键。
+ * @param title 微信通知标题。
+ * @param content 合并后的通知正文。
+ * @param parsedAmountCents 已解析金额，无法解析时为null。
+ * @param suggestedType 建议收支方向，无法判断时为null。
+ * @param suggestedCategory 建议分类。
+ * @param receivedAtMillis 通知收到时间。
+ */
+data class WechatCapture(
+    val externalKey: String,
+    val title: String,
+    val content: String,
+    val parsedAmountCents: Long?,
+    val suggestedType: LedgerType?,
+    val suggestedCategory: String,
+    val receivedAtMillis: Long
+)
+
+/**
+ * 微信通知文本解析结果。
+ *
+ * @param isFinancialNotification 是否属于可能的微信支付通知；false表示普通聊天通知并应忽略。
+ * @param amountCents 解析出的金额，缺失时为null。
+ * @param type 收入、支出或内部转账方向，无法判断时为null。
+ * @param category 识别出的账目分类。
+ * @param counterparty 推断出的交易对方，无法提取时为空。
+ * @param canAutoConfirm 是否具备足够信息可以直接自动入账。
+ */
+data class WechatParseResult(
+    val isFinancialNotification: Boolean,
+    val amountCents: Long?,
+    val type: LedgerType?,
+    val category: String,
+    val counterparty: String,
+    val canAutoConfirm: Boolean
+)
+
+/**
+ * 微信账单文件导入结果。
+ *
+ * @param scannedRows 扫描到的有效交易行数。
+ * @param insertedRows 新增账目数。
+ * @param updatedRows 与已有去重键相同并完成更新的账目数。
+ * @param skippedRows 无法识别或无需入账的行数。
+ * @param errorMessage 失败原因，成功时为空。
+ */
+data class BillImportResult(
+    val scannedRows: Int = 0,
+    val insertedRows: Int = 0,
+    val updatedRows: Int = 0,
+    val skippedRows: Int = 0,
+    val errorMessage: String = ""
+)
+
+/**
+ * 手机状态的一次采样结果。
+ *
+ * @param uploadBytesPerSecond 当前估算上传速率，单位为字节每秒。
+ * @param downloadBytesPerSecond 当前估算下载速率，单位为字节每秒。
+ * @param totalMemoryBytes 系统RAM总量，单位为字节。
+ * @param availableMemoryBytes 当前可用RAM，单位为字节。
+ * @param totalStorageBytes 主内部存储总量，单位为字节。
+ * @param availableStorageBytes 主内部存储可用量，单位为字节。
+ * @param totalSwapBytes 系统交换或内存扩展空间总量，单位为字节。
+ * @param availableSwapBytes 系统交换或内存扩展空间可用量，单位为字节。
+ */
+data class DeviceSnapshot(
+    val uploadBytesPerSecond: Long = 0,
+    val downloadBytesPerSecond: Long = 0,
+    val totalMemoryBytes: Long = 0,
+    val availableMemoryBytes: Long = 0,
+    val totalStorageBytes: Long = 0,
+    val availableStorageBytes: Long = 0,
+    val totalSwapBytes: Long = 0,
+    val availableSwapBytes: Long = 0
+)
+
+/**
+ * 一个能够从桌面启动的手机应用。
+ *
+ * @param packageName 应用包名，用于持久化选择和启动应用。
+ * @param label 应用向用户显示的名称。
+ * @param icon 应用图标位图。
+ */
+data class LaunchableApp(
+    val packageName: String,
+    val label: String,
+    val icon: Bitmap
+)

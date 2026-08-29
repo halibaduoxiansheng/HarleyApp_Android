@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Harley生活助手</string>
+    <string name="wechat_notification_service_name">微信通知助手</string>
+    <string name="wechat_notification_service_description">用于本机微信支付自动记账，以及在用户设定时段内通过微信通知快捷回复发送自定义内容。</string>
+</resources>
