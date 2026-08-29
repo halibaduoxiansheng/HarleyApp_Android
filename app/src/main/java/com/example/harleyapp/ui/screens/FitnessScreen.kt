@@ -1,8 +1,6 @@
 package com.example.harleyapp.ui.screens
 
 import android.Manifest
-import android.app.DatePickerDialog
-import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -16,12 +14,15 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -37,7 +38,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -54,26 +54,28 @@ import androidx.core.content.ContextCompat
 import com.example.harleyapp.data.FitnessRepository
 import com.example.harleyapp.model.CompanionTask
 import com.example.harleyapp.model.DailyFitnessRecord
-import com.example.harleyapp.model.FitnessExercise
-import com.example.harleyapp.model.FitnessGoals
+import com.example.harleyapp.model.FitnessExerciseDefinition
+import com.example.harleyapp.model.FitnessRangeSummary
+import com.example.harleyapp.model.FitnessTrackingType
+import com.example.harleyapp.model.calculateFitnessRangeSummary
 import com.example.harleyapp.system.StepCounterMonitor
+import com.example.harleyapp.ui.components.HarleyDatePickerDialog
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
-import java.time.ZoneId
 import java.util.Locale
 
 /**
- * 显示每日运动监督、快速打卡、自动计步和可增删改查的运动历史。
+ * 显示动态运动项目、今日打卡、日期区间汇总和可增删改查的历史记录。
  *
  * 使用方法：
- * 由HarleyApp在“运动”导航项选中时调用。页面首次显示会读取本地目标和当天记录；
- * 用户允许身体活动权限后，页面可见期间自动监听低功耗计步传感器，离开页面立即释放监听。
- * 俯卧撑和仰卧起坐支持分组累加、减少误记和一键达标，步数始终保留手动校准入口。
+ * 由HarleyApp在底部“运动”导航选中时调用。用户可通过“管理项目”新增、编辑、删除运动方式；
+ * 每个手动项目拥有可配置目标、单位和快速增加量。自动步数项目仍连接系统计步传感器。
+ * “区间汇总”支持任意开始、结束日期，并只在明细区显示真正保存过的数据。
  *
  * @param modifier 外部传入的页面安全边距。
- * @param onCompanionTaskCompleted 首次达成单项或全部运动目标时通知伙伴系统的回调。
+ * @param onCompanionTaskCompleted 首次达成单项或全部目标时通知伙伴系统的回调。
  *
  * @return 无返回值，直接输出完整运动页面。
  */
@@ -93,37 +95,53 @@ fun FitnessScreen(
     var todayEpochDay by remember {
         mutableLongStateOf(LocalDate.now().toEpochDay())
     }
-
-    var goals by remember {
-        mutableStateOf(repository.getGoals())
+    var rangeStartEpochDay by rememberSaveable {
+        mutableLongStateOf(todayEpochDay - DEFAULT_RANGE_DAYS + 1L)
+    }
+    var rangeEndEpochDay by rememberSaveable {
+        mutableLongStateOf(todayEpochDay)
+    }
+    var definitions by remember {
+        mutableStateOf(repository.getExerciseDefinitions())
     }
     var todayRecord by remember {
         mutableStateOf(repository.getTodayRecord(todayEpochDay))
     }
-    var historyDays by rememberSaveable {
-        mutableIntStateOf(HISTORY_DAYS_WEEK)
-    }
-    var recentRecords by remember {
+    var rangeRecords by remember {
         mutableStateOf(
-            repository.getRecentRecords(
-                days = historyDays,
-                endEpochDay = todayEpochDay
+            repository.getRecordsInRange(
+                startEpochDay = rangeStartEpochDay,
+                endEpochDay = rangeEndEpochDay
             )
         )
     }
     var streakDays by remember {
-        mutableIntStateOf(
+        mutableStateOf(
             calculateCurrentStreak(
                 records = repository.getRecentRecords(
                     days = STREAK_LOOKBACK_DAYS,
                     endEpochDay = todayEpochDay
                 ),
-                todayEpochDay = todayEpochDay
+                todayEpochDay = todayEpochDay,
+                currentDefinitions = definitions
             )
         )
     }
-    var showGoalEditor by rememberSaveable {
+
+    var showExerciseManager by rememberSaveable {
         mutableStateOf(false)
+    }
+    var showExerciseEditor by rememberSaveable {
+        mutableStateOf(false)
+    }
+    var reopenExerciseManagerAfterEditor by rememberSaveable {
+        mutableStateOf(false)
+    }
+    var exerciseBeingEdited by remember {
+        mutableStateOf<FitnessExerciseDefinition?>(null)
+    }
+    var exercisePendingDeletion by remember {
+        mutableStateOf<FitnessExerciseDefinition?>(null)
     }
     var showStepCalibration by rememberSaveable {
         mutableStateOf(false)
@@ -133,6 +151,9 @@ fun FitnessScreen(
     }
     var recordPendingDeletion by remember {
         mutableStateOf<DailyFitnessRecord?>(null)
+    }
+    var datePickerRequest by remember {
+        mutableStateOf<FitnessDatePickerRequest?>(null)
     }
     var pageMessage by rememberSaveable {
         mutableStateOf("")
@@ -144,6 +165,9 @@ fun FitnessScreen(
         mutableStateOf(false)
     }
 
+    val stepDefinition = definitions.firstOrNull {
+        it.trackingType == FitnessTrackingType.STEP_COUNTER
+    }
     val sensorSupported = remember {
         stepCounterMonitor.isSupported()
     }
@@ -168,67 +192,73 @@ fun FitnessScreen(
     }
 
     /**
-     * 从仓库重新读取今天、历史和连续达标状态，保证每次写入后的界面数据保持一致。
+     * 重新读取项目、今日记录、区间结果和连续达标状态，保证每次写入后所有模块一致。
      */
     val refreshFitnessState = {
-        goals = repository.getGoals()
+        val refreshedDefinitions = repository.getExerciseDefinitions()
+        definitions = refreshedDefinitions
         todayRecord = repository.getTodayRecord(todayEpochDay)
-        recentRecords = repository.getRecentRecords(
-            days = historyDays,
-            endEpochDay = todayEpochDay
+        rangeRecords = repository.getRecordsInRange(
+            startEpochDay = rangeStartEpochDay,
+            endEpochDay = rangeEndEpochDay
         )
         streakDays = calculateCurrentStreak(
             records = repository.getRecentRecords(
                 days = STREAK_LOOKBACK_DAYS,
                 endEpochDay = todayEpochDay
             ),
-            todayEpochDay = todayEpochDay
+            todayEpochDay = todayEpochDay,
+            currentDefinitions = refreshedDefinitions
         )
     }
 
     /**
-     * 比较写入前后的当天记录，只在跨过目标门槛时通知伙伴系统。
-     * 减少记录、重复点击“完成”或仅浏览页面都不会触发新的经验任务。
+     * 比较写入前后的动态完成状态，只在跨过目标门槛时通知伙伴系统。
      */
     val reportNewCompanionMilestones = {
             previousRecord: DailyFitnessRecord,
             updatedRecord: DailyFitnessRecord ->
-        if (previousRecord.completedTaskCount() == 0 &&
-            updatedRecord.completedTaskCount() > 0
+        if (previousRecord.completedTaskCount(definitions) == 0 &&
+            updatedRecord.completedTaskCount(definitions) > 0
         ) {
             onCompanionTaskCompleted(CompanionTask.FITNESS_ITEM)
         }
-        if (!previousRecord.isComplete() && updatedRecord.isComplete()) {
+        if (!previousRecord.isComplete(definitions) && updatedRecord.isComplete(definitions)) {
             onCompanionTaskCompleted(CompanionTask.FITNESS_ALL)
         }
     }
 
-    // 页面长时间停留在前台时定期检查本地日期，跨过零点后自动切换到新一天的目标和记录。
+    // 页面长时间保持前台时每分钟检查日期，跨过零点自动进入新一天。
     LaunchedEffect(Unit) {
         while (isActive) {
             delay(DATE_REFRESH_INTERVAL_MILLIS)
             val currentEpochDay = LocalDate.now().toEpochDay()
             if (currentEpochDay != todayEpochDay) {
                 todayEpochDay = currentEpochDay
+                rangeEndEpochDay = currentEpochDay
             }
         }
     }
 
-    // 日期变化后统一刷新三项任务和历史数据，避免任何一项仍显示前一天状态。
-    LaunchedEffect(todayEpochDay, historyDays) {
+    // 日期区间变化后统一刷新，避免汇总与明细使用不同范围。
+    LaunchedEffect(todayEpochDay, rangeStartEpochDay, rangeEndEpochDay) {
         refreshFitnessState()
         pageMessage = ""
-        sensorMessage = ""
     }
 
-    // 只有页面可见且权限满足时才监听传感器，离开页面后立即释放，减少无意义耗电。
+    // 只有存在自动步数项目、手机支持且权限满足时才监听传感器。
     DisposableEffect(
         stepCounterMonitor,
+        stepDefinition?.id,
         sensorSupported,
         stepPermissionGranted,
         todayEpochDay
     ) {
-        sensorActive = if (sensorSupported && stepPermissionGranted) {
+        sensorActive = if (
+            stepDefinition != null &&
+            sensorSupported &&
+            stepPermissionGranted
+        ) {
             stepCounterMonitor.start { sensorTotal ->
                 val syncResult = repository.syncSensorSteps(
                     sensorTotal = sensorTotal,
@@ -238,22 +268,14 @@ fun FitnessScreen(
                     pageMessage = "步数保存失败，请稍后重试"
                 } else {
                     reportNewCompanionMilestones(todayRecord, syncResult.record)
-                    todayRecord = syncResult.record
-                    recentRecords = repository.getRecentRecords(
-                        days = historyDays,
-                        endEpochDay = todayEpochDay
-                    )
-                    streakDays = calculateCurrentStreak(
-                        records = repository.getRecentRecords(
-                            days = STREAK_LOOKBACK_DAYS,
-                            endEpochDay = todayEpochDay
-                        ),
-                        todayEpochDay = todayEpochDay
-                    )
-                    if (syncResult.baselineEstablished) {
-                        sensorMessage = "自动计步已开始，将从当前系统读数继续累计"
-                    } else if (syncResult.addedSteps > 0) {
-                        sensorMessage = "自动计步中"
+                    refreshFitnessState()
+                    sensorMessage = when {
+                        syncResult.baselineEstablished -> {
+                            "自动计步已开始，将从当前系统读数继续累计"
+                        }
+
+                        syncResult.addedSteps > 0 -> "自动计步中"
+                        else -> sensorMessage
                     }
                 }
             }
@@ -261,7 +283,12 @@ fun FitnessScreen(
             false
         }
 
-        if (sensorSupported && stepPermissionGranted && !sensorActive) {
+        if (
+            stepDefinition != null &&
+            sensorSupported &&
+            stepPermissionGranted &&
+            !sensorActive
+        ) {
             sensorMessage = "计步传感器暂时无法启动，可手动校准步数"
         }
 
@@ -270,30 +297,90 @@ fun FitnessScreen(
         }
     }
 
-    if (showGoalEditor) {
-        GoalEditorDialog(
-            goals = goals,
+    if (showExerciseManager) {
+        ExerciseManagerDialog(
+            definitions = definitions,
             onDismiss = {
-                showGoalEditor = false
+                showExerciseManager = false
             },
-            onSave = { newGoals ->
-                val saved = repository.saveGoals(
-                    goals = newGoals,
-                    todayEpochDay = todayEpochDay
-                )
-                if (saved) {
-                    refreshFitnessState()
-                    showGoalEditor = false
-                    pageMessage = "每日目标已更新"
-                }
-                saved
+            onAdd = {
+                exerciseBeingEdited = null
+                reopenExerciseManagerAfterEditor = true
+                showExerciseManager = false
+                showExerciseEditor = true
+            },
+            onEdit = { definition ->
+                exerciseBeingEdited = definition
+                reopenExerciseManagerAfterEditor = true
+                showExerciseManager = false
+                showExerciseEditor = true
+            },
+            onDelete = { definition ->
+                exercisePendingDeletion = definition
+                showExerciseManager = false
             }
         )
     }
 
-    if (showStepCalibration) {
+    if (showExerciseEditor) {
+        ExerciseEditorDialog(
+            definition = exerciseBeingEdited,
+            currentDefinitions = definitions,
+            onDismiss = {
+                showExerciseEditor = false
+                exerciseBeingEdited = null
+                showExerciseManager = reopenExerciseManagerAfterEditor
+                reopenExerciseManagerAfterEditor = false
+            },
+            onSave = { definition ->
+                val saved = repository.upsertExerciseDefinition(
+                    definition = definition,
+                    todayEpochDay = todayEpochDay
+                )
+                if (saved != null) {
+                    refreshFitnessState()
+                    showExerciseEditor = false
+                    exerciseBeingEdited = null
+                    showExerciseManager = reopenExerciseManagerAfterEditor
+                    reopenExerciseManagerAfterEditor = false
+                    pageMessage = if (definition.id.isBlank()) {
+                        "运动项目已新增"
+                    } else {
+                        "运动项目已更新"
+                    }
+                    true
+                } else {
+                    false
+                }
+            }
+        )
+    }
+
+    exercisePendingDeletion?.let { deletingDefinition ->
+        DeleteExerciseDefinitionDialog(
+            definition = deletingDefinition,
+            onDismiss = {
+                exercisePendingDeletion = null
+                showExerciseManager = true
+            },
+            onConfirm = {
+                val deleted = repository.deleteExerciseDefinition(deletingDefinition.id)
+                if (deleted) {
+                    exercisePendingDeletion = null
+                    refreshFitnessState()
+                    showExerciseManager = true
+                    pageMessage = "已删除项目“${deletingDefinition.name}”，历史记录仍保留"
+                } else {
+                    pageMessage = "运动项目删除失败，请重试"
+                }
+            }
+        )
+    }
+
+    if (showStepCalibration && stepDefinition != null) {
         StepCalibrationDialog(
-            currentSteps = todayRecord.steps,
+            definition = stepDefinition,
+            currentCount = todayRecord.countFor(stepDefinition.id),
             onDismiss = {
                 showStepCalibration = false
             },
@@ -306,7 +393,7 @@ fun FitnessScreen(
                     reportNewCompanionMilestones(todayRecord, updated)
                     refreshFitnessState()
                     showStepCalibration = false
-                    pageMessage = "今日步数已校准"
+                    pageMessage = "今日${stepDefinition.name}已校准"
                     true
                 } else {
                     false
@@ -326,11 +413,7 @@ fun FitnessScreen(
                 if (savedRecord != null) {
                     refreshFitnessState()
                     recordBeingEdited = null
-                    pageMessage = if (updatedRecord.hasRecordedActivity()) {
-                        "运动记录已保存"
-                    } else {
-                        "运动记录未发生变化"
-                    }
+                    pageMessage = "运动记录已保存"
                     true
                 } else {
                     false
@@ -350,11 +433,19 @@ fun FitnessScreen(
                 if (deleted) {
                     refreshFitnessState()
                     recordPendingDeletion = null
-                    pageMessage = "运动记录已删除"
+                    pageMessage = "${formatHistoryDate(deletingRecord.dateEpochDay, Long.MIN_VALUE)}记录已删除"
                 } else {
                     pageMessage = "运动记录删除失败，请重试"
                 }
             }
+        )
+    }
+
+    val rangeSummary = remember(rangeRecords, rangeStartEpochDay, rangeEndEpochDay) {
+        calculateFitnessRangeSummary(
+            records = rangeRecords,
+            startEpochDay = rangeStartEpochDay,
+            endEpochDay = rangeEndEpochDay
         )
     }
 
@@ -380,9 +471,10 @@ fun FitnessScreen(
         item {
             FitnessSummaryCard(
                 record = todayRecord,
+                definitions = definitions,
                 streakDays = streakDays,
-                onEditGoals = {
-                    showGoalEditor = true
+                onManageExercises = {
+                    showExerciseManager = true
                 }
             )
         }
@@ -405,218 +497,257 @@ fun FitnessScreen(
         }
 
         item {
-            Text(
-                text = "今日训练",
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.Bold
-            )
-        }
-
-        item {
-            ExerciseTaskCard(
-                title = "俯卧撑",
-                suggestion = "建议分组完成，动作标准比一次做完更重要",
-                count = todayRecord.pushUps,
-                goal = todayRecord.pushUpGoal,
-                onSubtract = {
-                    val updated = repository.updateExercise(
-                        exercise = FitnessExercise.PUSH_UP,
-                        delta = -QUICK_SUBTRACT_COUNT,
-                        epochDay = todayEpochDay
-                    )
-                    if (updated != null) {
-                        reportNewCompanionMilestones(todayRecord, updated)
-                        refreshFitnessState()
-                        pageMessage = "已减少$QUICK_SUBTRACT_COUNT 个俯卧撑"
-                    } else {
-                        pageMessage = "俯卧撑记录保存失败，请重试"
-                    }
-                },
-                onAddFive = {
-                    val updated = repository.updateExercise(
-                        exercise = FitnessExercise.PUSH_UP,
-                        delta = QUICK_ADD_SMALL_COUNT,
-                        epochDay = todayEpochDay
-                    )
-                    if (updated != null) {
-                        reportNewCompanionMilestones(todayRecord, updated)
-                        refreshFitnessState()
-                        pageMessage = "已记录$QUICK_ADD_SMALL_COUNT 个俯卧撑"
-                    } else {
-                        pageMessage = "俯卧撑记录保存失败，请重试"
-                    }
-                },
-                onAddTen = {
-                    val updated = repository.updateExercise(
-                        exercise = FitnessExercise.PUSH_UP,
-                        delta = QUICK_ADD_LARGE_COUNT,
-                        epochDay = todayEpochDay
-                    )
-                    if (updated != null) {
-                        reportNewCompanionMilestones(todayRecord, updated)
-                        refreshFitnessState()
-                        pageMessage = "已记录$QUICK_ADD_LARGE_COUNT 个俯卧撑"
-                    } else {
-                        pageMessage = "俯卧撑记录保存失败，请重试"
-                    }
-                },
-                onComplete = {
-                    val updated = repository.completeExercise(
-                        exercise = FitnessExercise.PUSH_UP,
-                        epochDay = todayEpochDay
-                    )
-                    if (updated != null) {
-                        reportNewCompanionMilestones(todayRecord, updated)
-                        refreshFitnessState()
-                        pageMessage = "俯卧撑已标记达标"
-                    } else {
-                        pageMessage = "俯卧撑记录保存失败，请重试"
-                    }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    modifier = Modifier.weight(1f),
+                    text = "今日训练",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold
+                )
+                TextButton(onClick = { showExerciseManager = true }) {
+                    Text(text = "管理项目")
                 }
-            )
+            }
         }
 
-        item {
-            ExerciseTaskCard(
-                title = "仰卧起坐",
-                suggestion = "腰背不适时请立即停止，不要为了数字勉强完成",
-                count = todayRecord.sitUps,
-                goal = todayRecord.sitUpGoal,
-                onSubtract = {
-                    val updated = repository.updateExercise(
-                        exercise = FitnessExercise.SIT_UP,
-                        delta = -QUICK_SUBTRACT_COUNT,
-                        epochDay = todayEpochDay
-                    )
-                    if (updated != null) {
-                        reportNewCompanionMilestones(todayRecord, updated)
-                        refreshFitnessState()
-                        pageMessage = "已减少$QUICK_SUBTRACT_COUNT 个仰卧起坐"
-                    } else {
-                        pageMessage = "仰卧起坐记录保存失败，请重试"
+        if (definitions.isEmpty()) {
+            item {
+                EmptyExerciseCard(
+                    onAddExercise = {
+                        exerciseBeingEdited = null
+                        reopenExerciseManagerAfterEditor = false
+                        showExerciseEditor = true
                     }
-                },
-                onAddFive = {
-                    val updated = repository.updateExercise(
-                        exercise = FitnessExercise.SIT_UP,
-                        delta = QUICK_ADD_SMALL_COUNT,
-                        epochDay = todayEpochDay
+                )
+            }
+        } else {
+            items(
+                items = definitions,
+                key = { definition -> definition.id }
+            ) { definition ->
+                val recordItem = todayRecord.itemFor(definition.id)
+                    ?: definition.toRecordItem()
+                if (definition.trackingType == FitnessTrackingType.STEP_COUNTER) {
+                    StepTaskCard(
+                        definition = definition,
+                        count = recordItem.count,
+                        sensorSupported = sensorSupported,
+                        permissionGranted = stepPermissionGranted,
+                        sensorActive = sensorActive,
+                        sensorMessage = sensorMessage,
+                        onRequestPermission = {
+                            if (permissionRequired) {
+                                permissionLauncher.launch(Manifest.permission.ACTIVITY_RECOGNITION)
+                            } else {
+                                stepPermissionGranted = true
+                            }
+                        },
+                        onCalibrate = {
+                            showStepCalibration = true
+                        },
+                        onSetGoal = {
+                            exerciseBeingEdited = definition
+                            reopenExerciseManagerAfterEditor = false
+                            showExerciseEditor = true
+                        }
                     )
-                    if (updated != null) {
-                        reportNewCompanionMilestones(todayRecord, updated)
-                        refreshFitnessState()
-                        pageMessage = "已记录$QUICK_ADD_SMALL_COUNT 个仰卧起坐"
-                    } else {
-                        pageMessage = "仰卧起坐记录保存失败，请重试"
-                    }
-                },
-                onAddTen = {
-                    val updated = repository.updateExercise(
-                        exercise = FitnessExercise.SIT_UP,
-                        delta = QUICK_ADD_LARGE_COUNT,
-                        epochDay = todayEpochDay
+                } else {
+                    ExerciseTaskCard(
+                        definition = definition,
+                        count = recordItem.count,
+                        goal = recordItem.goal,
+                        onSubtract = {
+                            val updated = repository.updateExercise(
+                                exerciseId = definition.id,
+                                delta = -definition.quickIncrement,
+                                epochDay = todayEpochDay
+                            )
+                            if (updated != null) {
+                                reportNewCompanionMilestones(todayRecord, updated)
+                                refreshFitnessState()
+                                pageMessage = "已减少${definition.quickIncrement}${definition.unit}${definition.name}"
+                            } else {
+                                pageMessage = "${definition.name}记录保存失败，请重试"
+                            }
+                        },
+                        onAddSmall = {
+                            val updated = repository.updateExercise(
+                                exerciseId = definition.id,
+                                delta = definition.quickIncrement,
+                                epochDay = todayEpochDay
+                            )
+                            if (updated != null) {
+                                reportNewCompanionMilestones(todayRecord, updated)
+                                refreshFitnessState()
+                                pageMessage = "已记录${definition.quickIncrement}${definition.unit}${definition.name}"
+                            } else {
+                                pageMessage = "${definition.name}记录保存失败，请重试"
+                            }
+                        },
+                        onAddLarge = {
+                            val largeIncrement = (definition.quickIncrement * 2)
+                                .coerceAtMost(MAX_RECORD_COUNT)
+                            val updated = repository.updateExercise(
+                                exerciseId = definition.id,
+                                delta = largeIncrement,
+                                epochDay = todayEpochDay
+                            )
+                            if (updated != null) {
+                                reportNewCompanionMilestones(todayRecord, updated)
+                                refreshFitnessState()
+                                pageMessage = "已记录$largeIncrement${definition.unit}${definition.name}"
+                            } else {
+                                pageMessage = "${definition.name}记录保存失败，请重试"
+                            }
+                        },
+                        onComplete = {
+                            val updated = repository.completeExercise(
+                                exerciseId = definition.id,
+                                epochDay = todayEpochDay
+                            )
+                            if (updated != null) {
+                                reportNewCompanionMilestones(todayRecord, updated)
+                                refreshFitnessState()
+                                pageMessage = "${definition.name}已标记达标"
+                            } else {
+                                pageMessage = "${definition.name}记录保存失败，请重试"
+                            }
+                        }
                     )
-                    if (updated != null) {
-                        reportNewCompanionMilestones(todayRecord, updated)
-                        refreshFitnessState()
-                        pageMessage = "已记录$QUICK_ADD_LARGE_COUNT 个仰卧起坐"
-                    } else {
-                        pageMessage = "仰卧起坐记录保存失败，请重试"
-                    }
-                },
-                onComplete = {
-                    val updated = repository.completeExercise(
-                        exercise = FitnessExercise.SIT_UP,
-                        epochDay = todayEpochDay
-                    )
-                    if (updated != null) {
-                        reportNewCompanionMilestones(todayRecord, updated)
-                        refreshFitnessState()
-                        pageMessage = "仰卧起坐已标记达标"
-                    } else {
-                        pageMessage = "仰卧起坐记录保存失败，请重试"
-                    }
                 }
-            )
+            }
         }
 
         item {
-            StepTaskCard(
-                steps = todayRecord.steps,
-                goal = todayRecord.stepGoal,
-                sensorSupported = sensorSupported,
-                permissionGranted = stepPermissionGranted,
-                sensorActive = sensorActive,
-                sensorMessage = sensorMessage,
-                onRequestPermission = {
-                    if (permissionRequired) {
-                        permissionLauncher.launch(Manifest.permission.ACTIVITY_RECOGNITION)
-                    } else {
-                        stepPermissionGranted = true
-                    }
+            FitnessRangeSummaryCard(
+                summary = rangeSummary,
+                onStartDateClick = {
+                    datePickerRequest = FitnessDatePickerRequest(
+                        title = "选择汇总开始日期",
+                        initialEpochDay = rangeStartEpochDay,
+                        minEpochDay = todayEpochDay - MAX_RECORD_LOOKBACK_DAYS + 1L,
+                        maxEpochDay = rangeEndEpochDay,
+                        onDateSelected = { selectedEpochDay ->
+                            rangeStartEpochDay = selectedEpochDay
+                        }
+                    )
                 },
-                onCalibrate = {
-                    showStepCalibration = true
+                onEndDateClick = {
+                    datePickerRequest = FitnessDatePickerRequest(
+                        title = "选择汇总结束日期",
+                        initialEpochDay = rangeEndEpochDay,
+                        minEpochDay = rangeStartEpochDay,
+                        maxEpochDay = todayEpochDay,
+                        onDateSelected = { selectedEpochDay ->
+                            rangeEndEpochDay = selectedEpochDay
+                        }
+                    )
+                },
+                onRecentDaysSelected = { days ->
+                    rangeEndEpochDay = todayEpochDay
+                    rangeStartEpochDay = todayEpochDay - days + 1L
                 }
             )
         }
 
         item {
             FitnessHistoryHeader(
-                historyDays = historyDays,
-                onHistoryDaysChanged = { selectedDays ->
-                    historyDays = selectedDays
-                },
+                recordCount = rangeRecords.size,
                 onAddRecord = {
-                    showFitnessDatePicker(
-                        context = context,
+                    datePickerRequest = FitnessDatePickerRequest(
+                        title = "选择运动补记日期",
                         initialEpochDay = todayEpochDay,
-                        maxEpochDay = todayEpochDay
-                    ) { selectedEpochDay ->
-                        recordBeingEdited = repository.getRecord(selectedEpochDay)
-                    }
+                        minEpochDay = todayEpochDay - MAX_RECORD_LOOKBACK_DAYS + 1L,
+                        maxEpochDay = todayEpochDay,
+                        onDateSelected = { selectedEpochDay ->
+                            recordBeingEdited = repository.getRecord(selectedEpochDay)
+                        }
+                    )
                 }
             )
         }
 
-        items(
-            items = recentRecords,
-            key = { record -> record.dateEpochDay }
-        ) { record ->
-            FitnessHistoryRow(
-                record = record,
-                todayEpochDay = todayEpochDay,
-                onEdit = {
-                    recordBeingEdited = repository.getRecord(record.dateEpochDay)
-                },
-                onDelete = {
-                    recordPendingDeletion = record
+        if (rangeRecords.isEmpty()) {
+            item {
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(18.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant
+                ) {
+                    Text(
+                        modifier = Modifier.padding(18.dp),
+                        text = "所选日期范围内还没有运动记录。可点击“补记”新增某一天的数据。",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
-            )
+            }
+        } else {
+            items(
+                items = rangeRecords,
+                key = { record -> record.dateEpochDay }
+            ) { record ->
+                FitnessHistoryRow(
+                    record = record,
+                    todayEpochDay = todayEpochDay,
+                    onEdit = {
+                        recordBeingEdited = repository.getRecord(record.dateEpochDay)
+                    },
+                    onDelete = {
+                        recordPendingDeletion = record
+                    }
+                )
+            }
         }
+    }
+
+    datePickerRequest?.let { request ->
+        HarleyDatePickerDialog(
+            visible = true,
+            title = request.title,
+            initialEpochDay = request.initialEpochDay,
+            minEpochDay = request.minEpochDay,
+            maxEpochDay = request.maxEpochDay,
+            onDismiss = {
+                datePickerRequest = null
+            },
+            onDateSelected = { selectedEpochDay ->
+                request.onDateSelected(selectedEpochDay)
+            }
+        )
     }
 }
 
 /**
- * 显示当天总进度、连续达标天数和目标设置入口。
+ * 显示当天动态项目完成率、连续达标天数和项目管理入口。
  *
- * @param record 当天记录。
- * @param streakDays 当前连续达标天数。
- * @param onEditGoals 点击设置目标后的回调。
+ * @param record 今天记录。
+ * @param definitions 当前启用项目。
+ * @param streakDays 连续全部达标天数。
+ * @param onManageExercises 打开项目管理的回调。
  *
  * @return 无返回值。
  */
 @Composable
 private fun FitnessSummaryCard(
     record: DailyFitnessRecord,
+    definitions: List<FitnessExerciseDefinition>,
     streakDays: Int,
-    onEditGoals: () -> Unit
+    onManageExercises: () -> Unit
 ) {
-    val completedCount = record.completedTaskCount()
-    val summaryText = if (record.isComplete()) {
-        "今天三项目标已全部完成"
+    val completedCount = record.completedTaskCount(definitions)
+    val totalCount = definitions.size
+    val summaryText = when {
+        totalCount == 0 -> "还没有运动项目，请先新增"
+        record.isComplete(definitions) -> "今天$totalCount 项目标已全部完成"
+        else -> "已完成$completedCount 项，还差${totalCount - completedCount}项"
+    }
+    val progress = if (totalCount > 0) {
+        completedCount.toFloat() / totalCount
     } else {
-        "已完成$completedCount 项，还差${DailyFitnessRecord.FITNESS_TASK_COUNT - completedCount}项"
+        0f
     }
 
     Card(
@@ -648,19 +779,16 @@ private fun FitnessSummaryCard(
                         color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.84f)
                     )
                 }
-
-                TextButton(onClick = onEditGoals) {
+                TextButton(onClick = onManageExercises) {
                     Text(
-                        text = "设置目标",
+                        text = "管理项目",
                         color = MaterialTheme.colorScheme.onPrimary
                     )
                 }
             }
 
             LinearProgressIndicator(
-                progress = {
-                    completedCount.toFloat() / DailyFitnessRecord.FITNESS_TASK_COUNT
-                },
+                progress = { progress },
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(9.dp),
@@ -670,9 +798,9 @@ private fun FitnessSummaryCard(
 
             Text(
                 text = if (streakDays > 0) {
-                    "连续达标 $streakDays 天"
+                    "连续全部达标 $streakDays 天"
                 } else {
-                    "完成今天三项任务，开始你的连续记录"
+                    "按自己的计划设置项目，完成后会自动统计"
                 },
                 style = MaterialTheme.typography.labelLarge,
                 color = MaterialTheme.colorScheme.onPrimary
@@ -682,32 +810,65 @@ private fun FitnessSummaryCard(
 }
 
 /**
- * 显示俯卧撑或仰卧起坐的单项进度与快速打卡按钮。
+ * 在当前没有项目时显示明确新增入口。
  *
- * @param title 项目名称。
- * @param suggestion 安全、可执行的训练提示。
- * @param count 当前完成次数。
- * @param goal 当天目标次数。
- * @param onSubtract 减少5次的回调，用于纠正误点。
- * @param onAddFive 增加5次的回调。
- * @param onAddTen 增加10次的回调。
- * @param onComplete 直接标记达到目标的回调。
+ * @param onAddExercise 打开新增项目编辑器的回调。
+ *
+ * @return 无返回值。
+ */
+@Composable
+private fun EmptyExerciseCard(onAddExercise: () -> Unit) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(20.dp)
+    ) {
+        Column(
+            modifier = Modifier.padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text(
+                text = "自由创建你的运动计划",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold
+            )
+            Text(
+                text = "可以添加跑步、跳绳、平板支撑、骑行等项目，并自定义单位、目标和快速增加量。",
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Button(onClick = onAddExercise) {
+                Text(text = "新增运动项目")
+            }
+        }
+    }
+}
+
+/**
+ * 显示一个手动运动项目的进度和快捷打卡按钮。
+ *
+ * @param definition 当前项目定义。
+ * @param count 今日完成量。
+ * @param goal 今日目标快照。
+ * @param onSubtract 减少一个快速增量的回调。
+ * @param onAddSmall 增加一个快速增量的回调。
+ * @param onAddLarge 增加两个快速增量的回调。
+ * @param onComplete 直接标记达标的回调。
  *
  * @return 无返回值。
  */
 @Composable
 private fun ExerciseTaskCard(
-    title: String,
-    suggestion: String,
+    definition: FitnessExerciseDefinition,
     count: Int,
     goal: Int,
     onSubtract: () -> Unit,
-    onAddFive: () -> Unit,
-    onAddTen: () -> Unit,
+    onAddSmall: () -> Unit,
+    onAddLarge: () -> Unit,
     onComplete: () -> Unit
 ) {
     val completed = count >= goal
     val progress = (count.toFloat() / goal.coerceAtLeast(1)).coerceIn(0f, 1f)
+    val quickIncrement = definition.quickIncrement
+    val largeIncrement = (quickIncrement * 2).coerceAtMost(MAX_RECORD_COUNT)
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -731,12 +892,16 @@ private fun ExerciseTaskCard(
             ) {
                 Text(
                     modifier = Modifier.weight(1f),
-                    text = title,
+                    text = definition.name,
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.Bold
                 )
                 Text(
-                    text = if (completed) "已达标" else "$count / $goal 次",
+                    text = if (completed) {
+                        "已达标"
+                    } else {
+                        "$count / $goal ${definition.unit}"
+                    },
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold,
                     color = if (completed) {
@@ -755,7 +920,7 @@ private fun ExerciseTaskCard(
             )
 
             Text(
-                text = suggestion,
+                text = "今日累计$count${definition.unit}，目标$goal${definition.unit}",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -770,29 +935,29 @@ private fun ExerciseTaskCard(
                     onClick = onSubtract,
                     contentPadding = PaddingValues(horizontal = 4.dp)
                 ) {
-                    Text(text = "-5")
+                    Text(text = "-$quickIncrement")
                 }
                 OutlinedButton(
                     modifier = Modifier.weight(1f),
-                    onClick = onAddFive,
+                    onClick = onAddSmall,
                     contentPadding = PaddingValues(horizontal = 4.dp)
                 ) {
-                    Text(text = "+5")
+                    Text(text = "+$quickIncrement")
                 }
                 OutlinedButton(
                     modifier = Modifier.weight(1f),
-                    onClick = onAddTen,
+                    onClick = onAddLarge,
                     contentPadding = PaddingValues(horizontal = 4.dp)
                 ) {
-                    Text(text = "+10")
+                    Text(text = "+$largeIncrement")
                 }
                 Button(
-                    modifier = Modifier.weight(1.25f),
+                    modifier = Modifier.weight(1.2f),
                     enabled = !completed,
                     onClick = onComplete,
                     contentPadding = PaddingValues(horizontal = 4.dp)
                 ) {
-                    Text(text = "完成")
+                    Text(text = "达标")
                 }
             }
         }
@@ -800,35 +965,38 @@ private fun ExerciseTaskCard(
 }
 
 /**
- * 显示步数进度、自动计步状态和手动校准入口。
+ * 显示自动步数项目进度、传感器状态和手动校准入口。
  *
- * @param steps 当前已记录步数。
- * @param goal 当天步数目标。
- * @param sensorSupported 手机是否提供累计计步传感器。
- * @param permissionGranted 是否已经获得身体活动权限。
- * @param sensorActive 传感器监听是否启动成功。
+ * @param definition 自动步数项目定义。
+ * @param count 当前步数。
+ * @param sensorSupported 手机是否提供计步传感器。
+ * @param permissionGranted 是否获得身体活动权限。
+ * @param sensorActive 传感器监听是否成功启动。
  * @param sensorMessage 最近一次计步状态说明。
- * @param onRequestPermission 请求身体活动权限的回调。
- * @param onCalibrate 打开手动步数校准的回调。
+ * @param onRequestPermission 请求权限的回调。
+ * @param onCalibrate 打开手动校准的回调。
+ * @param onSetGoal 直接打开当前步行项目目标设置的回调。
  *
  * @return 无返回值。
  */
 @Composable
 private fun StepTaskCard(
-    steps: Int,
-    goal: Int,
+    definition: FitnessExerciseDefinition,
+    count: Int,
     sensorSupported: Boolean,
     permissionGranted: Boolean,
     sensorActive: Boolean,
     sensorMessage: String,
     onRequestPermission: () -> Unit,
-    onCalibrate: () -> Unit
+    onCalibrate: () -> Unit,
+    onSetGoal: () -> Unit
 ) {
-    val completed = steps >= goal
-    val progress = (steps.toFloat() / goal.coerceAtLeast(1)).coerceIn(0f, 1f)
+    val completed = count >= definition.dailyGoal
+    val progress = (count.toFloat() / definition.dailyGoal.coerceAtLeast(1))
+        .coerceIn(0f, 1f)
     val statusText = when {
         !sensorSupported -> "本机没有可用计步传感器，请使用手动校准"
-        !permissionGranted -> "允许身体活动权限后，可在运动页打开时自动累计步数"
+        !permissionGranted -> "允许身体活动权限后，可在运动页打开时自动累计"
         sensorActive && sensorMessage.isNotBlank() -> sensorMessage
         sensorActive -> "自动计步中"
         else -> "计步传感器暂时不可用，请使用手动校准"
@@ -843,8 +1011,7 @@ private fun StepTaskCard(
             } else {
                 MaterialTheme.colorScheme.surface
             }
-        ),
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+        )
     ) {
         Column(
             modifier = Modifier.padding(18.dp),
@@ -856,12 +1023,16 @@ private fun StepTaskCard(
             ) {
                 Text(
                     modifier = Modifier.weight(1f),
-                    text = "步行",
+                    text = definition.name,
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.Bold
                 )
                 Text(
-                    text = if (completed) "已达标" else "$steps / $goal 步",
+                    text = if (completed) {
+                        "已达标"
+                    } else {
+                        "$count / ${definition.dailyGoal} ${definition.unit}"
+                    },
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.tertiary
@@ -894,12 +1065,17 @@ private fun StepTaskCard(
                         Text(text = "开启自动计步")
                     }
                 }
-
                 OutlinedButton(
                     modifier = Modifier.weight(1f),
                     onClick = onCalibrate
                 ) {
-                    Text(text = "校准步数")
+                    Text(text = "校准${definition.name}")
+                }
+                OutlinedButton(
+                    modifier = Modifier.weight(1f),
+                    onClick = onSetGoal
+                ) {
+                    Text(text = "设置目标")
                 }
             }
         }
@@ -907,77 +1083,168 @@ private fun StepTaskCard(
 }
 
 /**
- * 显示历史查询范围和新增补记入口。
+ * 显示任意日期区间选择、总体天数和各项目累计结果。
  *
- * @param historyDays 当前查询天数，仅使用7天或30天。
- * @param onHistoryDaysChanged 用户切换查询范围后的回调。
- * @param onAddRecord 用户点击补记后的回调。
+ * @param summary 已计算的区间汇总。
+ * @param onStartDateClick 选择开始日期的回调。
+ * @param onEndDateClick 选择结束日期的回调。
+ * @param onRecentDaysSelected 快速选择最近若干天的回调。
+ *
+ * @return 无返回值。
+ */
+@Composable
+private fun FitnessRangeSummaryCard(
+    summary: FitnessRangeSummary,
+    onStartDateClick: () -> Unit,
+    onEndDateClick: () -> Unit,
+    onRecentDaysSelected: (Long) -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(22.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        )
+    ) {
+        Column(
+            modifier = Modifier.padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text(
+                text = "日期区间汇总",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold
+            )
+            Text(
+                text = "选择任意开始和结束日期，汇总会与下方明细同步更新。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedButton(
+                    modifier = Modifier.weight(1f),
+                    onClick = onStartDateClick
+                ) {
+                    Text(text = "开始 ${formatCompactDate(summary.startEpochDay)}")
+                }
+                OutlinedButton(
+                    modifier = Modifier.weight(1f),
+                    onClick = onEndDateClick
+                ) {
+                    Text(text = "结束 ${formatCompactDate(summary.endEpochDay)}")
+                }
+            }
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(onClick = { onRecentDaysSelected(7L) }) {
+                    Text(text = "最近7天")
+                }
+                TextButton(onClick = { onRecentDaysSelected(30L) }) {
+                    Text(text = "最近30天")
+                }
+            }
+
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(14.dp),
+                color = MaterialTheme.colorScheme.secondaryContainer
+            ) {
+                Column(
+                    modifier = Modifier.padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        text = "有记录 ${summary.recordedDays} 天 / 共 ${summary.totalDays} 天",
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "全部项目达标 ${summary.fullyCompletedDays} 天",
+                        color = MaterialTheme.colorScheme.onSecondaryContainer
+                    )
+                }
+            }
+
+            if (summary.itemSummaries.isEmpty()) {
+                Text(
+                    text = "这个范围内还没有可以汇总的运动量。",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else {
+                summary.itemSummaries.forEach { item ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = item.name,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = "运动${item.activeDays}天 · 达标${item.goalReachedDays}天",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Text(
+                            text = "${item.totalCount}${item.unit}",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 显示记录明细标题、当前记录数量和补记入口。
+ *
+ * @param recordCount 当前日期区间内真实记录数量。
+ * @param onAddRecord 打开补记日期选择器的回调。
  *
  * @return 无返回值。
  */
 @Composable
 private fun FitnessHistoryHeader(
-    historyDays: Int,
-    onHistoryDaysChanged: (Int) -> Unit,
+    recordCount: Int,
     onAddRecord: () -> Unit
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(2.dp)
-            ) {
-                Text(
-                    text = "运动记录",
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold
-                )
-                Text(
-                    text = "可补记、编辑和删除；历史目标按当天设置计算",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-
-            Button(onClick = onAddRecord) {
-                Text(text = "补记")
-            }
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = "记录明细",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold
+            )
+            Text(
+                text = "共$recordCount 条；每条都可编辑或删除",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
-
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (historyDays == HISTORY_DAYS_WEEK) {
-                Button(onClick = { onHistoryDaysChanged(HISTORY_DAYS_WEEK) }) {
-                    Text(text = "近7天")
-                }
-            } else {
-                OutlinedButton(onClick = { onHistoryDaysChanged(HISTORY_DAYS_WEEK) }) {
-                    Text(text = "近7天")
-                }
-            }
-
-            if (historyDays == HISTORY_DAYS_MONTH) {
-                Button(onClick = { onHistoryDaysChanged(HISTORY_DAYS_MONTH) }) {
-                    Text(text = "近30天")
-                }
-            } else {
-                OutlinedButton(onClick = { onHistoryDaysChanged(HISTORY_DAYS_MONTH) }) {
-                    Text(text = "近30天")
-                }
-            }
+        Button(onClick = onAddRecord) {
+            Text(text = "补记")
         }
     }
 }
 
 /**
- * 显示单日三项运动的完成摘要及编辑、删除入口。
+ * 显示单日动态项目摘要，并提供始终可见的编辑、删除按钮。
  *
- * @param record 需要展示的历史记录。
- * @param todayEpochDay 今天日期序号，用于显示“今天”标记。
- * @param onEdit 编辑该日期记录的回调。
- * @param onDelete 删除该日期记录的回调。
+ * @param record 已保存且至少有一项完成量的记录。
+ * @param todayEpochDay 今天日期，用于增加“今天”标记。
+ * @param onEdit 编辑回调。
+ * @param onDelete 删除回调。
  *
  * @return 无返回值。
  */
@@ -988,7 +1255,11 @@ private fun FitnessHistoryRow(
     onEdit: () -> Unit,
     onDelete: () -> Unit
 ) {
-    val completedCount = record.completedTaskCount()
+    val summaryText = record.items
+        .filter { it.count > 0 }
+        .joinToString(separator = "  ·  ") { item ->
+            "${item.name} ${item.count}${item.unit}"
+        }
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -999,7 +1270,7 @@ private fun FitnessHistoryRow(
     ) {
         Column(
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 13.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp)
+            verticalArrangement = Arrangement.spacedBy(7.dp)
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -1015,7 +1286,7 @@ private fun FitnessHistoryRow(
                     text = if (record.isComplete()) {
                         "全部达标"
                     } else {
-                        "$completedCount / ${DailyFitnessRecord.FITNESS_TASK_COUNT} 项"
+                        "${record.completedTaskCount()} / ${record.items.size} 项"
                     },
                     style = MaterialTheme.typography.labelLarge,
                     color = if (record.isComplete()) {
@@ -1027,33 +1298,26 @@ private fun FitnessHistoryRow(
             }
 
             Text(
-                text = "俯卧撑 ${record.pushUps}/${record.pushUpGoal}  ·  " +
-                    "仰卧起坐 ${record.sitUps}/${record.sitUpGoal}  ·  " +
-                    "步数 ${record.steps}/${record.stepGoal}",
-                style = MaterialTheme.typography.bodySmall,
+                text = summaryText,
+                style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
+                maxLines = 3,
                 overflow = TextOverflow.Ellipsis
             )
 
-            if (record.hasRecordedActivity()) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.End
-                ) {
-                    TextButton(onClick = onEdit) {
-                        Text(text = "编辑")
-                    }
-                    TextButton(onClick = onDelete) {
-                        Text(
-                            text = "删除",
-                            color = MaterialTheme.colorScheme.error
-                        )
-                    }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End
+            ) {
+                OutlinedButton(onClick = onEdit) {
+                    Text(text = "编辑")
                 }
-            } else {
-                TextButton(onClick = onEdit) {
-                    Text(text = "补记这一天")
+                Spacer(modifier = Modifier.width(8.dp))
+                OutlinedButton(onClick = onDelete) {
+                    Text(
+                        text = "删除这一天",
+                        color = MaterialTheme.colorScheme.error
+                    )
                 }
             }
         }
@@ -1061,87 +1325,237 @@ private fun FitnessHistoryRow(
 }
 
 /**
- * 新增或编辑某一天的完整运动记录。
+ * 管理当前动态运动项目列表。
  *
- * 使用方法：
- * 用户从“补记”日期选择器或历史行“编辑”进入。三个输入框表示当天总完成量，
- * 至少填写一项大于0的数据后才能保存；保存时保留该日期原有目标快照。
- *
- * @param record 待新增或编辑的记录；空占位记录表示新增。
- * @param onDismiss 取消编辑的回调。
- * @param onSave 保存回调；写入成功返回true，失败返回false并保留对话框。
+ * @param definitions 当前项目列表。
+ * @param onDismiss 关闭管理器的回调。
+ * @param onAdd 新增项目回调。
+ * @param onEdit 编辑指定项目回调。
+ * @param onDelete 删除指定项目回调。
  *
  * @return 无返回值。
  */
 @Composable
-private fun FitnessRecordEditorDialog(
-    record: DailyFitnessRecord,
+private fun ExerciseManagerDialog(
+    definitions: List<FitnessExerciseDefinition>,
     onDismiss: () -> Unit,
-    onSave: (DailyFitnessRecord) -> Boolean
+    onAdd: () -> Unit,
+    onEdit: (FitnessExerciseDefinition) -> Unit,
+    onDelete: (FitnessExerciseDefinition) -> Unit
 ) {
-    var pushUpText by rememberSaveable(record.dateEpochDay, record.pushUps) {
-        mutableStateOf(record.pushUps.toString())
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(text = "管理运动项目")
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 520.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    text = "可新增、修改或删除。删除项目不会删除以前日期已经保存的运动数据。",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                if (definitions.isEmpty()) {
+                    Text(text = "当前没有项目。")
+                }
+
+                definitions.forEach { definition ->
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(14.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = definition.name,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Text(
+                                        text = "目标 ${definition.dailyGoal}${definition.unit}" +
+                                            if (definition.trackingType == FitnessTrackingType.STEP_COUNTER) {
+                                                " · 自动计步"
+                                            } else {
+                                                " · 每次+${definition.quickIncrement}"
+                                            },
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                TextButton(onClick = { onEdit(definition) }) {
+                                    Text(text = "编辑")
+                                }
+                                TextButton(onClick = { onDelete(definition) }) {
+                                    Text(
+                                        text = "删除",
+                                        color = MaterialTheme.colorScheme.error
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = onAdd) {
+                Text(text = "新增项目")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(text = "完成")
+            }
+        }
+    )
+}
+
+/**
+ * 新增或编辑单个运动项目。
+ *
+ * @param definition 正在编辑的项目；null表示新增。
+ * @param currentDefinitions 当前项目列表，用于检查名称和自动步数类型是否重复。
+ * @param onDismiss 取消回调。
+ * @param onSave 保存回调；成功返回true。
+ *
+ * @return 无返回值。
+ */
+@Composable
+private fun ExerciseEditorDialog(
+    definition: FitnessExerciseDefinition?,
+    currentDefinitions: List<FitnessExerciseDefinition>,
+    onDismiss: () -> Unit,
+    onSave: (FitnessExerciseDefinition) -> Boolean
+) {
+    var nameText by rememberSaveable(definition?.id) {
+        mutableStateOf(definition?.name.orEmpty())
     }
-    var sitUpText by rememberSaveable(record.dateEpochDay, record.sitUps) {
-        mutableStateOf(record.sitUps.toString())
+    var unitText by rememberSaveable(definition?.id) {
+        mutableStateOf(definition?.unit ?: "次")
     }
-    var stepText by rememberSaveable(record.dateEpochDay, record.steps) {
-        mutableStateOf(record.steps.toString())
+    var goalText by rememberSaveable(definition?.id) {
+        mutableStateOf(definition?.dailyGoal?.toString() ?: "30")
     }
-    var errorText by rememberSaveable(record.dateEpochDay) {
+    var quickText by rememberSaveable(definition?.id) {
+        mutableStateOf(definition?.quickIncrement?.toString() ?: "5")
+    }
+    var trackingType by rememberSaveable(definition?.id) {
+        mutableStateOf(definition?.trackingType ?: FitnessTrackingType.MANUAL)
+    }
+    var errorText by rememberSaveable(definition?.id) {
         mutableStateOf("")
+    }
+    val anotherStepDefinitionExists = currentDefinitions.any { existing ->
+        existing.id != definition?.id &&
+            existing.trackingType == FitnessTrackingType.STEP_COUNTER
     }
 
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
-            Text(
-                text = if (record.hasRecordedActivity()) {
-                    "编辑运动记录"
-                } else {
-                    "补记运动"
-                }
-            )
+            Text(text = if (definition == null) "新增运动项目" else "编辑运动项目")
         },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text(
-                    text = LocalDate.ofEpochDay(record.dateEpochDay).format(
-                        DateTimeFormatter.ofPattern("yyyy年M月d日 EEEE", Locale.CHINA)
-                    ),
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 520.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                OutlinedTextField(
+                    modifier = Modifier.fillMaxWidth(),
+                    value = nameText,
+                    onValueChange = {
+                        nameText = it.take(MAX_EXERCISE_NAME_LENGTH)
+                        errorText = ""
+                    },
+                    label = { Text(text = "项目名称") },
+                    singleLine = true
                 )
-                Text(
-                    text = "当天目标：俯卧撑 ${record.pushUpGoal} 次、" +
-                        "仰卧起坐 ${record.sitUpGoal} 次、步数 ${record.stepGoal} 步",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                OutlinedTextField(
+                    modifier = Modifier.fillMaxWidth(),
+                    value = unitText,
+                    onValueChange = {
+                        unitText = it.take(MAX_EXERCISE_UNIT_LENGTH)
+                        errorText = ""
+                    },
+                    label = { Text(text = "单位，例如 次、分钟、公里") },
+                    singleLine = true
+                )
+                GoalNumberField(
+                    value = goalText,
+                    onValueChange = {
+                        goalText = it.filter(Char::isDigit).take(MAX_NUMBER_INPUT_LENGTH)
+                        errorText = ""
+                    },
+                    label = "每日目标"
                 )
 
-                GoalNumberField(
-                    value = pushUpText,
-                    onValueChange = {
-                        pushUpText = it.filter(Char::isDigit).take(MAX_STEP_INPUT_LENGTH)
-                        errorText = ""
-                    },
-                    label = "俯卧撑完成次数"
+                Text(
+                    text = "记录方式",
+                    fontWeight = FontWeight.SemiBold
                 )
-                GoalNumberField(
-                    value = sitUpText,
-                    onValueChange = {
-                        sitUpText = it.filter(Char::isDigit).take(MAX_STEP_INPUT_LENGTH)
-                        errorText = ""
-                    },
-                    label = "仰卧起坐完成次数"
-                )
-                GoalNumberField(
-                    value = stepText,
-                    onValueChange = {
-                        stepText = it.filter(Char::isDigit).take(MAX_STEP_INPUT_LENGTH)
-                        errorText = ""
-                    },
-                    label = "步数"
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (trackingType == FitnessTrackingType.MANUAL) {
+                        Button(onClick = { trackingType = FitnessTrackingType.MANUAL }) {
+                            Text(text = "手动记录")
+                        }
+                    } else {
+                        OutlinedButton(onClick = { trackingType = FitnessTrackingType.MANUAL }) {
+                            Text(text = "手动记录")
+                        }
+                    }
+
+                    if (trackingType == FitnessTrackingType.STEP_COUNTER) {
+                        Button(onClick = { trackingType = FitnessTrackingType.STEP_COUNTER }) {
+                            Text(text = "手机自动步数")
+                        }
+                    } else {
+                        OutlinedButton(
+                            enabled = !anotherStepDefinitionExists,
+                            onClick = { trackingType = FitnessTrackingType.STEP_COUNTER }
+                        ) {
+                            Text(text = "手机自动步数")
+                        }
+                    }
+                }
+
+                if (anotherStepDefinitionExists) {
+                    Text(
+                        text = "当前已有一个自动步数项目；同一时间只能保留一个。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                if (trackingType == FitnessTrackingType.MANUAL) {
+                    GoalNumberField(
+                        value = quickText,
+                        onValueChange = {
+                            quickText = it.filter(Char::isDigit).take(MAX_NUMBER_INPUT_LENGTH)
+                            errorText = ""
+                        },
+                        label = "快速增加量"
+                    )
+                }
+
+                Text(
+                    text = "数量按非负整数保存；例如跑步可使用“分钟”，骑行可使用“公里”。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
 
                 if (errorText.isNotBlank()) {
@@ -1156,35 +1570,41 @@ private fun FitnessRecordEditorDialog(
         confirmButton = {
             Button(
                 onClick = {
-                    val pushUps = pushUpText.toIntOrNull()
-                    val sitUps = sitUpText.toIntOrNull()
-                    val steps = stepText.toIntOrNull()
+                    val safeName = nameText.trim()
+                    val safeUnit = unitText.trim()
+                    val goal = goalText.toIntOrNull()
+                    val quickIncrement = if (trackingType == FitnessTrackingType.STEP_COUNTER) {
+                        definition?.quickIncrement ?: 1_000
+                    } else {
+                        quickText.toIntOrNull()
+                    }
                     errorText = when {
-                        pushUps == null || pushUps !in 0..MAX_RECORD_COUNT -> {
-                            "俯卧撑请输入0到1000000"
+                        safeName.isBlank() -> "请输入项目名称"
+                        safeUnit.isBlank() -> "请输入数量单位"
+                        currentDefinitions.any { existing ->
+                            existing.id != definition?.id &&
+                                existing.name.equals(safeName, ignoreCase = true)
+                        } -> "项目名称不能重复"
+                        goal == null || goal !in MIN_EXERCISE_GOAL..MAX_RECORD_COUNT -> {
+                            "每日目标请输入1到1000000"
                         }
-
-                        sitUps == null || sitUps !in 0..MAX_RECORD_COUNT -> {
-                            "仰卧起坐请输入0到1000000"
+                        quickIncrement == null ||
+                            quickIncrement !in MIN_QUICK_INCREMENT..MAX_QUICK_INCREMENT -> {
+                            "快速增加量请输入1到100000"
                         }
-
-                        steps == null || steps !in 0..MAX_RECORD_COUNT -> {
-                            "步数请输入0到1000000"
-                        }
-
-                        pushUps == 0 && sitUps == 0 && steps == 0 -> {
-                            "至少需要记录一项大于0的运动量"
-                        }
-
+                        trackingType == FitnessTrackingType.STEP_COUNTER &&
+                            anotherStepDefinitionExists -> "自动步数项目只能有一个"
                         onSave(
-                            record.copy(
-                                pushUps = pushUps,
-                                sitUps = sitUps,
-                                steps = steps
+                            FitnessExerciseDefinition(
+                                id = definition?.id.orEmpty(),
+                                name = safeName,
+                                unit = safeUnit,
+                                dailyGoal = goal,
+                                quickIncrement = quickIncrement,
+                                trackingType = trackingType
                             )
                         ) -> ""
-
-                        else -> "运动记录保存失败，请重试"
+                        else -> "项目保存失败，请重试"
                     }
                 }
             ) {
@@ -1200,29 +1620,27 @@ private fun FitnessRecordEditorDialog(
 }
 
 /**
- * 删除单日运动记录前进行二次确认，避免误触造成历史数据丢失。
+ * 删除运动项目前二次确认，并明确历史数据保留策略。
  *
- * @param record 即将删除的记录。
- * @param onDismiss 取消删除的回调。
- * @param onConfirm 用户确认删除后的回调。
+ * @param definition 即将删除的项目。
+ * @param onDismiss 取消回调。
+ * @param onConfirm 确认删除回调。
  *
  * @return 无返回值。
  */
 @Composable
-private fun DeleteFitnessRecordDialog(
-    record: DailyFitnessRecord,
+private fun DeleteExerciseDefinitionDialog(
+    definition: FitnessExerciseDefinition,
     onDismiss: () -> Unit,
     onConfirm: () -> Unit
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = {
-            Text(text = "删除运动记录")
-        },
+        title = { Text(text = "删除运动项目") },
         text = {
             Text(
-                text = "确定删除${formatHistoryDate(record.dateEpochDay, Long.MIN_VALUE)}的记录吗？" +
-                    "删除后当天完成量将归零，目标设置不会改变。"
+                text = "确定删除“${definition.name}”吗？今日训练将不再显示它，" +
+                    "但以前日期已经保存的${definition.name}数据仍会保留在历史和汇总中。"
             )
         },
         confirmButton = {
@@ -1242,119 +1660,69 @@ private fun DeleteFitnessRecordDialog(
 }
 
 /**
- * 打开系统日期选择器，供用户选择需要补记的过去日期。
+ * 新增或编辑某一天所有动态项目的完整运动量。
  *
- * 使用方法：
- * “补记”按钮调用本函数。可选范围限制为最近365天且不允许选择未来日期，
- * 避免误建无意义的未来运动记录。
- *
- * @param context 用于创建系统DatePickerDialog的页面上下文。
- * @param initialEpochDay 日期选择器初始日期序号。
- * @param maxEpochDay 允许选择的最晚日期，通常为今天。
- * @param onDateSelected 用户确认日期后的回调，参数为选中日期序号。
- *
- * @return 无返回值。
- */
-private fun showFitnessDatePicker(
-    context: Context,
-    initialEpochDay: Long,
-    maxEpochDay: Long,
-    onDateSelected: (Long) -> Unit
-) {
-    val minEpochDay = maxEpochDay - MAX_RECORD_LOOKBACK_DAYS + 1L
-    val safeInitialEpochDay = initialEpochDay.coerceIn(minEpochDay, maxEpochDay)
-    val initialDate = LocalDate.ofEpochDay(safeInitialEpochDay)
-    val zoneId = ZoneId.systemDefault()
-
-    DatePickerDialog(
-        context,
-        { _, year, month, dayOfMonth ->
-            onDateSelected(
-                LocalDate.of(year, month + 1, dayOfMonth).toEpochDay()
-            )
-        },
-        initialDate.year,
-        initialDate.monthValue - 1,
-        initialDate.dayOfMonth
-    ).apply {
-        datePicker.minDate = LocalDate.ofEpochDay(minEpochDay)
-            .atStartOfDay(zoneId)
-            .toInstant()
-            .toEpochMilli()
-        datePicker.maxDate = LocalDate.ofEpochDay(maxEpochDay)
-            .atStartOfDay(zoneId)
-            .toInstant()
-            .toEpochMilli()
-    }.show()
-}
-
-/**
- * 编辑三项每日目标。
- *
- * @param goals 当前目标，用于填充输入框。
- * @param onDismiss 取消编辑的回调。
- * @param onSave 保存回调；返回true时关闭对话框，false时保留输入供用户重试。
+ * @param record 待编辑记录，包含历史项目快照和当前可用项目。
+ * @param onDismiss 取消回调。
+ * @param onSave 保存回调；成功返回true。
  *
  * @return 无返回值。
  */
 @Composable
-private fun GoalEditorDialog(
-    goals: FitnessGoals,
+private fun FitnessRecordEditorDialog(
+    record: DailyFitnessRecord,
     onDismiss: () -> Unit,
-    onSave: (FitnessGoals) -> Boolean
+    onSave: (DailyFitnessRecord) -> Boolean
 ) {
-    var pushUpText by rememberSaveable(goals.pushUpGoal) {
-        mutableStateOf(goals.pushUpGoal.toString())
+    var countTexts by remember(record.dateEpochDay, record.items) {
+        mutableStateOf(
+            record.items.associate { item ->
+                item.exerciseId to item.count.toString()
+            }
+        )
     }
-    var sitUpText by rememberSaveable(goals.sitUpGoal) {
-        mutableStateOf(goals.sitUpGoal.toString())
-    }
-    var stepText by rememberSaveable(goals.stepGoal) {
-        mutableStateOf(goals.stepGoal.toString())
-    }
-    var errorText by rememberSaveable {
+    var errorText by remember(record.dateEpochDay) {
         mutableStateOf("")
     }
 
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
-            Text(text = "设置每日目标")
+            Text(text = if (record.hasRecordedActivity()) "编辑运动记录" else "补记运动")
         },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 520.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
                 Text(
-                    text = "目标要能长期坚持，完成后仍可继续累计，不会截断超额记录。",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    text = LocalDate.ofEpochDay(record.dateEpochDay).format(
+                        DateTimeFormatter.ofPattern("yyyy年M月d日 EEEE", Locale.CHINA)
+                    ),
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold
                 )
 
-                GoalNumberField(
-                    value = pushUpText,
-                    onValueChange = {
-                        pushUpText = it.filter(Char::isDigit).take(MAX_NUMBER_INPUT_LENGTH)
-                        errorText = ""
-                    },
-                    label = "俯卧撑（次）"
-                )
+                if (record.items.isEmpty()) {
+                    Text(text = "没有可记录的运动项目，请先到“管理项目”新增。")
+                }
 
-                GoalNumberField(
-                    value = sitUpText,
-                    onValueChange = {
-                        sitUpText = it.filter(Char::isDigit).take(MAX_NUMBER_INPUT_LENGTH)
-                        errorText = ""
-                    },
-                    label = "仰卧起坐（次）"
-                )
-
-                GoalNumberField(
-                    value = stepText,
-                    onValueChange = {
-                        stepText = it.filter(Char::isDigit).take(MAX_NUMBER_INPUT_LENGTH)
-                        errorText = ""
-                    },
-                    label = "步数（步）"
-                )
+                record.items.forEach { item ->
+                    GoalNumberField(
+                        value = countTexts[item.exerciseId].orEmpty(),
+                        onValueChange = { changedText ->
+                            countTexts = countTexts + (
+                                item.exerciseId to changedText
+                                    .filter(Char::isDigit)
+                                    .take(MAX_NUMBER_INPUT_LENGTH)
+                                )
+                            errorText = ""
+                        },
+                        label = "${item.name}（${item.unit}，当天目标${item.goal}）"
+                    )
+                }
 
                 if (errorText.isNotBlank()) {
                     Text(
@@ -1367,32 +1735,32 @@ private fun GoalEditorDialog(
         },
         confirmButton = {
             Button(
+                enabled = record.items.isNotEmpty(),
                 onClick = {
-                    val pushUpGoal = pushUpText.toIntOrNull()
-                    val sitUpGoal = sitUpText.toIntOrNull()
-                    val stepGoal = stepText.toIntOrNull()
+                    val parsedCounts = record.items.associate { item ->
+                        item.exerciseId to countTexts[item.exerciseId]?.toIntOrNull()
+                    }
+                    val invalidItem = record.items.firstOrNull { item ->
+                        val count = parsedCounts[item.exerciseId]
+                        count == null || count !in 0..MAX_RECORD_COUNT
+                    }
+                    val hasPositiveCount = parsedCounts.values.any { count ->
+                        count != null && count > 0
+                    }
+
                     errorText = when {
-                        pushUpGoal == null || pushUpGoal !in MIN_EXERCISE_GOAL..MAX_EXERCISE_GOAL -> {
-                            "俯卧撑目标请输入1到1000"
+                        invalidItem != null -> {
+                            "${invalidItem.name}请输入0到1000000"
                         }
-
-                        sitUpGoal == null || sitUpGoal !in MIN_EXERCISE_GOAL..MAX_EXERCISE_GOAL -> {
-                            "仰卧起坐目标请输入1到1000"
-                        }
-
-                        stepGoal == null || stepGoal !in MIN_STEP_GOAL..MAX_STEP_GOAL -> {
-                            "步数目标请输入100到100000"
-                        }
-
+                        !hasPositiveCount -> "至少需要记录一项大于0的运动量"
                         onSave(
-                            FitnessGoals(
-                                pushUpGoal = pushUpGoal,
-                                sitUpGoal = sitUpGoal,
-                                stepGoal = stepGoal
+                            record.copy(
+                                items = record.items.map { item ->
+                                    item.copy(count = parsedCounts[item.exerciseId] ?: 0)
+                                }
                             )
                         ) -> ""
-
-                        else -> "目标保存失败，请重试"
+                        else -> "运动记录保存失败，请重试"
                     }
                 }
             ) {
@@ -1408,11 +1776,124 @@ private fun GoalEditorDialog(
 }
 
 /**
- * 输入单个数字目标，统一数字键盘、单行和圆角样式。
+ * 删除单日完整记录前二次确认。
  *
- * @param value 当前输入文本。
+ * @param record 即将删除的记录。
+ * @param onDismiss 取消回调。
+ * @param onConfirm 确认删除回调。
+ *
+ * @return 无返回值。
+ */
+@Composable
+private fun DeleteFitnessRecordDialog(
+    record: DailyFitnessRecord,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(text = "删除这一天的记录") },
+        text = {
+            Text(
+                text = "确定删除${formatHistoryDate(record.dateEpochDay, Long.MIN_VALUE)}的全部运动记录吗？" +
+                    "该操作不会删除运动项目设置。"
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) {
+                Text(
+                    text = "确认删除",
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(text = "取消")
+            }
+        }
+    )
+}
+
+/**
+ * 手动设置自动步数项目当天总数。
+ *
+ * @param definition 自动步数项目定义。
+ * @param currentCount 当前完成量。
+ * @param onDismiss 取消回调。
+ * @param onSave 保存回调；成功返回true。
+ *
+ * @return 无返回值。
+ */
+@Composable
+private fun StepCalibrationDialog(
+    definition: FitnessExerciseDefinition,
+    currentCount: Int,
+    onDismiss: () -> Unit,
+    onSave: (Int) -> Boolean
+) {
+    var countText by rememberSaveable(currentCount) {
+        mutableStateOf(currentCount.toString())
+    }
+    var errorText by rememberSaveable {
+        mutableStateOf("")
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(text = "校准今日${definition.name}") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = "请输入手机健康应用或手环显示的今日总数，后续自动计步会在此基础上继续增加。",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                GoalNumberField(
+                    value = countText,
+                    onValueChange = {
+                        countText = it.filter(Char::isDigit).take(MAX_NUMBER_INPUT_LENGTH)
+                        errorText = ""
+                    },
+                    label = "今日总${definition.unit}数"
+                )
+                if (errorText.isNotBlank()) {
+                    Text(
+                        text = errorText,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    val count = countText.toIntOrNull()
+                    errorText = when {
+                        count == null || count !in 0..MAX_RECORD_COUNT -> {
+                            "请输入0到1000000"
+                        }
+                        onSave(count) -> ""
+                        else -> "保存失败，请重试"
+                    }
+                }
+            ) {
+                Text(text = "保存")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(text = "取消")
+            }
+        }
+    )
+}
+
+/**
+ * 显示统一数字输入框。
+ *
+ * @param value 当前文本。
  * @param onValueChange 输入变化回调。
- * @param label 输入框标题。
+ * @param label 输入框标签。
  *
  * @return 无返回值。
  */
@@ -1426,9 +1907,7 @@ private fun GoalNumberField(
         modifier = Modifier.fillMaxWidth(),
         value = value,
         onValueChange = onValueChange,
-        label = {
-            Text(text = label)
-        },
+        label = { Text(text = label) },
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
         singleLine = true,
         shape = RoundedCornerShape(14.dp)
@@ -1436,101 +1915,52 @@ private fun GoalNumberField(
 }
 
 /**
- * 手动设置当天总步数，作为传感器不可用或计步遗漏时的可靠后备入口。
+ * 描述运动页面某一次Material日历请求及确认后的业务写入动作。
  *
- * @param currentSteps 当前步数，用于填充输入框。
- * @param onDismiss 取消校准的回调。
- * @param onSave 保存回调；返回true表示写入成功。
- *
- * @return 无返回值。
+ * @param title 日历顶部显示的具体用途。
+ * @param initialEpochDay 初始选中日期。
+ * @param minEpochDay 最早可选日期。
+ * @param maxEpochDay 最晚可选日期。
+ * @param onDateSelected 用户确认日期后执行的业务回调。
  */
-@Composable
-private fun StepCalibrationDialog(
-    currentSteps: Int,
-    onDismiss: () -> Unit,
-    onSave: (Int) -> Boolean
-) {
-    var stepText by rememberSaveable(currentSteps) {
-        mutableStateOf(currentSteps.toString())
-    }
-    var errorText by rememberSaveable {
-        mutableStateOf("")
-    }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = {
-            Text(text = "校准今日步数")
-        },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text(
-                    text = "请输入手机健康应用或运动手环显示的今日总步数，后续自动计步会在此基础上继续增加。",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                GoalNumberField(
-                    value = stepText,
-                    onValueChange = {
-                        stepText = it.filter(Char::isDigit).take(MAX_STEP_INPUT_LENGTH)
-                        errorText = ""
-                    },
-                    label = "今日总步数"
-                )
-                if (errorText.isNotBlank()) {
-                    Text(
-                        text = errorText,
-                        color = MaterialTheme.colorScheme.error,
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                }
-            }
-        },
-        confirmButton = {
-            Button(
-                onClick = {
-                    val steps = stepText.toIntOrNull()
-                    errorText = when {
-                        steps == null || steps !in 0..MAX_STEP_CALIBRATION -> {
-                            "请输入0到1000000之间的步数"
-                        }
-
-                        onSave(steps) -> ""
-                        else -> "步数保存失败，请重试"
-                    }
-                }
-            ) {
-                Text(text = "保存")
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text(text = "取消")
-            }
-        }
-    )
-}
+private data class FitnessDatePickerRequest(
+    val title: String,
+    val initialEpochDay: Long,
+    val minEpochDay: Long,
+    val maxEpochDay: Long,
+    val onDateSelected: (Long) -> Unit
+)
 
 /**
- * 计算当前连续达标天数。今天尚未完成时从昨天开始统计，避免白天尚未训练就中断已有连续记录。
+ * 计算当前连续全部达标天数。
  *
- * @param records 按日期查询得到的近期记录，可为任意顺序。
- * @param todayEpochDay 今天日期序号。
+ * @param records 包含空占位的近期连续记录。
+ * @param todayEpochDay 今天日期。
+ * @param currentDefinitions 今天仍启用的项目，用于忽略当天刚删除的项目。
  *
  * @return 从今天或昨天向前连续全部达标的天数。
  */
 private fun calculateCurrentStreak(
     records: List<DailyFitnessRecord>,
-    todayEpochDay: Long
+    todayEpochDay: Long,
+    currentDefinitions: List<FitnessExerciseDefinition>
 ): Int {
     val recordsByDate = records.associateBy { it.dateEpochDay }
+    val isDayComplete = { epochDay: Long ->
+        val record = recordsByDate[epochDay]
+        if (epochDay == todayEpochDay) {
+            record?.isComplete(currentDefinitions) == true
+        } else {
+            record?.isComplete() == true
+        }
+    }
     var cursor = todayEpochDay
-    if (recordsByDate[cursor]?.isComplete() != true) {
+    if (!isDayComplete(cursor)) {
         cursor -= 1L
     }
 
     var streak = 0
-    while (recordsByDate[cursor]?.isComplete() == true) {
+    while (isDayComplete(cursor)) {
         streak += 1
         cursor -= 1L
     }
@@ -1538,12 +1968,12 @@ private fun calculateCurrentStreak(
 }
 
 /**
- * 将历史日期格式化为紧凑中文文本，并为当天追加清晰标记。
+ * 格式化历史日期并为今天追加标记。
  *
- * @param epochDay 待格式化日期序号。
+ * @param epochDay 日期序号。
  * @param todayEpochDay 今天日期序号。
  *
- * @return 例如“8月29日 周六 · 今天”的日期文本。
+ * @return 例如“8月29日 周六 · 今天”的中文日期。
  */
 private fun formatHistoryDate(
     epochDay: Long,
@@ -1559,19 +1989,27 @@ private fun formatHistoryDate(
     }
 }
 
-private const val QUICK_SUBTRACT_COUNT = 5
-private const val QUICK_ADD_SMALL_COUNT = 5
-private const val QUICK_ADD_LARGE_COUNT = 10
-private const val HISTORY_DAYS_WEEK = 7
-private const val HISTORY_DAYS_MONTH = 30
-private const val STREAK_LOOKBACK_DAYS = 31
+/**
+ * 格式化区间按钮使用的紧凑日期。
+ *
+ * @param epochDay 日期序号。
+ *
+ * @return yyyy.MM.dd格式文本。
+ */
+private fun formatCompactDate(epochDay: Long): String {
+    return LocalDate.ofEpochDay(epochDay).format(
+        DateTimeFormatter.ofPattern("yyyy.MM.dd", Locale.CHINA)
+    )
+}
+
+private const val DEFAULT_RANGE_DAYS = 7L
+private const val STREAK_LOOKBACK_DAYS = 370
 private const val MAX_RECORD_LOOKBACK_DAYS = 365L
 private const val MIN_EXERCISE_GOAL = 1
-private const val MAX_EXERCISE_GOAL = 1_000
-private const val MIN_STEP_GOAL = 100
-private const val MAX_STEP_GOAL = 100_000
-private const val MAX_STEP_CALIBRATION = 1_000_000
+private const val MIN_QUICK_INCREMENT = 1
+private const val MAX_QUICK_INCREMENT = 100_000
 private const val MAX_RECORD_COUNT = 1_000_000
-private const val MAX_NUMBER_INPUT_LENGTH = 6
-private const val MAX_STEP_INPUT_LENGTH = 7
+private const val MAX_NUMBER_INPUT_LENGTH = 7
+private const val MAX_EXERCISE_NAME_LENGTH = 20
+private const val MAX_EXERCISE_UNIT_LENGTH = 8
 private const val DATE_REFRESH_INTERVAL_MILLIS = 60_000L

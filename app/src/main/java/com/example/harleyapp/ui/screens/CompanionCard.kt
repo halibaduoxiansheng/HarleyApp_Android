@@ -7,10 +7,13 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -26,6 +29,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -117,9 +121,12 @@ fun CompanionCard(
                     shadowElevation = 3.dp
                 ) {
                     Box(contentAlignment = Alignment.Center) {
-                        Text(
-                            text = progress.category.symbolFor(progress.level),
-                            style = MaterialTheme.typography.headlineLarge
+                        AnimatedCompanion(
+                            category = progress.category,
+                            level = progress.level,
+                            modifier = Modifier
+                                .size(76.dp)
+                                .padding(4.dp)
                         )
                     }
                 }
@@ -256,7 +263,7 @@ private fun CompanionTaskRow(
 }
 
 /**
- * 让用户从三种玩偶分类中自由切换。
+ * 让用户从六种玩偶分类中自由切换，并动态预览每位伙伴的初始形态。
  *
  * @param selectedCategory 当前分类。
  * @param onDismiss 关闭回调。
@@ -280,7 +287,12 @@ private fun CompanionCategoryDialog(
             Text(text = "选择伙伴分类")
         },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 520.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
                 Text(
                     text = "切换伙伴不会重置等级、经验或今日任务。",
                     style = MaterialTheme.typography.bodySmall,
@@ -307,10 +319,17 @@ private fun CompanionCategoryDialog(
                             modifier = Modifier.padding(14.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text(
-                                text = category.symbolFor(1),
-                                style = MaterialTheme.typography.headlineMedium
-                            )
+                            Surface(
+                                modifier = Modifier.size(58.dp),
+                                shape = CircleShape,
+                                color = Color.White.copy(alpha = 0.72f)
+                            ) {
+                                AnimatedCompanion(
+                                    category = category,
+                                    level = 1,
+                                    modifier = Modifier.padding(4.dp)
+                                )
+                            }
                             Column(
                                 modifier = Modifier
                                     .weight(1f)
@@ -321,7 +340,7 @@ private fun CompanionCategoryDialog(
                                     fontWeight = FontWeight.SemiBold
                                 )
                                 Text(
-                                    text = category.formNameFor(10),
+                                    text = "终极形态：${category.formNameFor(CompanionProgress.MAX_LEVEL)}",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -355,12 +374,16 @@ private fun CompanionCategoryDialog(
 }
 
 /**
- * 展示当前形态、形态门槛和全部技能解锁状态。
+ * 展示当前动态形象、六段形态路线和全部技能解锁状态。
+ *
+ * 使用方法：
+ * 点击首页“成长图鉴”后传入当前成长状态。形态和技能列表可以纵向滚动，已经解锁的形态
+ * 会保持完整色彩并持续动画，尚未解锁的形态则以低透明度预览。
  *
  * @param progress 当前成长状态。
  * @param onDismiss 关闭回调。
  *
- * @return 无返回值。
+ * @return 无返回值，直接显示可滚动的成长图鉴对话框。
  */
 @Composable
 private fun CompanionCollectionDialog(
@@ -373,16 +396,110 @@ private fun CompanionCollectionDialog(
             Text(text = "${progress.category.companionName}成长图鉴")
         },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 540.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Surface(
+                        modifier = Modifier.size(100.dp),
+                        shape = RoundedCornerShape(24.dp),
+                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.72f)
+                    ) {
+                        AnimatedCompanion(
+                            category = progress.category,
+                            level = progress.level,
+                            modifier = Modifier.padding(8.dp)
+                        )
+                    }
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(start = 14.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text(
+                            text = "Lv.${progress.level} · ${progress.category.formNameFor(progress.level)}",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = if (progress.level >= CompanionProgress.MAX_LEVEL) {
+                                "已完成全部成长阶段"
+                            } else {
+                                progress.nextUnlockText()
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
                 Text(
-                    text = "形态：${progress.category.formNameFor(progress.level)}",
-                    style = MaterialTheme.typography.titleMedium,
+                    text = "成长形态",
+                    style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.Bold
                 )
                 Text(
-                    text = "形态在 Lv.1、Lv.3、Lv.6、Lv.10 依次解锁。",
+                    text = "形态在 Lv.1、Lv.3、Lv.6、Lv.10、Lv.15、Lv.20 依次解锁。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                progress.category.forms.forEach { form ->
+                    val unlocked = progress.level >= form.unlockLevel
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp),
+                        color = if (unlocked) {
+                            MaterialTheme.colorScheme.primaryContainer
+                        } else {
+                            MaterialTheme.colorScheme.surfaceVariant
+                        }
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            AnimatedCompanion(
+                                category = progress.category,
+                                level = form.unlockLevel,
+                                modifier = Modifier
+                                    .size(52.dp)
+                                    .alpha(if (unlocked) 1f else 0.34f)
+                                    .padding(3.dp)
+                            )
+                            Column(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(start = 10.dp)
+                            ) {
+                                Text(
+                                    text = "Lv.${form.unlockLevel} ${form.name}",
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    text = if (unlocked) "已解锁，可动态预览" else "继续成长后解锁",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Text(
+                                text = if (unlocked) "✓" else "🔒",
+                                style = MaterialTheme.typography.titleMedium
+                            )
+                        }
+                    }
+                }
+
+                Text(
+                    text = "伙伴技能",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold
                 )
                 progress.category.skills.forEach { skill ->
                     val unlocked = progress.level >= skill.unlockLevel
@@ -434,5 +551,8 @@ private fun companionColors(category: CompanionCategory): List<Color> {
         CompanionCategory.FOREST -> listOf(Color(0xFF2E6B45), Color(0xFF73A442))
         CompanionCategory.OCEAN -> listOf(Color(0xFF176B9A), Color(0xFF20A6A1))
         CompanionCategory.TECHNOLOGY -> listOf(Color(0xFF3F3D8F), Color(0xFF7B4EC7))
+        CompanionCategory.SKY -> listOf(Color(0xFF2479B8), Color(0xFF79C9E8))
+        CompanionCategory.DESERT -> listOf(Color(0xFF9A5B21), Color(0xFFE0A24A))
+        CompanionCategory.COSMOS -> listOf(Color(0xFF342A78), Color(0xFF8B5CC7))
     }
 }

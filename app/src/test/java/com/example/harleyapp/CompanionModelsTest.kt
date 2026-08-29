@@ -18,7 +18,7 @@ import org.junit.Test
 class CompanionModelsTest {
 
     /**
-     * 验证每100经验提升一级，并在指定等级切换到对应形态。
+     * 验证每100经验提升一级、原有Lv.10形态保持不变，并能继续成长到Lv.20。
      *
      * @return 无返回值；等级或形态门槛错误时由JUnit报告失败。
      */
@@ -26,15 +26,41 @@ class CompanionModelsTest {
     fun experienceUnlocksExpectedLevelsAndForms() {
         val startingProgress = CompanionProgress(totalExperience = 0)
         val evolvedProgress = CompanionProgress(totalExperience = 500)
-        val finalProgress = CompanionProgress(totalExperience = 900)
+        val guardianProgress = CompanionProgress(totalExperience = 900)
+        val finalProgress = CompanionProgress(totalExperience = 1_900)
+        val overflowProgress = CompanionProgress(totalExperience = 99_999)
 
         assertEquals(1, startingProgress.level)
         assertEquals("幼年星尾狐", CompanionCategory.FOREST.formNameFor(startingProgress.level))
         assertEquals(6, evolvedProgress.level)
         assertEquals("星辉灵狐", CompanionCategory.FOREST.formNameFor(evolvedProgress.level))
-        assertEquals(10, finalProgress.level)
-        assertEquals("森林守护者", CompanionCategory.FOREST.formNameFor(finalProgress.level))
-        assertEquals(4, finalProgress.unlockedSkills.size)
+        assertEquals(10, guardianProgress.level)
+        assertEquals("森林守护者", CompanionCategory.FOREST.formNameFor(guardianProgress.level))
+        assertEquals(4, guardianProgress.unlockedSkills.size)
+        assertEquals(20, finalProgress.level)
+        assertEquals("万象森之灵", CompanionCategory.FOREST.formNameFor(finalProgress.level))
+        assertEquals(6, finalProgress.unlockedSkills.size)
+        assertEquals(CompanionProgress.MAX_LEVEL, overflowProgress.level)
+        assertEquals(CompanionProgress.EXPERIENCE_PER_LEVEL, overflowProgress.experienceInLevel)
+    }
+
+    /**
+     * 验证六类伙伴都拥有完整且按等级递增的六段形态和六项技能。
+     *
+     * @return 无返回值；伙伴数量、成长门槛或终极形态配置不完整时由JUnit报告失败。
+     */
+    @Test
+    fun everyCompanionHasCompleteTwentyLevelCollection() {
+        val expectedUnlockLevels = listOf(1, 3, 6, 10, 15, 20)
+        val expectedSkillLevels = listOf(2, 4, 7, 10, 15, 20)
+
+        assertEquals(6, CompanionCategory.entries.size)
+        CompanionCategory.entries.forEach { category ->
+            assertEquals(expectedUnlockLevels, category.forms.map { form -> form.unlockLevel })
+            assertEquals(expectedSkillLevels, category.skills.map { skill -> skill.unlockLevel })
+            assertEquals(category.forms.last().name, category.formNameFor(20))
+            assertEquals(5, category.formIndexFor(20))
+        }
     }
 
     /**

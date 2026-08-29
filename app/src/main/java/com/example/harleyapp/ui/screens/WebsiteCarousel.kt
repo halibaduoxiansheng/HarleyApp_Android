@@ -43,7 +43,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.harleyapp.model.WebsitePalette
 import com.example.harleyapp.model.WebsiteShortcut
+import com.example.harleyapp.model.nextWebsiteCarouselPage
 import com.example.harleyapp.model.normalizeWebsiteUrl
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import java.net.URI
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
@@ -54,11 +57,14 @@ import java.util.UUID
  * 显示首页可左右滑动的网站卡片，并承载新增、编辑、删除入口。
  *
  * 使用方法：
- * HomeScreen传入当前有序网站列表和持久化回调。用户手动左右滑动切换网站，
- * 页面不会自动轮播，避免正在阅读卡片时被强制切换。新增或编辑只有在回调返回true后才关闭。
+ * HomeScreen传入当前有序网站列表和持久化回调。存在两个及以上网站时，每隔固定时间自动
+ * 切换到下一张；用户手动滑动后会从当前卡片继续轮转。离开首页或打开编辑、删除对话框时
+ * 协程会暂停，不会在后台持续轮转。新增或编辑只有在回调返回true后才关闭。
  *
  * @param websites 当前网站列表，顺序就是轮播顺序。
+ * @param defaultWebsiteId 点击底部“网站”时优先打开的网站标识。
  * @param onOpenWebsite 点击访问按钮后的回调，参数为当前网站。
+ * @param onSetDefaultWebsite 把指定网站设置为默认网站的回调，成功返回true。
  * @param onSaveWebsite 新增或编辑网站的保存回调，成功返回true。
  * @param onDeleteWebsite 删除指定网站的回调，成功返回true。
  * @param modifier 外部布局修饰器。
@@ -68,7 +74,9 @@ import java.util.UUID
 @Composable
 fun WebsiteCarousel(
     websites: List<WebsiteShortcut>,
+    defaultWebsiteId: String?,
     onOpenWebsite: (WebsiteShortcut) -> Unit,
+    onSetDefaultWebsite: (String) -> Boolean,
     onSaveWebsite: (WebsiteShortcut) -> Boolean,
     onDeleteWebsite: (String) -> Boolean,
     modifier: Modifier = Modifier
@@ -88,6 +96,25 @@ fun WebsiteCarousel(
     LaunchedEffect(websites.size) {
         if (websites.isNotEmpty() && pagerState.currentPage > websites.lastIndex) {
             pagerState.scrollToPage(websites.lastIndex)
+        }
+    }
+
+    // 只在首页可见且没有管理弹窗时轮播；手动滑动中的页面不会被动画抢占。
+    LaunchedEffect(
+        websites.map { website -> website.id },
+        editorVisible,
+        deletingWebsite?.id
+    ) {
+        while (isActive && websites.size > 1) {
+            delay(AUTO_CAROUSEL_INTERVAL_MILLIS)
+            if (!pagerState.isScrollInProgress && !editorVisible && deletingWebsite == null) {
+                nextWebsiteCarouselPage(
+                    currentPage = pagerState.currentPage,
+                    pageCount = websites.size
+                )?.let { nextPage ->
+                    pagerState.animateScrollToPage(nextPage)
+                }
+            }
         }
     }
 
@@ -143,7 +170,7 @@ fun WebsiteCarousel(
                     text = if (websites.isEmpty()) {
                         "添加网站后即可从首页访问"
                     } else {
-                        "左右滑动切换 · ${websites.size} 个网站"
+                        "自动轮播 · 也可左右滑动 · ${websites.size} 个网站"
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -172,15 +199,19 @@ fun WebsiteCarousel(
                 state = pagerState,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(224.dp),
+                    .height(236.dp),
                 pageSpacing = 12.dp,
                 beyondViewportPageCount = 1
             ) { page ->
                 val website = websites[page]
                 WebsiteCarouselCard(
                     website = website,
+                    isDefault = website.id == defaultWebsiteId,
                     onOpen = {
                         onOpenWebsite(website)
+                    },
+                    onSetDefault = {
+                        onSetDefaultWebsite(website.id)
                     },
                     onEdit = {
                         editingWebsite = website
@@ -222,7 +253,9 @@ fun WebsiteCarousel(
  * 显示一张带预设渐变色的网站卡片。
  *
  * @param website 当前网站数据。
+ * @param isDefault 当前网站是否为底部“网站”页签的默认入口。
  * @param onOpen 进入内置网页页签的回调。
+ * @param onSetDefault 把当前网站设为默认入口的回调。
  * @param onEdit 打开编辑对话框的回调。
  * @param onDelete 打开删除确认框的回调。
  *
@@ -231,7 +264,9 @@ fun WebsiteCarousel(
 @Composable
 private fun WebsiteCarouselCard(
     website: WebsiteShortcut,
+    isDefault: Boolean,
     onOpen: () -> Unit,
+    onSetDefault: () -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit
 ) {
@@ -255,11 +290,31 @@ private fun WebsiteCarouselCard(
                 .padding(22.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Text(
-                text = dateText,
-                color = Color.White.copy(alpha = 0.78f),
-                style = MaterialTheme.typography.labelLarge
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    modifier = Modifier.weight(1f),
+                    text = dateText,
+                    color = Color.White.copy(alpha = 0.78f),
+                    style = MaterialTheme.typography.labelLarge
+                )
+                Surface(
+                    onClick = onSetDefault,
+                    enabled = !isDefault,
+                    shape = RoundedCornerShape(50),
+                    color = Color.White.copy(alpha = if (isDefault) 0.24f else 0.92f)
+                ) {
+                    Text(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                        text = if (isDefault) "默认网站" else "设为默认",
+                        color = if (isDefault) Color.White else palette.colors.first(),
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
             Text(
                 text = website.title,
                 color = Color.White,
@@ -423,7 +478,7 @@ private fun WebsiteEditorDialog(
                     supportingText = {
                         Text(
                             text = if (urlError.isBlank()) {
-                                "未填写协议时自动补充 https://"
+                                "支持 http:// 和 https://，未填写协议时自动补充 https://"
                             } else {
                                 urlError
                             }
@@ -467,7 +522,7 @@ private fun WebsiteEditorDialog(
                     val trimmedTitle = title.trim()
                     val normalizedUrl = normalizeWebsiteUrl(url)
                     titleError = if (trimmedTitle.isBlank()) "请输入网站名称" else ""
-                    urlError = if (normalizedUrl == null) "请输入有效的HTTPS网址" else ""
+                    urlError = if (normalizedUrl == null) "请输入有效的HTTP或HTTPS网址" else ""
 
                     if (titleError.isBlank() && urlError.isBlank() && normalizedUrl != null) {
                         val saved = onSave(
@@ -654,3 +709,6 @@ private fun websiteHost(url: String): String {
         URI(url).host?.removePrefix("www.").orEmpty()
     }.getOrDefault("").ifBlank { url }
 }
+
+/** 首页存在多个网站时自动切换下一张卡片的间隔。 */
+private const val AUTO_CAROUSEL_INTERVAL_MILLIS = 5_000L

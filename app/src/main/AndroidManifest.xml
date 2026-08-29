@@ -1,7 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- 用户仍需在系统“使用情况访问”页面主动授权，才能查询其他App的蜂窝流量汇总。 -->
+    <uses-permission
+        android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- Android 10及以上读取系统计步传感器需要用户主动授予身体活动权限。 -->
@@ -13,6 +19,11 @@
     -->
     <queries>
         <package android:name="com.tencent.mm" />
+        <!-- 热点原平台App仅用于用户主动点击后的优先HTTPS跳转，不读取其任何应用数据。 -->
+        <package android:name="com.sina.weibo" />
+        <package android:name="com.baidu.searchbox" />
+        <package android:name="com.zhihu.android" />
+        <package android:name="com.ss.android.ugc.aweme" />
 
         <intent>
             <action android:name="android.intent.action.MAIN" />
@@ -27,7 +38,7 @@
         android:roundIcon="@mipmap/ic_family_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.HarleyApp"
-        android:usesCleartextTraffic="false">
+        android:usesCleartextTraffic="true">
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -42,7 +53,7 @@
         </activity>
 
         <!--
-            微信支付自动记账和定时自动回复共用系统通知监听服务。
+            微信支付自动记账和未查看消息重复提醒共用系统通知监听服务。
             服务只能在用户主动授予“通知使用权”后由Android系统绑定，不能在后台自行提权。
         -->
         <service
@@ -55,6 +66,26 @@
                 <action android:name="android.service.notification.NotificationListenerService" />
             </intent-filter>
         </service>
+
+        <!-- 只接收本应用创建的显式Alarm广播，用于重复展示未查看微信消息提醒。 -->
+        <receiver
+            android:name=".notification.WechatReminderReceiver"
+            android:exported="false" />
+
+        <!-- 只接收本应用按自定义日期和时间创建的显式Alarm广播。 -->
+        <receiver
+            android:name=".reminder.ReminderReceiver"
+            android:exported="false" />
+
+        <!-- 重启后恢复通用一次性通知和按间隔天数重复的通知计划。 -->
+        <receiver
+            android:name=".reminder.ReminderBootReceiver"
+            android:enabled="true"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
 
         <!-- 用户点击提醒后才打开微信分享确认流程，不会在后台自动选择联系人或发送。 -->
         <activity

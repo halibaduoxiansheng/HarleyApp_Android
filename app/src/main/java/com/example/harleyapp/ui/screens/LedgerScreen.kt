@@ -1,7 +1,6 @@
 package com.example.harleyapp.ui.screens
 
 import android.net.Uri
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -23,9 +22,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.DatePicker
-import androidx.compose.material3.DatePickerDialog
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
@@ -53,13 +49,14 @@ import com.example.harleyapp.model.LedgerEntry
 import com.example.harleyapp.model.LedgerSource
 import com.example.harleyapp.model.LedgerType
 import com.example.harleyapp.model.WechatCapture
+import com.example.harleyapp.ui.components.HarleyDatePickerDialog
+import com.example.harleyapp.ui.components.bouncyClickable
 import java.math.BigDecimal
 import java.text.NumberFormat
 import java.time.Instant
 import java.time.LocalDate
 import java.time.YearMonth
 import java.time.ZoneId
-import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 
@@ -395,7 +392,7 @@ private fun LedgerEntryCard(
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onEdit),
+            .bouncyClickable(onClick = onEdit),
         shape = RoundedCornerShape(20.dp),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surface
@@ -491,7 +488,6 @@ private fun EmptyLedgerCard() {
  *
  * @return 无返回值。
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun LedgerEditorDialog(
     entry: LedgerEntry?,
@@ -702,40 +698,17 @@ private fun LedgerEditorDialog(
         }
     )
 
-    if (showDatePicker) {
-        val datePickerState = androidx.compose.material3.rememberDatePickerState(
-            initialSelectedDateMillis = epochDayToUtcMillis(dateEpochDay)
-        )
-
-        DatePickerDialog(
-            onDismissRequest = {
-                showDatePicker = false
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        datePickerState.selectedDateMillis?.let { selectedMillis ->
-                            dateEpochDay = utcMillisToEpochDay(selectedMillis)
-                        }
-                        showDatePicker = false
-                    }
-                ) {
-                    Text(text = "确定")
-                }
-            },
-            dismissButton = {
-                TextButton(
-                    onClick = {
-                        showDatePicker = false
-                    }
-                ) {
-                    Text(text = "取消")
-                }
-            }
-        ) {
-            DatePicker(state = datePickerState)
+    HarleyDatePickerDialog(
+        visible = showDatePicker,
+        title = "选择账目日期",
+        initialEpochDay = dateEpochDay,
+        onDismiss = {
+            showDatePicker = false
+        },
+        onDateSelected = { selectedEpochDay ->
+            dateEpochDay = selectedEpochDay
         }
-    }
+    )
 }
 
 /**
@@ -810,34 +783,6 @@ private fun formatDate(epochDay: Long): String {
     return LocalDate.ofEpochDay(epochDay).format(
         DateTimeFormatter.ofPattern("yyyy年M月d日", Locale.CHINA)
     )
-}
-
-/**
- * 把Epoch Day转换为Material DatePicker使用的UTC毫秒值。
- *
- * @param epochDay 从1970-01-01开始的天数。
- *
- * @return 对应日期UTC零点的时间戳。
- */
-private fun epochDayToUtcMillis(epochDay: Long): Long {
-    return LocalDate.ofEpochDay(epochDay)
-        .atStartOfDay(ZoneOffset.UTC)
-        .toInstant()
-        .toEpochMilli()
-}
-
-/**
- * 把Material DatePicker返回的UTC毫秒值转换为Epoch Day。
- *
- * @param utcMillis UTC时间戳。
- *
- * @return 对应日期从1970-01-01开始的天数。
- */
-private fun utcMillisToEpochDay(utcMillis: Long): Long {
-    return Instant.ofEpochMilli(utcMillis)
-        .atZone(ZoneOffset.UTC)
-        .toLocalDate()
-        .toEpochDay()
 }
 
 /**

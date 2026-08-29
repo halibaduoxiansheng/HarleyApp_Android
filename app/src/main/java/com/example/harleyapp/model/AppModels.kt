@@ -29,63 +29,6 @@ enum class LedgerSource {
 }
 
 /**
- * 微信自动回复的快捷回复兼容状态。
- *
- * @property NOT_TESTED 尚未收到可用于检测的普通微信聊天通知。
- * @property SUPPORTED 最近一次检测到微信通知包含Android系统快捷回复入口。
- * @property NO_REPLY_ACTION 最近一次普通聊天通知没有提供快捷回复入口。
- * @property SEND_FAILED 找到了快捷回复入口，但系统拒绝或取消了发送。
- */
-enum class AutoReplyCompatibility {
-    NOT_TESTED,
-    SUPPORTED,
-    NO_REPLY_ACTION,
-    SEND_FAILED
-}
-
-/**
- * 微信定时自动回复配置。
- *
- * 使用方法：
- * 页面通过AutoReplySettingsRepository读取和保存本配置；通知监听服务每次处理微信通知前
- * 都会重新读取配置，因此修改后无需重新启动App或服务。
- *
- * @param enabled 是否启用自动回复总开关。
- * @param replyText 发送给联系人的自定义回复内容。
- * @param startMinuteOfDay 每日开始时间，从当天00:00起计算的分钟数，范围0到1439。
- * @param endMinuteOfDay 每日结束时间，从当天00:00起计算的分钟数，范围0到1439；与开始时间相同表示全天。
- * @param cooldownMinutes 同一会话两次自动回复之间的最短间隔分钟数。
- * @param dailyLimit 每个自然日允许自动发送的最大条数。
- * @param replyToGroups 是否允许回复群聊；默认关闭以避免在群内重复打扰多人。
- */
-data class AutoReplySettings(
-    val enabled: Boolean = false,
-    val replyText: String = "您好，我现在不方便回复，稍后联系您。",
-    val startMinuteOfDay: Int = 9 * 60,
-    val endMinuteOfDay: Int = 18 * 60,
-    val cooldownMinutes: Int = 30,
-    val dailyLimit: Int = 30,
-    val replyToGroups: Boolean = false
-)
-
-/**
- * 微信自动回复最近一次兼容性检测和发送统计。
- *
- * @param compatibility 最近一次有效检测结果。
- * @param lastCheckedAtMillis 最近一次检查微信快捷回复入口的时间戳。
- * @param lastReplyAtMillis 最近一次成功发送自动回复的时间戳；尚未发送时为0。
- * @param repliesToday 当前自然日已经成功发送的自动回复数量。
- * @param detailCode 不包含联系人或消息正文的状态代码，用于界面显示具体失败原因。
- */
-data class AutoReplyStatus(
-    val compatibility: AutoReplyCompatibility = AutoReplyCompatibility.NOT_TESTED,
-    val lastCheckedAtMillis: Long = 0L,
-    val lastReplyAtMillis: Long = 0L,
-    val repliesToday: Int = 0,
-    val detailCode: String = ""
-)
-
-/**
  * 一条需要到点提醒并交由用户确认分享到微信的图文消息。
  *
  * 使用方法：

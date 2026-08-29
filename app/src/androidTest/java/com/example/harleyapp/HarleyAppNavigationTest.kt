@@ -139,7 +139,7 @@ class HarleyAppNavigationTest {
     }
 
     /**
-     * 验证记账页和新增账目对话框可以正常打开、取消。
+     * 验证记账可从功能中心进入，新增账目对话框和返回入口均正常。
      *
      * @return 无返回值；任一关键界面缺失时由测试框架报告失败。
      */
@@ -147,8 +147,11 @@ class HarleyAppNavigationTest {
     fun ledgerNavigationAndDialogWork() {
         launchMainActivity()
 
+        clickNode("功能")
+        waitForNode("功能中心")
         clickNode("记账")
         waitForNode("我的账本")
+        waitForNode("← 功能中心")
 
         clickNode("新增账目")
         waitForNode("记一笔")
@@ -156,28 +159,56 @@ class HarleyAppNavigationTest {
     }
 
     /**
-     * 验证运动页可以从底部导航独立进入。
+     * 验证运动页和动态项目管理入口可以从功能中心进入。
      *
-     * @return 无返回值；运动页未显示时由测试框架报告失败。
+     * 使用方法：
+     * 测试只打开、关闭管理弹窗，不新增、修改或删除任何运动项目，不污染用户数据。
+     *
+     * @return 无返回值；运动页或项目管理入口未显示时由测试框架报告失败。
      */
     @Test
     fun fitnessNavigationWorks() {
         launchMainActivity()
 
+        clickNode("功能")
+        waitForNode("功能中心")
         clickNode("运动")
         waitForNode("今日训练")
+        waitForNode("← 功能中心")
+        clickNode("管理项目")
+        waitForNode("新增项目")
+        clickNode("完成")
     }
 
     /**
-     * 验证更多页可以进入并显示微信自动回复设置入口。
+     * 验证“我的”页显示外观、应用版本和快捷应用管理入口。
      *
      * @return 无返回值；页面或微信设置卡片未显示时由测试框架报告失败。
      */
     @Test
-    fun moreNavigationShowsWechatSettings() {
+    fun profileNavigationShowsBasicSettings() {
         launchMainActivity()
 
-        clickNode("更多")
-        waitForNode("微信定时自动回复")
+        clickNode("我的")
+        waitForNode("外观模式")
+        waitForNode("Harley生活助手")
+        waitForNode("快捷应用管理")
+    }
+
+    /**
+     * 验证微信消息提醒已移动到功能中心，并可通过统一返回入口回到概览。
+     *
+     * @return 无返回值；功能入口、详情卡片或返回流程缺失时由测试框架报告失败。
+     */
+    @Test
+    fun featureCenterWechatReminderNavigationWorks() {
+        launchMainActivity()
+
+        clickNode("功能")
+        waitForNode("功能中心")
+        clickNode("微信消息提醒")
+        waitForNode("微信未查看消息提醒")
+        clickNode("← 功能中心")
+        waitForNode("功能中心")
     }
 }

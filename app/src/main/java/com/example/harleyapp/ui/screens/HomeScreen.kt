@@ -2,7 +2,6 @@ package com.example.harleyapp.ui.screens
 
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -45,6 +44,7 @@ import com.example.harleyapp.model.LaunchableApp
 import com.example.harleyapp.model.WebsiteShortcut
 import com.example.harleyapp.system.DeviceMonitor
 import com.example.harleyapp.system.NetworkSample
+import com.example.harleyapp.ui.components.bouncyClickable
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -64,8 +64,12 @@ import java.util.Locale
  * @param onLaunchApp 点击快捷应用后的启动回调，参数为应用包名。
  * @param onManageShortcuts 前往快捷应用管理页面的回调。
  * @param websites 用户保存的首页网站轮播列表。
+ * @param defaultWebsiteId 点击底部“网站”时默认打开的网站标识。
  * @param companionProgress 玩偶当前经验、分类和今日任务状态。
  * @param onOpenWebsite 前往内置网站页面的回调，参数为用户点击的网站。
+ * @param onSetDefaultWebsite 把指定网站设为底部网站页签默认入口的回调。
+ * @param onOpenHotTopics 点击“每日热点”功能卡片后进入独立详情页的回调。
+ * @param onOpenMobileData 点击“手机流量”功能卡片后进入蜂窝流量详情页的回调。
  * @param onSaveWebsite 新增或编辑网站的同步保存回调，成功返回true。
  * @param onDeleteWebsite 删除网站的同步回调，成功返回true。
  * @param onSelectCompanionCategory 更换玩偶分类的同步保存回调，成功返回true。
@@ -80,8 +84,12 @@ fun HomeScreen(
     onLaunchApp: (String) -> Unit,
     onManageShortcuts: () -> Unit,
     websites: List<WebsiteShortcut>,
+    defaultWebsiteId: String?,
     companionProgress: CompanionProgress,
     onOpenWebsite: (WebsiteShortcut) -> Unit,
+    onSetDefaultWebsite: (String) -> Boolean,
+    onOpenHotTopics: () -> Unit,
+    onOpenMobileData: () -> Unit,
     onSaveWebsite: (WebsiteShortcut) -> Boolean,
     onDeleteWebsite: (String) -> Boolean,
     onSelectCompanionCategory: (CompanionCategory) -> Boolean
@@ -126,9 +134,38 @@ fun HomeScreen(
         item {
             WebsiteCarousel(
                 websites = websites,
+                defaultWebsiteId = defaultWebsiteId,
                 onOpenWebsite = onOpenWebsite,
+                onSetDefaultWebsite = onSetDefaultWebsite,
                 onSaveWebsite = onSaveWebsite,
                 onDeleteWebsite = onDeleteWebsite
+            )
+        }
+
+        item {
+            SectionTitle(
+                title = "功能中心",
+                subtitle = "点击卡片进入独立功能页"
+            )
+        }
+
+        item {
+            FeatureEntryCard(
+                title = "每日热点",
+                description = "查看微博、百度、知乎和抖音热门榜单",
+                symbol = "热",
+                statusLabel = "实时",
+                onClick = onOpenHotTopics
+            )
+        }
+
+        item {
+            FeatureEntryCard(
+                title = "手机流量",
+                description = "查看今日、本周、本月手机流量和应用排行",
+                symbol = "流",
+                statusLabel = "仅蜂窝",
+                onClick = onOpenMobileData
             )
         }
 
@@ -427,7 +464,7 @@ private fun EmptyShortcutCard(onManageShortcuts: () -> Unit) {
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onManageShortcuts),
+            .bouncyClickable(onClick = onManageShortcuts),
         shape = RoundedCornerShape(22.dp),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f)
@@ -473,7 +510,7 @@ private fun ShortcutItem(
         modifier = Modifier
             .width(78.dp)
             .clip(RoundedCornerShape(18.dp))
-            .clickable(onClick = onClick)
+            .bouncyClickable(onClick = onClick)
             .padding(vertical = 10.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(7.dp)

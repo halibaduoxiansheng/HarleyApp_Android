@@ -29,7 +29,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.harleyapp.model.ScheduledWechatMessage
+import com.example.harleyapp.ui.components.HarleyDatePickerDialog
+import com.example.harleyapp.ui.components.HarleyTimePickerDialog
 import java.time.Instant
+import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -79,6 +82,12 @@ fun ScheduledMessageCard(
     }
     var feedbackText by remember {
         mutableStateOf("")
+    }
+    var showDatePicker by remember {
+        mutableStateOf(false)
+    }
+    var showTimePicker by remember {
+        mutableStateOf(false)
     }
     val imagePicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
@@ -162,20 +171,33 @@ fun ScheduledMessageCard(
                 singleLine = true
             )
 
-            OutlinedTextField(
+            val selectedDateTime = parseScheduledDateTime(scheduledTimeText)
+                ?: defaultScheduledDateTime()
+            Row(
                 modifier = Modifier.fillMaxWidth(),
-                value = scheduledTimeText,
-                onValueChange = {
-                    scheduledTimeText = it.take(MAX_DATE_TIME_TEXT_LENGTH)
-                    feedbackText = ""
-                },
-                label = {
-                    Text(text = "提醒时间 yyyy-MM-dd HH:mm")
-                },
-                singleLine = true,
-                supportingText = {
-                    Text(text = "省电模式下可能延迟几分钟")
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                OutlinedButton(
+                    modifier = Modifier.weight(1f),
+                    onClick = {
+                        showDatePicker = true
+                    }
+                ) {
+                    Text(text = selectedDateTime.format(DATE_BUTTON_FORMATTER))
                 }
+                OutlinedButton(
+                    modifier = Modifier.weight(1f),
+                    onClick = {
+                        showTimePicker = true
+                    }
+                ) {
+                    Text(text = selectedDateTime.format(TIME_BUTTON_FORMATTER))
+                }
+            }
+            Text(
+                text = "省电模式下可能延迟几分钟",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
 
             OutlinedTextField(
@@ -344,6 +366,40 @@ fun ScheduledMessageCard(
             }
         }
     }
+
+    val pickerDateTime = parseScheduledDateTime(scheduledTimeText)
+        ?: defaultScheduledDateTime()
+    HarleyDatePickerDialog(
+        visible = showDatePicker,
+        title = "选择微信发送提醒日期",
+        initialEpochDay = pickerDateTime.toLocalDate().toEpochDay(),
+        minEpochDay = LocalDate.now().toEpochDay(),
+        onDismiss = {
+            showDatePicker = false
+        },
+        onDateSelected = { epochDay ->
+            scheduledTimeText = LocalDate.ofEpochDay(epochDay)
+                .atTime(pickerDateTime.toLocalTime())
+                .format(SCHEDULE_FORMATTER)
+            feedbackText = ""
+        }
+    )
+
+    HarleyTimePickerDialog(
+        visible = showTimePicker,
+        title = "选择微信发送提醒时间",
+        initialHour = pickerDateTime.hour,
+        initialMinute = pickerDateTime.minute,
+        onDismiss = {
+            showTimePicker = false
+        },
+        onTimeSelected = { hour, minute ->
+            scheduledTimeText = pickerDateTime.toLocalDate()
+                .atTime(hour, minute)
+                .format(SCHEDULE_FORMATTER)
+            feedbackText = ""
+        }
+    )
 }
 
 /**
@@ -434,11 +490,35 @@ private fun ScheduledMessageRow(
  * @return yyyy-MM-dd HH:mm格式的本地时间文本。
  */
 private fun defaultScheduledTimeText(): String {
+    return defaultScheduledDateTime()
+        .format(SCHEDULE_FORMATTER)
+}
+
+/**
+ * 生成默认计划日期时间对象，便于日期和时间选择器分别更新其中一部分。
+ *
+ * @return 当前时间一小时后且秒、纳秒均为0的LocalDateTime。
+ */
+private fun defaultScheduledDateTime(): LocalDateTime {
     return LocalDateTime.now()
         .plusHours(1)
         .withSecond(0)
         .withNano(0)
-        .format(SCHEDULE_FORMATTER)
+}
+
+/**
+ * 把表单内部日期时间文本解析为可供Material选择器回填的LocalDateTime。
+ *
+ * @param value yyyy-MM-dd HH:mm格式文本。
+ *
+ * @return 合法日期时间；格式或日历值无效时返回null。
+ */
+private fun parseScheduledDateTime(value: String): LocalDateTime? {
+    return try {
+        LocalDateTime.parse(value.trim(), SCHEDULE_FORMATTER)
+    } catch (_: DateTimeParseException) {
+        null
+    }
 }
 
 /**
@@ -449,14 +529,13 @@ private fun defaultScheduledTimeText(): String {
  * @return 合法时间戳；格式或日历日期无效时返回null。
  */
 private fun parseScheduledTime(value: String): Long? {
-    return try {
-        LocalDateTime.parse(value.trim(), SCHEDULE_FORMATTER)
+    return parseScheduledDateTime(value)
+        ?.let { dateTime ->
+            dateTime
             .atZone(ZoneId.systemDefault())
             .toInstant()
             .toEpochMilli()
-    } catch (_: DateTimeParseException) {
-        null
-    }
+        }
 }
 
 /**
@@ -474,8 +553,9 @@ private fun formatScheduledTime(timestampMillis: Long): String {
 
 private val SCHEDULE_FORMATTER = DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm")
     .withResolverStyle(ResolverStyle.STRICT)
+private val DATE_BUTTON_FORMATTER = DateTimeFormatter.ofPattern("M月d日")
+private val TIME_BUTTON_FORMATTER = DateTimeFormatter.ofPattern("HH:mm")
 private const val MAX_CONTACT_LENGTH = 60
 private const val MAX_MESSAGE_LENGTH = 1_000
-private const val MAX_DATE_TIME_TEXT_LENGTH = 16
 private const val MAX_VISIBLE_MESSAGES = 10
 private const val MIN_SCHEDULE_LEAD_MILLIS = 60_000L

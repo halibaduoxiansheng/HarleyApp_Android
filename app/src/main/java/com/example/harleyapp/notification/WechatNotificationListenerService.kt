@@ -1,42 +1,36 @@
 package com.example.harleyapp.notification
 
 import android.app.Notification
-import android.app.PendingIntent
-import android.app.RemoteInput
-import android.content.Intent
-import android.os.Build
-import android.os.Bundle
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.util.Log
-import com.example.harleyapp.data.AutoReplySettingsRepository
-import com.example.harleyapp.data.AutoReplyThrottleResult
 import com.example.harleyapp.data.LedgerRepository
-import com.example.harleyapp.model.AutoReplyCompatibility
-import com.example.harleyapp.model.AutoReplySettings
+import com.example.harleyapp.data.WechatReminderRepository
 import com.example.harleyapp.model.LedgerEntry
 import com.example.harleyapp.model.LedgerSource
 import com.example.harleyapp.model.WechatCapture
 import java.security.MessageDigest
 import java.time.Instant
-import java.time.LocalDateTime
 import java.time.ZoneId
 
 /**
- * 监听微信系统通知，并分别处理支付自动记账和普通聊天定时自动回复。
+ * 监听微信系统通知，并分别处理支付自动记账和普通聊天未查看重复提醒。
  *
  * 使用方法：
  * 用户必须在App中主动开启相应功能，并在Android“通知使用权”页面授权。服务由系统绑定，
- * 不需要App手动启动。支付通知只进入记账流程；普通聊天只有在设置时段内、通过安全过滤且
- * 微信通知确实提供RemoteInput快捷回复入口时才会发送，微信通话通知始终跳过。
+ * 不需要App手动启动。支付通知只进入记账流程；普通聊天通知通过安全过滤后只保存Android
+ * 通知键，并安排通用提醒。联系人、群名和聊天正文不会写入提醒仓库。
  */
 class WechatNotificationListenerService : NotificationListenerService() {
 
     private val ledgerRepository by lazy {
         LedgerRepository(applicationContext)
     }
-    private val autoReplyRepository by lazy {
-        AutoReplySettingsRepository(applicationContext)
+    private val wechatReminderRepository by lazy {
+        WechatReminderRepository(applicationContext)
+    }
+    private val wechatReminderScheduler by lazy {
+        WechatReminderScheduler(applicationContext)
     }
 
     /**
@@ -46,11 +40,42 @@ class WechatNotificationListenerService : NotificationListenerService() {
      */
     override fun onListenerConnected() {
         super.onListenerConnected()
+        listenerConnected = true
+        wechatReminderRepository.recordListenerConnectionChange(
+            connected = true,
+            changedAtMillis = System.currentTimeMillis()
+        )
         Log.i(TAG, "WeChat notification listener connected")
+        synchronizeActiveWechatNotifications()
     }
 
     /**
-     * 接收新微信通知，并保证支付记账与聊天回复互斥处理。
+     * Android主动断开通知监听服务时更新进程内连接标记。
+     *
+     * @return 无返回值。
+     */
+    override fun onListenerDisconnected() {
+        listenerConnected = false
+        wechatReminderRepository.recordListenerConnectionChange(
+            connected = false,
+            changedAtMillis = System.currentTimeMillis()
+        )
+        Log.w(TAG, "WeChat notification listener disconnected")
+        super.onListenerDisconnected()
+    }
+
+    /**
+     * 服务实例销毁时清除进程内连接标记，防止设置页继续显示旧在线状态。
+     *
+     * @return 无返回值。
+     */
+    override fun onDestroy() {
+        listenerConnected = false
+        super.onDestroy()
+    }
+
+    /**
+     * 接收新微信通知，并保证支付记账与普通聊天提醒互斥处理。
      *
      * @param sbn 系统状态栏通知；为null或包名不是com.tencent.mm时直接忽略。
      *
@@ -79,11 +104,31 @@ class WechatNotificationListenerService : NotificationListenerService() {
             return
         }
 
-        processAutoReplyNotification(
+        processMessageReminderNotification(
             sbn = sbn,
             title = title,
             content = content
         )
+    }
+
+    /**
+     * 在原微信通知被打开、清除或由微信撤销时同步结束对应的重复提醒。
+     *
+     * @param sbn 已从通知栏移除的原微信通知；包名不匹配时直接忽略。
+     *
+     * @return 无返回值；全部待查看通知都消失时会同时取消Alarm和本地提醒通知。
+     */
+    override fun onNotificationRemoved(sbn: StatusBarNotification?) {
+        super.onNotificationRemoved(sbn)
+
+        if (sbn == null || sbn.packageName != WECHAT_PACKAGE_NAME) {
+            return
+        }
+
+        val status = wechatReminderRepository.removeNotification(sbn.key)
+        if (status.pendingNotificationCount <= 0) {
+            wechatReminderScheduler.cancel()
+        }
     }
 
     /**
@@ -153,166 +198,88 @@ class WechatNotificationListenerService : NotificationListenerService() {
     }
 
     /**
-     * 按当前设置、安全策略和频率限制处理普通微信聊天通知。
+     * 按当前设置和内容策略记录普通微信聊天通知，并从最新消息重新安排提醒间隔。
      *
-     * @param sbn 原始微信状态栏通知。
-     * @param title 通知标题，通常是联系人或群名。
-     * @param content 合并后的聊天摘要。
+     * @param sbn 原始微信状态栏通知，通知键用于判断它之后是否仍然存在。
+     * @param title 通知标题，只在内存中参与消息类型判断。
+     * @param content 合并后的通知正文，只在内存中参与消息类型判断。
      *
-     * @return 无返回值；任一安全条件不满足时静默跳过。
+     * @return 无返回值；功能关闭或通知属于通话、支付、系统消息时不会安排提醒。
      */
-    private fun processAutoReplyNotification(
+    private fun processMessageReminderNotification(
         sbn: StatusBarNotification,
         title: String,
         content: String
     ) {
-        val settings = autoReplyRepository.getSettings()
+        val settings = wechatReminderRepository.getSettings()
         if (!settings.enabled) {
             return
         }
 
-        val notification = sbn.notification
-        val extras = notification.extras
-        val conversationTitle = extras
-            .getCharSequence(Notification.EXTRA_CONVERSATION_TITLE)
-            ?.toString()
-            .orEmpty()
-        val isGroupConversation = extras.getBoolean(EXTRA_IS_GROUP_CONVERSATION, false)
-        val contentDecision = WechatAutoReplyPolicy.evaluate(
-            title = title,
-            content = content,
-            conversationTitle = conversationTitle,
-            isGroupConversation = isGroupConversation,
-            settings = settings,
-            now = LocalDateTime.now()
-        )
-        if (contentDecision != AutoReplyContentDecision.ALLOWED) {
-            Log.d(TAG, "Auto-reply skipped by content policy: ${contentDecision.name}")
+        val decision = WechatMessageReminderPolicy.evaluate(title, content)
+        if (decision != WechatReminderDecision.REMIND) {
+            Log.d(TAG, "WeChat reminder skipped by content policy: ${decision.name}")
             return
         }
 
-        val nowMillis = System.currentTimeMillis()
-        val replyTarget = findReplyTarget(notification)
-        if (replyTarget == null) {
-            autoReplyRepository.recordCompatibility(
-                compatibility = AutoReplyCompatibility.NO_REPLY_ACTION,
-                detailCode = DETAIL_NO_REMOTE_INPUT,
-                checkedAtMillis = nowMillis
-            )
-            Log.i(TAG, "WeChat notification has no free-form reply action")
-            return
-        }
-
-        autoReplyRepository.recordCompatibility(
-            compatibility = AutoReplyCompatibility.SUPPORTED,
-            detailCode = DETAIL_REMOTE_INPUT_FOUND,
-            checkedAtMillis = nowMillis
+        val receivedAtMillis = sbn.postTime.takeIf { it > 0L } ?: System.currentTimeMillis()
+        wechatReminderRepository.trackNotification(
+            notificationKey = sbn.key,
+            receivedAtMillis = receivedAtMillis
         )
-
-        val conversationIdentity = conversationTitle.ifBlank { title }.trim()
-        val conversationHash = createPrivacyHash("conversation|$conversationIdentity")
-        val notificationFingerprint = createAutoReplyFingerprint(sbn, title, content)
-        val throttleResult = autoReplyRepository.evaluateThrottle(
-            conversationHash = conversationHash,
-            notificationFingerprint = notificationFingerprint,
-            settings = settings,
-            nowMillis = nowMillis
-        )
-        if (throttleResult != AutoReplyThrottleResult.ALLOWED) {
-            Log.d(TAG, "Auto-reply skipped by throttle: ${throttleResult.name}")
-            return
-        }
-
-        sendRemoteInputReply(
-            replyTarget = replyTarget,
-            settings = settings,
-            conversationHash = conversationHash,
-            notificationFingerprint = notificationFingerprint,
-            nowMillis = nowMillis
-        )
+        wechatReminderScheduler.schedule(settings.intervalMinutes)
+        Log.i(TAG, "WeChat unread notification tracked")
     }
 
     /**
-     * 在通知动作中寻找允许自由文本输入的Android快捷回复入口。
+     * 在通知监听服务重新连接时用当前通知栏校准待提醒集合。
      *
-     * @param notification 微信普通聊天通知。
+     * 使用方法：
+     * 仅由onListenerConnected调用。校准会排除支付、通话和系统通知；没有符合条件的通知时
+     * 清空旧键并取消提醒，避免App进程退出期间原通知已经消失却继续打扰用户。
      *
-     * @return 优先返回语义为回复或标题包含“回复”的动作；没有RemoteInput时返回null。
+     * @return 无返回值；系统暂时拒绝读取活跃通知时保留原状态并等待下一次通知回调。
      */
-    private fun findReplyTarget(notification: Notification): ReplyTarget? {
-        val candidates = notification.actions
-            ?.mapNotNull { action ->
-                val freeFormInputs = action.remoteInputs
-                    ?.filter(RemoteInput::getAllowFreeFormInput)
-                    .orEmpty()
-                if (freeFormInputs.isEmpty()) {
-                    null
-                } else {
-                    ReplyTarget(action, freeFormInputs.toTypedArray())
-                }
-            }
-            .orEmpty()
-
-        return candidates.firstOrNull { target ->
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
-                target.action.semanticAction == Notification.Action.SEMANTIC_ACTION_REPLY
-        } ?: candidates.firstOrNull { target ->
-            target.action.title?.toString()?.contains("回复", ignoreCase = true) == true ||
-                target.action.title?.toString()?.contains("reply", ignoreCase = true) == true
-        } ?: candidates.firstOrNull()
-    }
-
-    /**
-     * 使用微信通知自身提供的PendingIntent发送RemoteInput结果。
-     *
-     * @param replyTarget 快捷回复动作及其自由文本输入参数。
-     * @param settings 当前自动回复设置。
-     * @param conversationHash 匿名会话摘要，用于成功后的冷却记录。
-     * @param notificationFingerprint 当前通知匿名指纹，用于成功后的防重复记录。
-     * @param nowMillis 本次发送时间戳。
-     *
-     * @return 无返回值；发送失败时只更新兼容状态，不占用冷却或每日次数。
-     */
-    private fun sendRemoteInputReply(
-        replyTarget: ReplyTarget,
-        settings: AutoReplySettings,
-        conversationHash: String,
-        notificationFingerprint: String,
-        nowMillis: Long
-    ) {
-        val resultBundle = Bundle().apply {
-            replyTarget.remoteInputs.forEach { remoteInput ->
-                putCharSequence(remoteInput.resultKey, settings.replyText)
-            }
-        }
-        val replyIntent = Intent()
-        RemoteInput.addResultsToIntent(replyTarget.remoteInputs, replyIntent, resultBundle)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            RemoteInput.setResultsSource(replyIntent, RemoteInput.SOURCE_FREE_FORM_INPUT)
+    private fun synchronizeActiveWechatNotifications() {
+        val settings = wechatReminderRepository.getSettings()
+        if (!settings.enabled) {
+            wechatReminderRepository.clearPendingNotifications()
+            wechatReminderScheduler.cancel()
+            return
         }
 
-        try {
-            replyTarget.action.actionIntent.send(applicationContext, 0, replyIntent)
-            autoReplyRepository.recordSuccessfulReply(
-                conversationHash = conversationHash,
-                notificationFingerprint = notificationFingerprint,
-                nowMillis = nowMillis
-            )
-            Log.i(TAG, "WeChat auto-reply sent through notification action")
-        } catch (error: PendingIntent.CanceledException) {
-            autoReplyRepository.recordCompatibility(
-                compatibility = AutoReplyCompatibility.SEND_FAILED,
-                detailCode = DETAIL_PENDING_INTENT_CANCELED,
-                checkedAtMillis = nowMillis
-            )
-            Log.e(TAG, "WeChat reply PendingIntent was canceled", error)
-        } catch (error: SecurityException) {
-            autoReplyRepository.recordCompatibility(
-                compatibility = AutoReplyCompatibility.SEND_FAILED,
-                detailCode = DETAIL_SECURITY_REJECTED,
-                checkedAtMillis = nowMillis
-            )
-            Log.e(TAG, "System rejected WeChat reply action", error)
+        val currentNotifications = runCatching {
+            activeNotifications.orEmpty()
+        }.getOrElse { error ->
+            Log.e(TAG, "Failed to read active notifications after listener connection", error)
+            return
+        }
+        val eligibleNotifications = currentNotifications.filter { notification ->
+            if (notification.packageName != WECHAT_PACKAGE_NAME) {
+                return@filter false
+            }
+
+            val title = notification.notification.extras
+                .getCharSequence(Notification.EXTRA_TITLE)
+                ?.toString()
+                .orEmpty()
+            val content = extractNotificationContent(notification.notification)
+            !WechatNotificationParser.parse(title, content).isFinancialNotification &&
+                WechatMessageReminderPolicy.evaluate(title, content) ==
+                WechatReminderDecision.REMIND
+        }
+        val latestMessageAtMillis = eligibleNotifications
+            .maxOfOrNull(StatusBarNotification::getPostTime)
+            ?: 0L
+        val status = wechatReminderRepository.syncActiveNotifications(
+            notificationKeys = eligibleNotifications.mapTo(mutableSetOf()) { it.key },
+            latestMessageAtMillis = latestMessageAtMillis
+        )
+
+        if (status.pendingNotificationCount > 0) {
+            wechatReminderScheduler.schedule(settings.intervalMinutes)
+        } else {
+            wechatReminderScheduler.cancel()
         }
     }
 
@@ -358,24 +325,6 @@ class WechatNotificationListenerService : NotificationListenerService() {
     }
 
     /**
-     * 生成聊天通知指纹，防止系统重复回调造成二次回复。
-     *
-     * @param sbn 状态栏通知。
-     * @param title 通知标题。
-     * @param content 通知正文。
-     *
-     * @return 不包含明文消息的SHA-256十六进制指纹。
-     */
-    private fun createAutoReplyFingerprint(
-        sbn: StatusBarNotification,
-        title: String,
-        content: String
-    ): String {
-        val notificationTime = sbn.notification.`when`.takeIf { it > 0L } ?: sbn.postTime
-        return createPrivacyHash("${sbn.key}|$notificationTime|$title|$content")
-    }
-
-    /**
      * 计算UTF-8文本的SHA-256十六进制摘要。
      *
      * @param source 仅在内存中参与计算的原始文本。
@@ -388,24 +337,24 @@ class WechatNotificationListenerService : NotificationListenerService() {
             .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
     }
 
-    /**
-     * 一个可用于发送自由文本的通知动作。
-     *
-     * @param action 微信通知动作及其PendingIntent。
-     * @param remoteInputs 允许自由文本输入的RemoteInput数组。
-     */
-    private data class ReplyTarget(
-        val action: Notification.Action,
-        val remoteInputs: Array<RemoteInput>
-    )
-
-    private companion object {
+    companion object {
         const val TAG = "WechatNotification"
         const val WECHAT_PACKAGE_NAME = "com.tencent.mm"
-        const val EXTRA_IS_GROUP_CONVERSATION = "android.isGroupConversation"
-        const val DETAIL_NO_REMOTE_INPUT = "no_remote_input"
-        const val DETAIL_REMOTE_INPUT_FOUND = "remote_input_found"
-        const val DETAIL_PENDING_INTENT_CANCELED = "pending_intent_canceled"
-        const val DETAIL_SECURITY_REJECTED = "security_rejected"
+
+        @Volatile
+        private var listenerConnected = false
+
+        /**
+         * 查询当前App进程中的微信通知监听服务是否已经收到Android连接回调。
+         *
+         * 使用方法：
+         * 设置页通过NotificationAccessController读取本状态，区分“授权记录存在”和“服务实际在线”。
+         * 进程重启时默认false，系统成功绑定后由onListenerConnected更新为true。
+         *
+         * @return 当前监听服务实际在线返回true，否则返回false。
+         */
+        fun isListenerConnected(): Boolean {
+            return listenerConnected
+        }
     }
 }

@@ -246,7 +246,7 @@ private fun EmptyWebsiteScreen(
 }
 
 /**
- * 创建并配置只用于HTTPS网页浏览的WebView。
+ * 创建并配置用于HTTP或HTTPS网页浏览的WebView。
  *
  * @param context 页面上下文，用于创建WebView和打开外部协议。
  * @param initialUrl 当前网站的完整HTTPS网址。
@@ -428,7 +428,7 @@ private class HarleyWebViewClient(
     }
 
     /**
-     * HTTPS链接继续在内置WebView打开，电话等其他协议交给系统应用处理。
+     * HTTP和HTTPS链接继续在内置WebView打开，电话等其他协议交给系统应用处理。
      *
      * @param view 当前WebView。
      * @param request 即将跳转的网页请求。
