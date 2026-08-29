@@ -1,13 +1,12 @@
 package com.example.harleyapp
 
-import com.example.harleyapp.data.loadBundledEnglishWords
+import com.example.harleyapp.model.ENGLISH_WORD_ALL_STAGES
 import com.example.harleyapp.model.EnglishLearningStage
 import com.example.harleyapp.model.EnglishWord
 import com.example.harleyapp.model.chooseNextEnglishWord
+import com.example.harleyapp.model.searchEnglishWords
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /** 验证离线英语词库和首页随机选择规则。 */
@@ -68,18 +67,41 @@ class EnglishWordModelsTest {
         assertNull(selected)
     }
 
-    /** 内置词库应保持122个稳定、完整且不重复的离线单词。 */
+    /** 输入英文前缀goo时应优先推荐拼写最接近的good。 */
     @Test
-    fun bundledWordsAreCompleteAndUnique() {
-        val words = loadBundledEnglishWords()
+    fun searchRanksEnglishPrefixMatches() {
+        val words = listOf(
+            testWord(id = "book", learnedCount = 0),
+            testWord(id = "goods", learnedCount = 0),
+            testWord(id = "good", learnedCount = 0),
+            testWord(id = "goose", learnedCount = 0)
+        )
 
-        assertEquals(122, words.size)
-        assertEquals(words.size, words.map { word -> word.id }.distinct().size)
-        assertFalse(words.any { word ->
-            word.id.isBlank() || word.word.isBlank() || word.meaningZh.isBlank() ||
-                word.exampleEn.isBlank() || word.exampleZh.isBlank()
-        })
-        assertTrue(words.all { word -> word.exampleEn.endsWith('.') || word.exampleEn.endsWith('?') })
+        val result = searchEnglishWords(
+            words = words,
+            query = "goo",
+            learnedCount = ENGLISH_WORD_ALL_STAGES
+        )
+
+        assertEquals(listOf("good", "goods", "goose"), result.map { word -> word.id })
+    }
+
+    /** 中文释义和学习阶段应能与英文拼写共用同一个搜索入口。 */
+    @Test
+    fun searchMatchesChineseMeaningAndLearningStage() {
+        val words = listOf(
+            testWord(id = "good", learnedCount = 0, meaningZh = "好的；优秀的"),
+            testWord(id = "excellent", learnedCount = 2, meaningZh = "优秀的；卓越的"),
+            testWord(id = "book", learnedCount = 2, meaningZh = "书籍")
+        )
+
+        val result = searchEnglishWords(
+            words = words,
+            query = "优秀",
+            learnedCount = EnglishLearningStage.LEARNED_TWICE.learnedCount
+        )
+
+        assertEquals(listOf("excellent"), result.map { word -> word.id })
     }
 
     /**
@@ -89,11 +111,15 @@ class EnglishWordModelsTest {
      * @param learnedCount 测试学习次数。
      * @return 其余文本使用固定占位值的单词对象。
      */
-    private fun testWord(id: String, learnedCount: Int): EnglishWord {
+    private fun testWord(
+        id: String,
+        learnedCount: Int,
+        meaningZh: String = "释义"
+    ): EnglishWord {
         return EnglishWord(
             id = id,
             word = id,
-            meaningZh = "释义",
+            meaningZh = meaningZh,
             exampleEn = "Example sentence.",
             exampleZh = "例句。",
             learnedCount = learnedCount

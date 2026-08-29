@@ -13,8 +13,8 @@ import org.json.JSONObject
  *
  * 使用方法：
  * 使用Application Context创建实例，通过[getWords]读取当前完整列表；用户确认学会后调用
- * [markLearned]，需要重新复习一个词时调用[resetWord]。静态词库直接编译进APK，不访问网络；
- * 进度写入Room文档存储，因此会进入App现有的本地导出和恢复流程。
+ * [markLearned]，需要重新复习一个词时调用[resetWord]。5000词静态内容从assets JSON读取，
+ * 不访问网络；进度写入Room文档存储，因此会进入App现有的本地导出和恢复流程。
  *
  * @param context Android上下文，内部只保留Application Context。
  */
@@ -22,7 +22,9 @@ class EnglishWordRepository(context: Context) {
 
     private val applicationContext = context.applicationContext
     private val documentStore = LocalDocumentStore.create(applicationContext)
-    private val wordContents: List<BundledEnglishWord> by lazy(::loadBundledEnglishWords)
+    private val wordContents: List<BundledEnglishWord> by lazy {
+        loadBundledEnglishWords(applicationContext)
+    }
 
     /**
      * 读取内置内容并合并当前学习次数。
@@ -35,9 +37,12 @@ class EnglishWordRepository(context: Context) {
             EnglishWord(
                 id = content.id,
                 word = content.word,
+                phonetic = content.phonetic,
+                definitionEn = content.definitionEn,
                 meaningZh = content.meaningZh,
                 exampleEn = content.exampleEn,
                 exampleZh = content.exampleZh,
+                tags = content.tags,
                 learnedCount = progress.optInt(content.id, 0)
                     .coerceIn(0, ENGLISH_WORD_MASTERY_COUNT)
             )

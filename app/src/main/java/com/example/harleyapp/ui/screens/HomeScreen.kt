@@ -400,7 +400,7 @@ private fun homeFeatureEntries(
  *
  * 使用方法：
  * HomeScreen传入上层已选择好的单词。点击“学会 +1”只在保存成功后由上层更换下一随机词；
- * 候选全部完成三次后显示本轮完成状态，仍可进入详情页查看四个进度分栏。
+ * 候选全部完成三次后显示本轮完成状态，仍可进入详情页搜索全部词或查看四个进度分栏。
  *
  * @param word 当前随机单词；全部完成时为null。
  * @param remainingCount 尚未达到三次的单词数量。
@@ -495,15 +495,34 @@ private fun HomeEnglishWordCard(
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold
                 )
-                Text(
-                    text = word.exampleEn,
-                    style = MaterialTheme.typography.bodyLarge
-                )
-                Text(
-                    text = word.exampleZh,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                if (word.phonetic.isNotBlank()) {
+                    Text(
+                        text = "/${word.phonetic.trim('/')}/",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                if (word.exampleEn.isNotBlank()) {
+                    Text(
+                        text = word.exampleEn,
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                    if (word.exampleZh.isNotBlank()) {
+                        Text(
+                            text = word.exampleZh,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                } else if (word.definitionEn.isNotBlank()) {
+                    Text(
+                        text = word.definitionEn,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
 
                 if (ttsState != OfflineEnglishTtsState.READY) {
                     Text(
@@ -531,12 +550,14 @@ private fun HomeEnglishWordCard(
                         Text(text = "单词发音")
                     }
 
-                    OutlinedButton(
-                        modifier = Modifier.weight(1f),
-                        enabled = ttsState == OfflineEnglishTtsState.READY,
-                        onClick = { onSpeakEnglish(word.exampleEn) }
-                    ) {
-                        Text(text = "朗读例句")
+                    if (word.exampleEn.isNotBlank()) {
+                        OutlinedButton(
+                            modifier = Modifier.weight(1f),
+                            enabled = ttsState == OfflineEnglishTtsState.READY,
+                            onClick = { onSpeakEnglish(word.exampleEn) }
+                        ) {
+                            Text(text = "朗读例句")
+                        }
                     }
                 }
 

@@ -14,19 +14,28 @@ const val ENGLISH_WORD_MASTERY_COUNT = 3
  *
  * @param id 单词在内置词库中的稳定标识，用于持久化学习进度。
  * @param word 英文单词或短语。
+ * @param phonetic 英语音标；词库没有提供时为空字符串。
+ * @param definitionEn 英文释义；词库没有提供时为空字符串。
  * @param meaningZh 中文释义。
- * @param exampleEn 英文例句，也是例句发音时交给TTS的文本。
- * @param exampleZh 英文例句对应的中文翻译。
+ * @param exampleEn 可选英文例句，也是例句发音时交给TTS的文本。
+ * @param exampleZh 可选英文例句中文翻译。
+ * @param tags 中考、高考、四六级、牛津核心等词库标签。
  * @param learnedCount 用户已点击“学会”的次数，范围固定为0至3。
  */
 data class EnglishWord(
     val id: String,
     val word: String,
+    val phonetic: String = "",
+    val definitionEn: String = "",
     val meaningZh: String,
-    val exampleEn: String,
-    val exampleZh: String,
+    val exampleEn: String = "",
+    val exampleZh: String = "",
+    val tags: List<String> = emptyList(),
     val learnedCount: Int
 )
+
+/** “全部”分栏使用的特殊筛选值，不与0至3次学习进度冲突。 */
+const val ENGLISH_WORD_ALL_STAGES = -1
 
 /**
  * 英语单词学习页使用的四个进度分栏。
@@ -91,3 +100,69 @@ fun chooseNextEnglishWord(
     val safeIndex = requestedIndex.coerceIn(preferredWords.indices)
     return preferredWords[safeIndex]
 }
+
+/**
+ * 按学习阶段和用户输入搜索英语单词，并把更接近输入内容的结果排在前面。
+ *
+ * 使用方法：
+ * 英语学习列表在搜索文字或切换“全部、未学会、学会1至3次”分栏后调用本函数。英文搜索
+ * 不区分大小写，并依次按完全匹配、前缀匹配和包含匹配排序；中文输入会匹配中文释义，
+ * 因此输入“goo”可以优先得到“good”，输入“美好”也可以找到含该释义的单词。
+ *
+ * @param words 当前完整单词列表，列表原始顺序代表词库推荐顺序。
+ * @param query 用户输入的英文拼写或中文释义；空白表示不限制关键词。
+ * @param learnedCount 学习次数筛选；传[ENGLISH_WORD_ALL_STAGES]表示显示全部单词。
+ * @return 符合阶段和关键词条件的单词列表；相同匹配级别保持词库原始顺序。
+ */
+fun searchEnglishWords(
+    words: List<EnglishWord>,
+    query: String,
+    learnedCount: Int = ENGLISH_WORD_ALL_STAGES
+): List<EnglishWord> {
+    val stageFilteredWords = if (learnedCount == ENGLISH_WORD_ALL_STAGES) {
+        words
+    } else {
+        val normalizedCount = learnedCount.coerceIn(0, ENGLISH_WORD_MASTERY_COUNT)
+        words.filter { word -> word.learnedCount == normalizedCount }
+    }
+    val normalizedQuery = query.trim().lowercase()
+    if (normalizedQuery.isEmpty()) return stageFilteredWords
+
+    return stageFilteredWords.mapIndexedNotNull { index, word ->
+        val spelling = word.word.lowercase()
+        val rank = when {
+            spelling == normalizedQuery -> 0
+            spelling.startsWith(normalizedQuery) -> 1
+            spelling.contains(normalizedQuery) -> 2
+            word.meaningZh.contains(normalizedQuery, ignoreCase = true) -> 3
+            word.definitionEn.contains(normalizedQuery, ignoreCase = true) -> 4
+            word.tags.any { tag -> tag.contains(normalizedQuery, ignoreCase = true) } -> 5
+            else -> return@mapIndexedNotNull null
+        }
+        RankedEnglishWord(
+            word = word,
+            rank = rank,
+            lengthDifference = kotlin.math.abs(spelling.length - normalizedQuery.length),
+            originalIndex = index
+        )
+    }.sortedWith(
+        compareBy<RankedEnglishWord> { result -> result.rank }
+            .thenBy { result -> result.lengthDifference }
+            .thenBy { result -> result.originalIndex }
+    ).map { result -> result.word }
+}
+
+/**
+ * 保存一次搜索匹配的内部排序信息。
+ *
+ * @param word 匹配到的单词。
+ * @param rank 匹配等级，数值越小越接近用户输入。
+ * @param lengthDifference 单词长度与查询长度的差值，用于让简短的前缀结果优先。
+ * @param originalIndex 单词在当前词库中的原始位置，用于稳定排序。
+ */
+private data class RankedEnglishWord(
+    val word: EnglishWord,
+    val rank: Int,
+    val lengthDifference: Int,
+    val originalIndex: Int
+)
