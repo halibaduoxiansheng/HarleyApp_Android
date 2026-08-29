@@ -1,4 +1,10 @@
 <resources>
+    <string name="widget_today_title">Harley 今日</string>
+    <string name="widget_today_description">显示已缓存天气、今日账目、提醒和运动摘要</string>
+    <string name="widget_weather_prompt">打开App查询天气</string>
+    <string name="widget_location_prompt">需要前台粗略位置权限</string>
+    <string name="widget_empty_summary">账目0条 · 提醒0项 · 运动0项</string>
+    <string name="widget_no_background_location">不会在后台定位</string>
     <string name="app_name">Harley生活助手</string>
     <string name="wechat_notification_service_name">微信通知助手</string>
     <string name="wechat_notification_service_description">用于本机微信支付自动记账，以及按用户设定的间隔提醒仍保留在通知栏中的普通微信消息。</string>

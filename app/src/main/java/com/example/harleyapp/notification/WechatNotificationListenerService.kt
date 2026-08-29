@@ -112,11 +112,15 @@ class WechatNotificationListenerService : NotificationListenerService() {
     }
 
     /**
-     * 在原微信通知被打开、清除或由微信撤销时同步结束对应的重复提醒。
+     * 接收原微信通知移除事件，但不再用该事件取消本应用已经开始的等待倒计时。
+     *
+     * 微信会在会话合并、角标更新或通知内容刷新时主动撤换旧通知，这些移除事件并不代表用户
+     * 已经查看消息。旧实现会因此提前取消Alarm，导致倒计时凭空消失。现在本轮倒计时只在本
+     * 应用成功发出提醒后结束，确保退出设置页或微信更新通知都不会丢失配置与计划。
      *
      * @param sbn 已从通知栏移除的原微信通知；包名不匹配时直接忽略。
      *
-     * @return 无返回值；全部待查看通知都消失时会同时取消Alarm和本地提醒通知。
+     * @return 无返回值。
      */
     override fun onNotificationRemoved(sbn: StatusBarNotification?) {
         super.onNotificationRemoved(sbn)
@@ -125,10 +129,7 @@ class WechatNotificationListenerService : NotificationListenerService() {
             return
         }
 
-        val status = wechatReminderRepository.removeNotification(sbn.key)
-        if (status.pendingNotificationCount <= 0) {
-            wechatReminderScheduler.cancel()
-        }
+        Log.d(TAG, "WeChat notification removal ignored while waiting reminder is pending")
     }
 
     /**
@@ -235,8 +236,9 @@ class WechatNotificationListenerService : NotificationListenerService() {
      * 在通知监听服务重新连接时用当前通知栏校准待提醒集合。
      *
      * 使用方法：
-     * 仅由onListenerConnected调用。校准会排除支付、通话和系统通知；没有符合条件的通知时
-     * 清空旧键并取消提醒，避免App进程退出期间原通知已经消失却继续打扰用户。
+     * 仅由onListenerConnected调用。校准会排除支付、通话和系统通知，并把当前仍可见的通知
+     * 合并进已经持久化的待提醒集合。没有符合条件的当前通知时也保留此前倒计时，因为微信的
+     * 通知撤换不能可靠代表用户已经查看消息。
      *
      * @return 无返回值；系统暂时拒绝读取活跃通知时保留原状态并等待下一次通知回调。
      */
@@ -277,9 +279,12 @@ class WechatNotificationListenerService : NotificationListenerService() {
         )
 
         if (status.pendingNotificationCount > 0) {
-            wechatReminderScheduler.schedule(settings.intervalMinutes)
+            wechatReminderScheduler.restore(
+                intervalMinutes = settings.intervalMinutes,
+                savedTriggerAtMillis = status.nextReminderAtMillis
+            )
         } else {
-            wechatReminderScheduler.cancel()
+            wechatReminderScheduler.cancelPendingAlarm()
         }
     }
 

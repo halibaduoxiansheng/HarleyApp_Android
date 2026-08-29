@@ -29,33 +29,6 @@ enum class LedgerSource {
 }
 
 /**
- * 一条需要到点提醒并交由用户确认分享到微信的图文消息。
- *
- * 使用方法：
- * 新建时将id设为0，ScheduledMessageRepository会生成唯一编号；编辑时保留原id。
- * imageUri为空表示纯文字提醒。联系人备注仅用于通知中核对目标，不会自动匹配微信好友。
- *
- * @param id 本地唯一编号，0表示尚未保存的新计划。
- * @param contactNote 用户填写的联系人或群聊备注，只用于提醒显示。
- * @param messageText 要复制到剪贴板并随分享Intent传递的文字，可为空但不能与图片同时为空。
- * @param scheduledAtMillis 计划提醒的Unix毫秒时间戳。
- * @param imageUri 用户通过系统文件选择器授予长期只读权限的可选图片URI。
- * @param createdAtMillis 计划创建时间戳，用于稳定排序和生成唯一编号。
- * @param reminderShownAtMillis 系统已经成功展示提醒通知的时间戳；未提醒时为0。
- * @param shareOpenedAtMillis 用户点击提醒并打开微信分享流程的时间戳；尚未打开时为0。
- */
-data class ScheduledWechatMessage(
-    val id: Long,
-    val contactNote: String,
-    val messageText: String,
-    val scheduledAtMillis: Long,
-    val imageUri: String = "",
-    val createdAtMillis: Long = System.currentTimeMillis(),
-    val reminderShownAtMillis: Long = 0L,
-    val shareOpenedAtMillis: Long = 0L
-)
-
-/**
  * 本应用安全缓存清理的最近状态。
  *
  * @param automaticEnabled 是否在App启动时每天最多自动检查一次过期缓存。

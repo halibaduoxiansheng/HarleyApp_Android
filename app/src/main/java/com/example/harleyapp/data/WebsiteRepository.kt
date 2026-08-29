@@ -2,15 +2,22 @@ package com.example.harleyapp.data
 
 import android.content.Context
 import android.util.Log
+import com.example.harleyapp.data.local.RoomBackedPreferences
+import com.example.harleyapp.model.MAX_WEBSITE_FOLDER_DEPTH
+import com.example.harleyapp.model.WebsiteFolder
+import com.example.harleyapp.model.WebsiteLibrary
 import com.example.harleyapp.model.WebsitePalette
 import com.example.harleyapp.model.WebsiteShortcut
+import com.example.harleyapp.model.canPlaceWebsiteFolder
+import com.example.harleyapp.model.isValidWebsiteBackgroundFileName
 import com.example.harleyapp.model.normalizeWebsiteUrl
+import com.example.harleyapp.model.normalizeWebsiteThemeColor
 import com.example.harleyapp.model.resolveDefaultWebsiteId
 import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * 使用SharedPreferences保存首页网站轮播列表。
+ * 使用Room文档保存首页网站轮播列表，同时保留SharedPreferences兼容副本。
  *
  * 使用方法：
  * 使用Application Context创建仓库，通过getWebsites读取有序列表，通过saveWebsites整组覆盖保存。
@@ -21,9 +28,9 @@ import org.json.JSONObject
  */
 class WebsiteRepository(context: Context) {
 
-    private val preferences = context.applicationContext.getSharedPreferences(
-        PREFERENCE_NAME,
-        Context.MODE_PRIVATE
+    private val preferences = RoomBackedPreferences.create(
+        context = context,
+        preferenceName = PREFERENCE_NAME
     )
 
     /**
@@ -39,7 +46,45 @@ class WebsiteRepository(context: Context) {
         val storedJson = preferences.getString(KEY_WEBSITES, null)
             ?: return listOf(DEFAULT_WEBSITE)
 
-        return decodeWebsites(storedJson) ?: listOf(DEFAULT_WEBSITE)
+        val decodedWebsites = decodeWebsites(storedJson) ?: return listOf(DEFAULT_WEBSITE)
+        val migratedWebsites = decodedWebsites.map(::migrateLegacyDefaultWebsite)
+        if (migratedWebsites != decodedWebsites && !saveWebsites(migratedWebsites)) {
+            Log.e(TAG, "Failed to persist migrated default website URL")
+        }
+
+        return migratedWebsites
+    }
+
+    /**
+     * 一次读取网站与收藏夹树，并修复旧版本没有文件夹字段的数据。
+     *
+     * 使用方法：
+     * HarleyApp初始化网站状态以及备份恢复后调用本函数。旧网站会保留原顺序、默认开启
+     * 首页展示，并归入根目录“未分类”；引用已经不存在文件夹的网站也会安全移回根目录。
+     *
+     * @return 可直接交给收藏管理页面的完整网站库。
+     */
+    fun getLibrary(): WebsiteLibrary {
+        val folders = getFolders()
+        val folderIds = folders.map { folder -> folder.id }.toSet()
+        val websites = getWebsites()
+        val repairedWebsites = websites.map { website ->
+            if (website.folderId != null && website.folderId !in folderIds) {
+                website.copy(folderId = null)
+            } else {
+                website
+            }
+        }
+        val library = WebsiteLibrary(
+            websites = repairedWebsites,
+            folders = folders
+        )
+
+        if (repairedWebsites != websites && !saveLibrary(library)) {
+            Log.e(TAG, "Failed to persist repaired website folder references")
+        }
+
+        return library
     }
 
     /**
@@ -112,23 +157,55 @@ class WebsiteRepository(context: Context) {
             return false
         }
 
-        val jsonArray = JSONArray()
-        websites.forEach { website ->
-            jsonArray.put(
-                JSONObject().apply {
-                    put(JSON_ID, website.id)
-                    put(JSON_TITLE, website.title.trim())
-                    put(JSON_URL, normalizeWebsiteUrl(website.url))
-                    put(JSON_PALETTE, website.palette.name)
-                }
-            )
-        }
-
         val success = preferences.edit()
-            .putString(KEY_WEBSITES, jsonArray.toString())
+            .putString(KEY_WEBSITES, encodeWebsites(websites).toString())
             .commit()
         if (!success) {
             Log.e(TAG, "Failed to persist website shortcuts")
+        }
+
+        return success
+    }
+
+    /**
+     * 原子保存完整网站收藏，保证文件夹与网站引用不会只写入一半。
+     *
+     * 使用方法：
+     * 收藏详情页完成增删改、首页开关或拖动排序后传入完整WebsiteLibrary。函数会拒绝
+     * 重复id、空名称、孤立父目录、循环层级、超过五层以及无效网址。
+     *
+     * @param library 需要覆盖保存的完整网站与文件夹集合，允许两个列表都为空。
+     *
+     * @return 数据合法且同步写入成功返回true，否则返回false。
+     */
+    fun saveLibrary(library: WebsiteLibrary): Boolean {
+        if (!isValidLibrary(library)) {
+            Log.e(TAG, "Refusing to persist an invalid website library")
+            return false
+        }
+
+        val normalizedLibrary = library.copy(
+            websites = library.websites.map { website ->
+                website.copy(
+                    title = website.title.trim(),
+                    url = normalizeWebsiteUrl(website.url) ?: website.url,
+                    customColorArgb = normalizeWebsiteThemeColor(website.customColorArgb),
+                    sortOrder = website.sortOrder.coerceAtLeast(0)
+                )
+            },
+            folders = library.folders.map { folder ->
+                folder.copy(
+                    name = folder.name.trim(),
+                    sortOrder = folder.sortOrder.coerceAtLeast(0)
+                )
+            }
+        )
+        val success = preferences.edit()
+            .putString(KEY_WEBSITES, encodeWebsites(normalizedLibrary.websites).toString())
+            .putString(KEY_FOLDERS, encodeFolders(normalizedLibrary.folders).toString())
+            .commit()
+        if (!success) {
+            Log.e(TAG, "Failed to persist website library")
         }
 
         return success
@@ -165,7 +242,41 @@ class WebsiteRepository(context: Context) {
                             id = id,
                             title = title,
                             url = normalizedUrl,
-                            palette = palette
+                            palette = palette,
+                            customColorArgb = jsonObject
+                                .takeIf { value ->
+                                    value.has(JSON_CUSTOM_COLOR_ARGB) &&
+                                        !value.isNull(JSON_CUSTOM_COLOR_ARGB)
+                                }
+                                ?.optLong(JSON_CUSTOM_COLOR_ARGB)
+                                ?.let(::normalizeWebsiteThemeColor),
+                            backgroundImageFileName = jsonObject
+                                .takeIf { value ->
+                                    value.has(JSON_BACKGROUND_IMAGE_FILE) &&
+                                        !value.isNull(JSON_BACKGROUND_IMAGE_FILE)
+                                }
+                                ?.optString(JSON_BACKGROUND_IMAGE_FILE)
+                                ?.trim()
+                                ?.takeIf { fileName ->
+                                    isValidWebsiteBackgroundFileName(fileName)
+                                },
+                            folderId = jsonObject
+                                .takeIf { value ->
+                                    value.has(JSON_FOLDER_ID) && !value.isNull(JSON_FOLDER_ID)
+                                }
+                                ?.optString(JSON_FOLDER_ID)
+                                ?.trim()
+                                ?.takeIf(String::isNotBlank),
+                            showOnHome = if (jsonObject.has(JSON_SHOW_ON_HOME)) {
+                                jsonObject.optBoolean(JSON_SHOW_ON_HOME, true)
+                            } else {
+                                true
+                            },
+                            sortOrder = if (jsonObject.has(JSON_SORT_ORDER)) {
+                                jsonObject.optInt(JSON_SORT_ORDER, index).coerceAtLeast(0)
+                            } else {
+                                index
+                            }
                         )
                     )
                 }
@@ -179,7 +290,174 @@ class WebsiteRepository(context: Context) {
     }
 
     /**
-     * 检查单条网站是否具备稳定id、可显示名称和有效HTTPS网址。
+     * 读取收藏夹JSON；旧版本没有该字段时返回空列表。
+     *
+     * @return 已保存且结构有效的文件夹列表；数据损坏时返回空列表并记录英文错误日志。
+     */
+    private fun getFolders(): List<WebsiteFolder> {
+        val storedJson = preferences.getString(KEY_FOLDERS, null) ?: return emptyList()
+        return decodeFolders(storedJson) ?: emptyList()
+    }
+
+    /**
+     * 把文件夹JSON转换为数据模型，并过滤重复id或空名称条目。
+     *
+     * @param storedJson 本地保存的JSON数组文本。
+     *
+     * @return 解析成功返回文件夹列表；整体JSON损坏时返回null。
+     */
+    private fun decodeFolders(storedJson: String): List<WebsiteFolder>? {
+        return runCatching {
+            val jsonArray = JSONArray(storedJson)
+            buildList {
+                val usedIds = mutableSetOf<String>()
+                for (index in 0 until jsonArray.length()) {
+                    val jsonObject = jsonArray.optJSONObject(index) ?: continue
+                    val id = jsonObject.optString(JSON_ID).trim()
+                    val name = jsonObject.optString(JSON_NAME).trim()
+                    if (id.isBlank() || name.isBlank() || !usedIds.add(id)) {
+                        continue
+                    }
+
+                    add(
+                        WebsiteFolder(
+                            id = id,
+                            name = name,
+                            parentId = jsonObject
+                                .takeIf { value ->
+                                    value.has(JSON_PARENT_ID) && !value.isNull(JSON_PARENT_ID)
+                                }
+                                ?.optString(JSON_PARENT_ID)
+                                ?.trim()
+                                ?.takeIf(String::isNotBlank),
+                            sortOrder = jsonObject
+                                .optInt(JSON_SORT_ORDER, index)
+                                .coerceAtLeast(0)
+                        )
+                    )
+                }
+            }
+        }.getOrElse { error ->
+            Log.e(TAG, "Failed to decode website folders", error)
+            null
+        }
+    }
+
+    /**
+     * 把网站模型编码为持久化JSON，同时写入兼容升级后的文件夹、首页开关和顺序字段。
+     *
+     * @param websites 待编码的网站列表。
+     *
+     * @return 可直接写入本地存储的JSON数组。
+     */
+    private fun encodeWebsites(websites: List<WebsiteShortcut>): JSONArray {
+        return JSONArray().apply {
+            websites.forEach { website ->
+                put(
+                    JSONObject().apply {
+                        put(JSON_ID, website.id)
+                        put(JSON_TITLE, website.title.trim())
+                        put(JSON_URL, normalizeWebsiteUrl(website.url))
+                        put(JSON_PALETTE, website.palette.name)
+                        put(
+                            JSON_CUSTOM_COLOR_ARGB,
+                            website.customColorArgb ?: JSONObject.NULL
+                        )
+                        put(
+                            JSON_BACKGROUND_IMAGE_FILE,
+                            website.backgroundImageFileName ?: JSONObject.NULL
+                        )
+                        put(JSON_FOLDER_ID, website.folderId ?: JSONObject.NULL)
+                        put(JSON_SHOW_ON_HOME, website.showOnHome)
+                        put(JSON_SORT_ORDER, website.sortOrder.coerceAtLeast(0))
+                    }
+                )
+            }
+        }
+    }
+
+    /**
+     * 把文件夹树编码为持久化JSON。
+     *
+     * @param folders 待编码的文件夹列表。
+     *
+     * @return 可直接写入本地存储的JSON数组。
+     */
+    private fun encodeFolders(folders: List<WebsiteFolder>): JSONArray {
+        return JSONArray().apply {
+            folders.forEach { folder ->
+                put(
+                    JSONObject().apply {
+                        put(JSON_ID, folder.id)
+                        put(JSON_NAME, folder.name.trim())
+                        put(JSON_PARENT_ID, folder.parentId ?: JSONObject.NULL)
+                        put(JSON_SORT_ORDER, folder.sortOrder.coerceAtLeast(0))
+                    }
+                )
+            }
+        }
+    }
+
+    /**
+     * 校验网站收藏的唯一标识、引用关系、目录深度和网址。
+     *
+     * @param library 待保存的网站收藏。
+     *
+     * @return 所有数据均可安全持久化时返回true，否则返回false。
+     */
+    private fun isValidLibrary(library: WebsiteLibrary): Boolean {
+        val websiteIds = library.websites.map { website -> website.id }
+        val folderIds = library.folders.map { folder -> folder.id }
+        if (websiteIds.toSet().size != websiteIds.size ||
+            folderIds.toSet().size != folderIds.size ||
+            websiteIds.any { id -> id in folderIds }
+        ) {
+            return false
+        }
+        if (library.websites.any { website ->
+                !isValidWebsite(website) ||
+                    (website.folderId != null && website.folderId !in folderIds)
+            }
+        ) {
+            return false
+        }
+        if (library.folders.any { folder ->
+                folder.id.isBlank() ||
+                    folder.name.trim().isBlank() ||
+                    !canPlaceWebsiteFolder(
+                        library = library,
+                        folderId = folder.id,
+                        candidateParentId = folder.parentId,
+                        maxDepth = MAX_WEBSITE_FOLDER_DEPTH
+                    )
+            }
+        ) {
+            return false
+        }
+
+        return true
+    }
+
+    /**
+     * 把旧版本内置网站使用的HTTPS地址迁移为当前可访问的HTTP地址。
+     *
+     * 使用方法：
+     * [getWebsites]解码每条网站后自动调用。函数只匹配内置网站的稳定id和旧版完整地址，
+     * 不会修改用户自行添加的网站，也不会把其他HTTPS网站降级为HTTP。
+     *
+     * @param website 从本地存储读取的一条网站配置。
+     * @return 旧版内置地址返回替换URL后的副本，其他配置原样返回。
+     */
+    private fun migrateLegacyDefaultWebsite(website: WebsiteShortcut): WebsiteShortcut {
+        return if (website.id == DEFAULT_WEBSITE.id && website.url == LEGACY_DEFAULT_WEBSITE_URL) {
+            website.copy(url = DEFAULT_WEBSITE.url)
+        } else {
+            website
+        }
+    }
+
+    /**
+     * 检查单条网站是否具备稳定id、可显示名称和有效HTTP或HTTPS网址。
      *
      * @param website 待检查的网站。
      *
@@ -188,23 +466,34 @@ class WebsiteRepository(context: Context) {
     private fun isValidWebsite(website: WebsiteShortcut): Boolean {
         return website.id.isNotBlank() &&
             website.title.trim().isNotBlank() &&
-            normalizeWebsiteUrl(website.url) != null
+            normalizeWebsiteUrl(website.url) != null &&
+            normalizeWebsiteThemeColor(website.customColorArgb) == website.customColorArgb &&
+            isValidWebsiteBackgroundFileName(website.backgroundImageFileName)
     }
 
     private companion object {
         const val TAG = "WebsiteRepository"
         const val PREFERENCE_NAME = "harley_websites"
         const val KEY_WEBSITES = "websites"
+        const val KEY_FOLDERS = "folders"
         const val KEY_DEFAULT_WEBSITE_ID = "default_website_id"
         const val JSON_ID = "id"
         const val JSON_TITLE = "title"
         const val JSON_URL = "url"
         const val JSON_PALETTE = "palette"
+        const val JSON_CUSTOM_COLOR_ARGB = "custom_color_argb"
+        const val JSON_BACKGROUND_IMAGE_FILE = "background_image_file"
+        const val JSON_FOLDER_ID = "folder_id"
+        const val JSON_SHOW_ON_HOME = "show_on_home"
+        const val JSON_SORT_ORDER = "sort_order"
+        const val JSON_NAME = "name"
+        const val JSON_PARENT_ID = "parent_id"
+        const val LEGACY_DEFAULT_WEBSITE_URL = "https://www.halibaduo.cn"
 
         val DEFAULT_WEBSITE = WebsiteShortcut(
             id = "default_halibaduo",
             title = "Harley网站",
-            url = "https://www.halibaduo.cn",
+            url = "http://www.halibaduo.cn",
             palette = WebsitePalette.OCEAN
         )
     }

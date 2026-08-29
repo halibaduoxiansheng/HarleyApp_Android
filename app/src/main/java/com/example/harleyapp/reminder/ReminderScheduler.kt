@@ -4,16 +4,18 @@ import android.app.AlarmManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import android.util.Log
 import com.example.harleyapp.model.ScheduledReminder
+import com.example.harleyapp.system.ExactAlarmAccessController
 
 /**
  * 使用Android AlarmManager安排、取消和恢复通用本地通知。
  *
  * 使用方法：
  * 使用Application Context创建实例。计划持久化成功后调用[schedule]；删除或修改旧计划前调用
- * [cancel]；手机重启完成后由ReminderBootReceiver调用[reschedule]恢复计划。本实现使用
- * setAndAllowWhileIdle，不申请精确闹钟特殊权限，因此部分系统的省电策略可能使通知延迟几分钟。
+ * [cancel]；手机重启完成后由ReminderBootReceiver调用[reschedule]恢复计划。获得“闹钟和提醒”
+ * 特殊权限时使用精确Alarm；尚未授权时保留非精确Alarm兜底，并由页面提示用户完成授权。
  *
  * @param context Android上下文，内部自动转换为Application Context。
  */
@@ -21,6 +23,7 @@ class ReminderScheduler(context: Context) {
 
     private val applicationContext = context.applicationContext
     private val alarmManager = applicationContext.getSystemService(AlarmManager::class.java)
+    private val exactAlarmAccessController = ExactAlarmAccessController(applicationContext)
 
     /**
      * 为一条已保存且时间仍在未来的计划提交系统Alarm。
@@ -47,6 +50,25 @@ class ReminderScheduler(context: Context) {
     fun cancel(reminderId: Long) {
         alarmManager.cancel(createAlarmPendingIntent(reminderId))
         Log.i(TAG, "Canceled scheduled reminder")
+    }
+
+    /**
+     * 当通知权限暂时缺失或通知发布异常时，为同一计划安排一次短延迟重试。
+     *
+     * 使用方法：
+     * ReminderReceiver尚未把计划标记为已触发时调用。仓库中的原计划时间保持不变，因此重试
+     * 广播仍能通过计划编号读取到完整内容，并在通知真正发布成功后再更新状态。
+     *
+     * @param reminderId 本机通知计划唯一编号。
+     * @param delayMillis 从当前时刻起延迟的毫秒数，内部至少限制为一秒。
+     *
+     * @return 系统接受重试Alarm返回true，否则返回false。
+     */
+    fun scheduleRetry(reminderId: Long, delayMillis: Long): Boolean {
+        return scheduleAt(
+            reminderId = reminderId,
+            triggerAtMillis = System.currentTimeMillis() + delayMillis.coerceAtLeast(1_000L)
+        )
     }
 
     /**
@@ -86,12 +108,24 @@ class ReminderScheduler(context: Context) {
         }
 
         return try {
-            alarmManager.setAndAllowWhileIdle(
-                AlarmManager.RTC_WAKEUP,
-                triggerAtMillis,
-                createAlarmPendingIntent(reminderId)
-            )
-            Log.i(TAG, "Scheduled local reminder")
+            val pendingIntent = createAlarmPendingIntent(reminderId)
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
+                exactAlarmAccessController.isGranted()
+            ) {
+                alarmManager.setExactAndAllowWhileIdle(
+                    AlarmManager.RTC_WAKEUP,
+                    triggerAtMillis,
+                    pendingIntent
+                )
+                Log.i(TAG, "Scheduled exact local reminder")
+            } else {
+                alarmManager.setAndAllowWhileIdle(
+                    AlarmManager.RTC_WAKEUP,
+                    triggerAtMillis,
+                    pendingIntent
+                )
+                Log.w(TAG, "Scheduled inexact local reminder because exact access is missing")
+            }
             true
         } catch (error: SecurityException) {
             Log.e(TAG, "System rejected scheduled reminder", error)

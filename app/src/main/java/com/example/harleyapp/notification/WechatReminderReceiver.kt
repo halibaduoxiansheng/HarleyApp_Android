@@ -12,7 +12,6 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.util.Log
 import androidx.core.content.ContextCompat
-import com.example.harleyapp.MainActivity
 import com.example.harleyapp.R
 import com.example.harleyapp.data.WechatReminderRepository
 
@@ -21,7 +20,8 @@ import com.example.harleyapp.data.WechatReminderRepository
  *
  * 使用方法：
  * 只由WechatReminderScheduler创建的显式PendingIntent触发。接收器每次先确认功能仍启用且存在
- * 待查看原微信通知，再展示不含联系人和正文的提醒，并为下一间隔重新安排单次Alarm。
+ * 待提醒状态，再展示不含联系人和正文的高优先级通知。本轮提醒成功后清除倒计时；收到新的
+ * 普通微信消息时，通知监听服务会重新开始下一轮倒计时。
  */
 class WechatReminderReceiver : BroadcastReceiver() {
 
@@ -31,20 +31,30 @@ class WechatReminderReceiver : BroadcastReceiver() {
      * @param context 广播上下文。
      * @param intent AlarmManager传入的显式广播Intent。
      *
-     * @return 无返回值；功能关闭或原微信通知已消失时立即取消整个提醒循环。
+     * @return 无返回值；功能关闭或当前没有待提醒消息时立即取消过期Alarm。
      */
     override fun onReceive(context: Context, intent: Intent?) {
+        val applicationContext = context.applicationContext
+        val repository = WechatReminderRepository(applicationContext)
+        val scheduler = WechatReminderScheduler(applicationContext)
+        if (intent?.action == ACTION_STOP_WECHAT_REMINDERS) {
+            repository.clearPendingNotifications()
+            scheduler.cancel()
+            Log.i(TAG, "WeChat reminder cycle stopped by user")
+            return
+        }
         if (intent?.action != WechatReminderScheduler.ACTION_SHOW_WECHAT_REMINDER) {
             return
         }
 
-        val applicationContext = context.applicationContext
-        val repository = WechatReminderRepository(applicationContext)
-        val scheduler = WechatReminderScheduler(applicationContext)
         val settings = repository.getSettings()
         val status = repository.getStatus()
         if (!settings.enabled || status.pendingNotificationCount <= 0) {
-            scheduler.cancel()
+            if (settings.enabled) {
+                scheduler.cancelPendingAlarm()
+            } else {
+                scheduler.cancel()
+            }
             return
         }
 
@@ -69,16 +79,22 @@ class WechatReminderReceiver : BroadcastReceiver() {
         }
 
         val pendingCount = status.pendingNotificationCount
+        val currentNotificationNumber = status.notificationsShownInCycle + 1
+        val countDescription = if (settings.notificationCount == REPEAT_CONTINUOUSLY_COUNT) {
+            "持续提醒 · 第${currentNotificationNumber}次"
+        } else {
+            "第${currentNotificationNumber}/${settings.notificationCount}次提醒"
+        }
         val notification = Notification.Builder(
             applicationContext,
             WechatReminderScheduler.CHANNEL_ID
         )
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
-            .setContentTitle("微信消息还没查看")
-            .setContentText("你有${pendingCount}条微信通知仍在通知栏，点击打开微信。")
+            .setSmallIcon(R.drawable.ic_notification_reminder)
+            .setContentTitle("该查看微信消息了")
+            .setContentText("$countDescription，你有${pendingCount}条微信消息需要查看。")
             .setStyle(
                 Notification.BigTextStyle().bigText(
-                    "你有${pendingCount}条微信通知仍在通知栏。查看或清除原微信通知后，重复提醒会自动停止。"
+                    "等待时间已到，你有${pendingCount}条微信消息需要查看。点击这条提醒可直接打开微信。"
                 )
             )
             .setContentIntent(createOpenWechatPendingIntent(applicationContext))
@@ -86,14 +102,23 @@ class WechatReminderReceiver : BroadcastReceiver() {
             .setCategory(Notification.CATEGORY_REMINDER)
             .setVisibility(Notification.VISIBILITY_PRIVATE)
             .setNumber(pendingCount)
+            .addAction(
+                Notification.Action.Builder(
+                    null,
+                    "停止后续提醒",
+                    createStopReminderPendingIntent(applicationContext)
+                ).build()
+            )
             .build()
 
         // 先移除同编号旧提醒再重新发布，确保每个用户设定的间隔都能重新触发提示音或振动。
         notificationManager.cancel(WechatReminderScheduler.NOTIFICATION_ID)
         notificationManager.notify(WechatReminderScheduler.NOTIFICATION_ID, notification)
-        repository.recordReminderShown(System.currentTimeMillis())
-        scheduler.schedule(settings.intervalMinutes)
-        Log.i(TAG, "WeChat unread reminder displayed")
+        val updatedStatus = repository.recordReminderShown(System.currentTimeMillis())
+        if (updatedStatus.pendingNotificationCount > 0) {
+            scheduler.schedule(settings.intervalMinutes)
+        }
+        Log.i(TAG, "WeChat waiting reminder displayed")
     }
 
     /**
@@ -123,12 +148,8 @@ class WechatReminderReceiver : BroadcastReceiver() {
      * @return 可由系统通知安全触发的不可变Activity PendingIntent。
      */
     private fun createOpenWechatPendingIntent(context: Context): PendingIntent {
-        val openIntent = context.packageManager
-            .getLaunchIntentForPackage(WECHAT_PACKAGE_NAME)
-            ?.apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-            }
-            ?: Intent(context, MainActivity::class.java)
+        val openIntent = Intent(context, WechatReminderOpenActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
 
         return PendingIntent.getActivity(
             context,
@@ -138,9 +159,30 @@ class WechatReminderReceiver : BroadcastReceiver() {
         )
     }
 
+    /**
+     * 创建通知操作按钮使用的停止广播PendingIntent。
+     *
+     * @param context Android上下文。
+     *
+     * @return 点击后清除本轮待提醒状态并取消后续Alarm的不可变PendingIntent。
+     */
+    private fun createStopReminderPendingIntent(context: Context): PendingIntent {
+        val intent = Intent(context, WechatReminderReceiver::class.java)
+            .setAction(ACTION_STOP_WECHAT_REMINDERS)
+        return PendingIntent.getBroadcast(
+            context,
+            STOP_REMINDER_REQUEST_CODE,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+    }
+
     private companion object {
         const val TAG = "WechatReminder"
-        const val WECHAT_PACKAGE_NAME = "com.tencent.mm"
         const val OPEN_WECHAT_REQUEST_CODE = 41_083
+        const val STOP_REMINDER_REQUEST_CODE = 41_084
+        const val ACTION_STOP_WECHAT_REMINDERS =
+            "com.example.harleyapp.action.STOP_WECHAT_REMINDERS"
+        const val REPEAT_CONTINUOUSLY_COUNT = 0
     }
 }

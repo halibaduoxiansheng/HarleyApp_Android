@@ -1,22 +1,22 @@
 package com.example.harleyapp.ui.screens
 
-import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -38,9 +38,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.harleyapp.data.WebsiteCardBackgroundStore
 import com.example.harleyapp.model.WebsitePalette
 import com.example.harleyapp.model.WebsiteShortcut
 import com.example.harleyapp.model.nextWebsiteCarouselPage
@@ -64,6 +67,7 @@ import java.util.UUID
  * @param websites 当前网站列表，顺序就是轮播顺序。
  * @param defaultWebsiteId 点击底部“网站”时优先打开的网站标识。
  * @param onOpenWebsite 点击访问按钮后的回调，参数为当前网站。
+ * @param onOpenDetails 打开完整网站收藏与文件夹管理页的回调。
  * @param onSetDefaultWebsite 把指定网站设置为默认网站的回调，成功返回true。
  * @param onSaveWebsite 新增或编辑网站的保存回调，成功返回true。
  * @param onDeleteWebsite 删除指定网站的回调，成功返回true。
@@ -76,11 +80,16 @@ fun WebsiteCarousel(
     websites: List<WebsiteShortcut>,
     defaultWebsiteId: String?,
     onOpenWebsite: (WebsiteShortcut) -> Unit,
+    onOpenDetails: () -> Unit,
     onSetDefaultWebsite: (String) -> Boolean,
     onSaveWebsite: (WebsiteShortcut) -> Boolean,
     onDeleteWebsite: (String) -> Boolean,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
+    val backgroundStore = remember {
+        WebsiteCardBackgroundStore(context.applicationContext)
+    }
     val pagerState = rememberPagerState(pageCount = { websites.size })
     var editorVisible by remember {
         mutableStateOf(false)
@@ -121,6 +130,7 @@ fun WebsiteCarousel(
     if (editorVisible) {
         WebsiteEditorDialog(
             website = editingWebsite,
+            backgroundStore = backgroundStore,
             onDismiss = {
                 editorVisible = false
                 editingWebsite = null
@@ -168,22 +178,27 @@ fun WebsiteCarousel(
                 )
                 Text(
                     text = if (websites.isEmpty()) {
-                        "添加网站后即可从首页访问"
+                        "尚未选择需要在首页轮播的网站"
                     } else {
-                        "自动轮播 · 也可左右滑动 · ${websites.size} 个网站"
+                        "精选轮播 · 也可左右滑动 · ${websites.size} 个网站"
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
 
-            TextButton(
-                onClick = {
-                    editingWebsite = null
-                    editorVisible = true
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = onOpenDetails) {
+                    Text(text = "详情")
                 }
-            ) {
-                Text(text = "＋ 添加")
+                TextButton(
+                    onClick = {
+                        editingWebsite = null
+                        editorVisible = true
+                    }
+                ) {
+                    Text(text = "＋ 添加")
+                }
             }
         }
 
@@ -206,6 +221,7 @@ fun WebsiteCarousel(
                 val website = websites[page]
                 WebsiteCarouselCard(
                     website = website,
+                    backgroundStore = backgroundStore,
                     isDefault = website.id == defaultWebsiteId,
                     onOpen = {
                         onOpenWebsite(website)
@@ -253,6 +269,7 @@ fun WebsiteCarousel(
  * 显示一张带预设渐变色的网站卡片。
  *
  * @param website 当前网站数据。
+ * @param backgroundStore 网站卡片私有背景图存储。
  * @param isDefault 当前网站是否为底部“网站”页签的默认入口。
  * @param onOpen 进入内置网页页签的回调。
  * @param onSetDefault 把当前网站设为默认入口的回调。
@@ -264,13 +281,18 @@ fun WebsiteCarousel(
 @Composable
 private fun WebsiteCarouselCard(
     website: WebsiteShortcut,
+    backgroundStore: WebsiteCardBackgroundStore,
     isDefault: Boolean,
     onOpen: () -> Unit,
     onSetDefault: () -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit
 ) {
-    val palette = websitePaletteStyle(website.palette)
+    val style = websiteCardVisualStyle(website.palette, website.customColorArgb)
+    val backgroundImage = rememberWebsiteBackgroundImage(
+        store = backgroundStore,
+        fileName = website.backgroundImageFileName
+    )
     val dateText = remember {
         LocalDate.now().format(
             DateTimeFormatter.ofPattern("M月d日 EEEE", Locale.CHINA)
@@ -283,13 +305,35 @@ private fun WebsiteCarouselCard(
         colors = CardDefaults.cardColors(containerColor = Color.Transparent),
         elevation = CardDefaults.cardElevation(defaultElevation = 6.dp)
     ) {
-        Column(
+        Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(Brush.linearGradient(palette.colors))
-                .padding(22.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+                .background(Brush.linearGradient(style.colors))
         ) {
+            backgroundImage?.let { image ->
+                Image(
+                    bitmap = image,
+                    contentDescription = null,
+                    modifier = Modifier.matchParentSize(),
+                    contentScale = ContentScale.Crop
+                )
+            }
+            if (backgroundImage != null || website.customColorArgb != null) {
+                Box(
+                    modifier = Modifier
+                        .matchParentSize()
+                        .background(
+                            Color.Black.copy(
+                                alpha = if (backgroundImage != null) 0.38f else 0.12f
+                            )
+                        )
+                )
+            }
+
+            Column(
+                modifier = Modifier.padding(22.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
@@ -309,7 +353,7 @@ private fun WebsiteCarouselCard(
                     Text(
                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
                         text = if (isDefault) "默认网站" else "设为默认",
-                        color = if (isDefault) Color.White else palette.colors.first(),
+                        color = if (isDefault) Color.White else style.actionColor,
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.Bold
                     )
@@ -339,7 +383,7 @@ private fun WebsiteCarouselCard(
                     onClick = onOpen,
                     colors = ButtonDefaults.buttonColors(
                         containerColor = Color.White.copy(alpha = 0.94f),
-                        contentColor = palette.colors.first()
+                        contentColor = style.actionColor
                     )
                 ) {
                     Text(text = "访问网站")
@@ -356,6 +400,7 @@ private fun WebsiteCarouselCard(
                         Text(text = "删除", color = Color.White)
                     }
                 }
+            }
             }
         }
     }
@@ -399,9 +444,10 @@ private fun EmptyWebsiteCard(onAddWebsite: () -> Unit) {
 }
 
 /**
- * 新增或编辑网站名称、HTTPS网址和预设配色。
+ * 新增或编辑网站名称、网址、主题色和私有图片背景。
  *
  * @param website 编辑目标；传null表示新增网站。
+ * @param backgroundStore 网站卡片私有背景图存储。
  * @param onDismiss 取消编辑回调。
  * @param onSave 保存规范化网站的回调，成功返回true。
  *
@@ -410,6 +456,7 @@ private fun EmptyWebsiteCard(onAddWebsite: () -> Unit) {
 @Composable
 private fun WebsiteEditorDialog(
     website: WebsiteShortcut?,
+    backgroundStore: WebsiteCardBackgroundStore,
     onDismiss: () -> Unit,
     onSave: (WebsiteShortcut) -> Boolean
 ) {
@@ -422,6 +469,12 @@ private fun WebsiteEditorDialog(
     var selectedPalette by remember(website?.id) {
         mutableStateOf(website?.palette ?: WebsitePalette.OCEAN)
     }
+    var customColorArgb by remember(website?.id) {
+        mutableStateOf(website?.customColorArgb)
+    }
+    var backgroundImageFileName by remember(website?.id) {
+        mutableStateOf(website?.backgroundImageFileName)
+    }
     var titleError by remember(website?.id) {
         mutableStateOf("")
     }
@@ -431,14 +484,27 @@ private fun WebsiteEditorDialog(
     var saveError by remember(website?.id) {
         mutableStateOf("")
     }
+    val dismissEditor = {
+        discardUncommittedWebsiteBackground(
+            store = backgroundStore,
+            originalFileName = website?.backgroundImageFileName,
+            currentFileName = backgroundImageFileName
+        )
+        onDismiss()
+    }
 
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = dismissEditor,
         title = {
             Text(text = if (website == null) "添加网站" else "编辑网站")
         },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 560.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
                 OutlinedTextField(
                     value = title,
                     onValueChange = { newValue ->
@@ -486,26 +552,19 @@ private fun WebsiteEditorDialog(
                     }
                 )
 
-                Text(
-                    text = "卡片颜色",
-                    style = MaterialTheme.typography.labelLarge,
-                    fontWeight = FontWeight.SemiBold
+                WebsiteCardAppearanceEditor(
+                    palette = selectedPalette,
+                    customColorArgb = customColorArgb,
+                    backgroundImageFileName = backgroundImageFileName,
+                    originalBackgroundImageFileName = website?.backgroundImageFileName,
+                    backgroundStore = backgroundStore,
+                    onPaletteChanged = { palette -> selectedPalette = palette },
+                    onCustomColorChanged = { color -> customColorArgb = color },
+                    onBackgroundImageChanged = { fileName ->
+                        backgroundImageFileName = fileName
+                    },
+                    onMessageChanged = { message -> saveError = message }
                 )
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    items(
-                        items = WebsitePalette.entries,
-                        key = { palette -> palette.name }
-                    ) { palette ->
-                        PaletteOption(
-                            palette = palette,
-                            selected = selectedPalette == palette,
-                            onClick = {
-                                selectedPalette = palette
-                                saveError = ""
-                            }
-                        )
-                    }
-                }
 
                 if (saveError.isNotBlank()) {
                     Text(
@@ -525,12 +584,21 @@ private fun WebsiteEditorDialog(
                     urlError = if (normalizedUrl == null) "请输入有效的HTTP或HTTPS网址" else ""
 
                     if (titleError.isBlank() && urlError.isBlank() && normalizedUrl != null) {
+                        // 编辑首页卡片时保留所属文件夹、首页开关和排序，避免扁平编辑破坏收藏树。
                         val saved = onSave(
-                            WebsiteShortcut(
-                                id = website?.id ?: UUID.randomUUID().toString(),
+                            website?.copy(
                                 title = trimmedTitle,
                                 url = normalizedUrl,
-                                palette = selectedPalette
+                                palette = selectedPalette,
+                                customColorArgb = customColorArgb,
+                                backgroundImageFileName = backgroundImageFileName
+                            ) ?: WebsiteShortcut(
+                                id = UUID.randomUUID().toString(),
+                                title = trimmedTitle,
+                                url = normalizedUrl,
+                                palette = selectedPalette,
+                                customColorArgb = customColorArgb,
+                                backgroundImageFileName = backgroundImageFileName
                             )
                         )
                         if (!saved) {
@@ -543,61 +611,11 @@ private fun WebsiteEditorDialog(
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) {
+            TextButton(onClick = dismissEditor) {
                 Text(text = "取消")
             }
         }
     )
-}
-
-/**
- * 显示单个预设颜色选项。
- *
- * @param palette 颜色枚举。
- * @param selected 当前是否选中。
- * @param onClick 选择回调。
- *
- * @return 无返回值。
- */
-@Composable
-private fun PaletteOption(
-    palette: WebsitePalette,
-    selected: Boolean,
-    onClick: () -> Unit
-) {
-    val style = websitePaletteStyle(palette)
-    Surface(
-        onClick = onClick,
-        modifier = Modifier
-            .size(width = 76.dp, height = 58.dp)
-            .border(
-                BorderStroke(
-                    width = if (selected) 3.dp else 1.dp,
-                    color = if (selected) {
-                        MaterialTheme.colorScheme.onSurface
-                    } else {
-                        MaterialTheme.colorScheme.outlineVariant
-                    }
-                ),
-                RoundedCornerShape(16.dp)
-            ),
-        shape = RoundedCornerShape(16.dp),
-        color = Color.Transparent
-    ) {
-        Box(
-            modifier = Modifier
-                .background(Brush.linearGradient(style.colors))
-                .padding(6.dp),
-            contentAlignment = Alignment.BottomCenter
-        ) {
-            Text(
-                text = style.name,
-                color = Color.White,
-                style = MaterialTheme.typography.labelSmall,
-                fontWeight = FontWeight.Bold
-            )
-        }
-    }
 }
 
 /**
@@ -655,47 +673,6 @@ private fun WebsiteDeleteDialog(
     )
 }
 
-/** 预设颜色在界面中的中文名称和渐变色。 */
-private data class WebsitePaletteStyle(
-    val name: String,
-    val colors: List<Color>
-)
-
-/**
- * 把稳定颜色枚举映射为实际渐变色。
- *
- * @param palette 持久化配色枚举。
- *
- * @return 对应中文名称和两端渐变色。
- */
-private fun websitePaletteStyle(palette: WebsitePalette): WebsitePaletteStyle {
-    return when (palette) {
-        WebsitePalette.OCEAN -> WebsitePaletteStyle(
-            name = "海蓝",
-            colors = listOf(Color(0xFF0B5CAD), Color(0xFF00A8A8))
-        )
-        WebsitePalette.VIOLET -> WebsitePaletteStyle(
-            name = "星紫",
-            colors = listOf(Color(0xFF5B3CC4), Color(0xFF9B4DCA))
-        )
-        WebsitePalette.SUNSET -> WebsitePaletteStyle(
-            name = "日落",
-            colors = listOf(Color(0xFFD64B4B), Color(0xFFF28C45))
-        )
-        WebsitePalette.FOREST -> WebsitePaletteStyle(
-            name = "森林",
-            colors = listOf(Color(0xFF176B4D), Color(0xFF4B8F45))
-        )
-        WebsitePalette.ROSE -> WebsitePaletteStyle(
-            name = "玫瑰",
-            colors = listOf(Color(0xFFA63462), Color(0xFFD9577D))
-        )
-        WebsitePalette.AMBER -> WebsitePaletteStyle(
-            name = "琥珀",
-            colors = listOf(Color(0xFF9A5B00), Color(0xFFD98900))
-        )
-    }
-}
 
 /**
  * 从完整网址中提取适合卡片显示的主机名。

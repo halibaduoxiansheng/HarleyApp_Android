@@ -2,14 +2,29 @@ package com.example.harleyapp.data
 
 import android.content.Context
 import android.util.Log
+import com.example.harleyapp.data.local.RoomBackedPreferences
 import com.example.harleyapp.model.DailyFitnessRecord
 import com.example.harleyapp.model.FitnessExerciseDefinition
+import com.example.harleyapp.model.FitnessGoalPeriod
 import com.example.harleyapp.model.FitnessRecordItem
 import com.example.harleyapp.model.FitnessTrackingType
 import org.json.JSONArray
 import org.json.JSONObject
 import java.time.LocalDate
 import java.util.UUID
+
+/**
+ * 一键同步运动计划后的原子写入结果。
+ *
+ * @param isSuccess 全部项目一次性保存成功时为true。
+ * @param addedCount 新增项目数量。
+ * @param updatedCount 更新现有同id或同名项目数量。
+ */
+data class FitnessPlanSyncResult(
+    val isSuccess: Boolean,
+    val addedCount: Int = 0,
+    val updatedCount: Int = 0
+)
 
 /**
  * 管理动态运动项目、每日运动记录和计步传感器基准值。
@@ -28,10 +43,10 @@ import java.util.UUID
  */
 class FitnessRepository(context: Context) {
 
-    // 只保存SharedPreferences实例，不持有Activity，避免页面销毁后发生Context泄漏。
-    private val preferences = context.getSharedPreferences(
-        PREFERENCE_NAME,
-        Context.MODE_PRIVATE
+    // Room负责结构化JSON主存储，SharedPreferences仅保留兼容副本和传感器小型状态。
+    private val preferences = RoomBackedPreferences.create(
+        context = context,
+        preferenceName = PREFERENCE_NAME
     )
 
     /**
@@ -117,6 +132,104 @@ class FitnessRepository(context: Context) {
         }
 
         return safeDefinition
+    }
+
+    /**
+     * 非破坏性地把用户确认后的建议列表同步到当前运动计划。
+     *
+     * 使用方法：
+     * 建议预览弹窗允许用户修改名称、单位、目标、周期和快捷增加量；确认后把所有启用项目一次
+     * 传入本函数。仓库先在内存中完成全量校验，再一次提交项目列表和今日快照，任何一项无效都
+     * 不会产生部分写入。相同id优先更新，其次更新同名项目，其余项目新增；未出现在建议列表中的
+     * 用户自定义项目始终保留。
+     *
+     * @param proposedDefinitions 用户在建议弹窗确认的完整项目列表。
+     * @param todayEpochDay 今天的日期序号，用于刷新今日已存在记录的目标快照。
+     *
+     * @return 同步成功与新增、更新数量；校验或写入失败时isSuccess为false且计数为0。
+     */
+    @Synchronized
+    fun syncExercisePlan(
+        proposedDefinitions: List<FitnessExerciseDefinition>,
+        todayEpochDay: Long = LocalDate.now().toEpochDay()
+    ): FitnessPlanSyncResult {
+        if (proposedDefinitions.isEmpty()) {
+            return FitnessPlanSyncResult(isSuccess = true)
+        }
+        val safeProposals = proposedDefinitions.map { definition ->
+            sanitizeDefinition(definition) ?: return FitnessPlanSyncResult(isSuccess = false)
+        }
+        if (safeProposals.distinctBy { definition -> definition.id }.size != safeProposals.size ||
+            safeProposals.distinctBy { definition -> definition.name.lowercase() }.size != safeProposals.size
+        ) {
+            return FitnessPlanSyncResult(isSuccess = false)
+        }
+
+        val mergedDefinitions = getExerciseDefinitions().toMutableList()
+        val changedDefinitions = mutableListOf<FitnessExerciseDefinition>()
+        var addedCount = 0
+        var updatedCount = 0
+        safeProposals.forEach { proposal ->
+            val existingIndexById = mergedDefinitions.indexOfFirst { existing ->
+                existing.id == proposal.id
+            }
+            val existingIndex = if (existingIndexById >= 0) {
+                existingIndexById
+            } else {
+                mergedDefinitions.indexOfFirst { existing ->
+                    existing.name.equals(proposal.name, ignoreCase = true)
+                }
+            }
+            if (existingIndex >= 0) {
+                val normalizedProposal = proposal.copy(id = mergedDefinitions[existingIndex].id)
+                mergedDefinitions[existingIndex] = normalizedProposal
+                changedDefinitions.add(normalizedProposal)
+                updatedCount += 1
+            } else {
+                mergedDefinitions.add(proposal)
+                changedDefinitions.add(proposal)
+                addedCount += 1
+            }
+        }
+
+        val hasDuplicateNames = mergedDefinitions
+            .groupingBy { definition -> definition.name.lowercase() }
+            .eachCount()
+            .any { (_, count) -> count > 1 }
+        val stepDefinitionCount = mergedDefinitions.count { definition ->
+            definition.trackingType == FitnessTrackingType.STEP_COUNTER
+        }
+        if (mergedDefinitions.size > MAX_EXERCISE_DEFINITIONS ||
+            hasDuplicateNames ||
+            stepDefinitionCount > 1
+        ) {
+            return FitnessPlanSyncResult(isSuccess = false)
+        }
+
+        val records = readStoredRecords().toMutableList()
+        val todayIndex = records.indexOfFirst { record ->
+            record.dateEpochDay == todayEpochDay
+        }
+        if (todayIndex >= 0) {
+            records[todayIndex] = records[todayIndex].withDefinitions(
+                definitions = changedDefinitions,
+                refreshExisting = true
+            )
+        }
+        val editor = preferences.edit()
+            .putString(KEY_EXERCISE_DEFINITIONS, definitionsToJson(mergedDefinitions))
+        if (todayIndex >= 0) {
+            editor.putString(KEY_RECORDS, recordsToJson(records))
+        }
+        if (!editor.commit()) {
+            Log.e(TAG, "Failed to sync exercise plan")
+            return FitnessPlanSyncResult(isSuccess = false)
+        }
+        return FitnessPlanSyncResult(
+            isSuccess = true,
+            addedCount = addedCount,
+            updatedCount = updatedCount
+        )
     }
 
     /**
@@ -236,6 +349,31 @@ class FitnessRepository(context: Context) {
     }
 
     /**
+     * 读取每个当前运动项目在所属目标周期内的累计完成量。
+     *
+     * 使用方法：
+     * 运动页首次显示和每次记录写入后调用。每日项目只读取指定日期；每周项目从该日期所在周的
+     * 周一累计到周日，使用户每天进入页面都能看到同一自然周进度。
+     *
+     * @param epochDay 用于确定“当天”或所在自然周的日期序号，默认今天。
+     *
+     * @return 以项目id为键、周期累计完成量为值的映射。
+     */
+    fun getGoalProgressCounts(
+        epochDay: Long = LocalDate.now().toEpochDay()
+    ): Map<String, Int> {
+        val definitions = getExerciseDefinitions()
+        val records = readStoredRecords()
+        return definitions.associate { definition ->
+            definition.id to calculateGoalProgress(
+                definition = definition,
+                epochDay = epochDay,
+                records = records
+            )
+        }
+    }
+
+    /**
      * 新增或覆盖保存某一天的完整动态记录。
      *
      * @param record 页面提交的记录；dateEpochDay是唯一键。
@@ -319,15 +457,24 @@ class FitnessRepository(context: Context) {
         epochDay: Long = LocalDate.now().toEpochDay()
     ): DailyFitnessRecord? {
         val definitions = getExerciseDefinitions()
-        if (definitions.none { it.id == exerciseId }) {
-            return null
-        }
+        val definition = definitions.firstOrNull { it.id == exerciseId } ?: return null
         val records = readStoredRecords().toMutableList()
         val current = findMutableRecord(records, epochDay, definitions)
         val item = current.itemFor(exerciseId) ?: return null
+        val currentProgress = calculateGoalProgress(
+            definition = definition,
+            epochDay = epochDay,
+            records = records
+        )
+        val remainingCount = (definition.dailyGoal - currentProgress).coerceAtLeast(0)
+        val completedCount = if (definition.goalPeriod == FitnessGoalPeriod.WEEKLY) {
+            safeCount(item.count.toLong() + remainingCount)
+        } else {
+            maxOf(item.count, item.goal)
+        }
         val updated = current.withCount(
             exerciseId = exerciseId,
-            count = maxOf(item.count, item.goal)
+            count = completedCount
         )
         return persistUpdatedRecord(records, updated)
     }
@@ -582,8 +729,42 @@ class FitnessRepository(context: Context) {
             quickIncrement = definition.quickIncrement.coerceIn(
                 MIN_QUICK_INCREMENT,
                 MAX_QUICK_INCREMENT
-            )
+            ),
+            goalPeriod = if (definition.trackingType == FitnessTrackingType.STEP_COUNTER) {
+                FitnessGoalPeriod.DAILY
+            } else {
+                definition.goalPeriod
+            }
         )
+    }
+
+    /**
+     * 计算单个项目在指定日期所属周期内的完成量。
+     *
+     * @param definition 当前项目定义。
+     * @param epochDay 查询日期序号。
+     * @param records 全部已保存的日记录。
+     *
+     * @return 每日项目当天完成量，或每周项目周一到周日累计量。
+     */
+    private fun calculateGoalProgress(
+        definition: FitnessExerciseDefinition,
+        epochDay: Long,
+        records: List<DailyFitnessRecord>
+    ): Int {
+        if (definition.goalPeriod == FitnessGoalPeriod.DAILY) {
+            return records.firstOrNull { record -> record.dateEpochDay == epochDay }
+                ?.countFor(definition.id)
+                ?: 0
+        }
+        val dayOfWeekOffset = LocalDate.ofEpochDay(epochDay).dayOfWeek.value - 1L
+        val weekStartEpochDay = epochDay - dayOfWeekOffset
+        val weekEndEpochDay = weekStartEpochDay + 6L
+        val total = records
+            .asSequence()
+            .filter { record -> record.dateEpochDay in weekStartEpochDay..weekEndEpochDay }
+            .sumOf { record -> record.countFor(definition.id).toLong() }
+        return safeCount(total)
     }
 
     /**
@@ -675,6 +856,11 @@ class FitnessRepository(context: Context) {
                 optString(JSON_TRACKING_TYPE, FitnessTrackingType.MANUAL.name)
             )
         }.getOrDefault(FitnessTrackingType.MANUAL)
+        val goalPeriod = runCatching {
+            FitnessGoalPeriod.valueOf(
+                optString(JSON_GOAL_PERIOD, FitnessGoalPeriod.DAILY.name)
+            )
+        }.getOrDefault(FitnessGoalPeriod.DAILY)
         return sanitizeDefinition(
             FitnessExerciseDefinition(
                 id = optString(JSON_ID),
@@ -682,7 +868,8 @@ class FitnessRepository(context: Context) {
                 unit = optString(JSON_UNIT),
                 dailyGoal = optInt(JSON_DAILY_GOAL, MIN_GOAL),
                 quickIncrement = optInt(JSON_QUICK_INCREMENT, DEFAULT_QUICK_INCREMENT),
-                trackingType = trackingType
+                trackingType = trackingType,
+                goalPeriod = goalPeriod
             )
         )
     }
@@ -700,6 +887,7 @@ class FitnessRepository(context: Context) {
             .put(JSON_DAILY_GOAL, dailyGoal)
             .put(JSON_QUICK_INCREMENT, quickIncrement)
             .put(JSON_TRACKING_TYPE, trackingType.name)
+            .put(JSON_GOAL_PERIOD, goalPeriod.name)
     }
 
     /**
@@ -722,6 +910,14 @@ class FitnessRepository(context: Context) {
                             )
                         )
                     }.getOrDefault(FitnessTrackingType.MANUAL)
+                    val goalPeriod = runCatching {
+                        FitnessGoalPeriod.valueOf(
+                            itemObject.optString(
+                                JSON_GOAL_PERIOD,
+                                FitnessGoalPeriod.DAILY.name
+                            )
+                        )
+                    }.getOrDefault(FitnessGoalPeriod.DAILY)
                     add(
                         FitnessRecordItem(
                             exerciseId = itemObject.optString(JSON_EXERCISE_ID),
@@ -729,7 +925,8 @@ class FitnessRepository(context: Context) {
                             unit = itemObject.optString(JSON_UNIT),
                             count = itemObject.optInt(JSON_COUNT, 0),
                             goal = itemObject.optInt(JSON_GOAL, MIN_GOAL),
-                            trackingType = trackingType
+                            trackingType = trackingType,
+                            goalPeriod = goalPeriod
                         )
                     )
                 }
@@ -790,6 +987,7 @@ class FitnessRepository(context: Context) {
                     .put(JSON_COUNT, item.count)
                     .put(JSON_GOAL, item.goal)
                     .put(JSON_TRACKING_TYPE, item.trackingType.name)
+                    .put(JSON_GOAL_PERIOD, item.goalPeriod.name)
             )
         }
         return JSONObject()
@@ -836,6 +1034,7 @@ class FitnessRepository(context: Context) {
         const val JSON_DAILY_GOAL = "daily_goal"
         const val JSON_QUICK_INCREMENT = "quick_increment"
         const val JSON_TRACKING_TYPE = "tracking_type"
+        const val JSON_GOAL_PERIOD = "goal_period"
         const val JSON_COUNT = "count"
         const val JSON_GOAL = "goal"
 

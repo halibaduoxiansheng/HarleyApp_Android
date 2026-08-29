@@ -48,7 +48,9 @@ import java.time.format.DateTimeFormatter
  *
  * @param reminders 当前本机保存的全部通用通知计划。
  * @param notificationPermissionGranted 是否允许本应用发布通知。
+ * @param exactAlarmPermissionGranted 是否允许本应用使用精确Alarm准时唤醒。
  * @param onRequestNotificationPermission 请求Android通知权限的回调。
+ * @param onRequestExactAlarmPermission 打开Android“闹钟和提醒”特殊权限页面的回调。
  * @param onSaveReminder 新增或修改通知计划的回调；数据与Alarm均成功时返回true。
  * @param onDeleteReminder 删除通知计划并取消Alarm的回调；成功时返回true。
  * @param modifier 外部传入的布局修饰器。
@@ -59,7 +61,9 @@ import java.time.format.DateTimeFormatter
 fun ReminderCard(
     reminders: List<ScheduledReminder>,
     notificationPermissionGranted: Boolean,
+    exactAlarmPermissionGranted: Boolean,
     onRequestNotificationPermission: () -> Unit,
+    onRequestExactAlarmPermission: () -> Unit,
     onSaveReminder: (ScheduledReminder) -> Boolean,
     onDeleteReminder: (Long) -> Boolean,
     modifier: Modifier = Modifier
@@ -193,6 +197,30 @@ fun ReminderCard(
                 }
             }
 
+            if (!exactAlarmPermissionGranted) {
+                Card(
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.tertiaryContainer
+                    )
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            modifier = Modifier.weight(1f),
+                            text = "尚未允许准时提醒，Android或小米省电策略可能让通知延迟数十分钟。",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        TextButton(onClick = onRequestExactAlarmPermission) {
+                            Text(text = "允许准时提醒")
+                        }
+                    }
+                }
+            }
+
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -290,7 +318,11 @@ fun ReminderCard(
                                     repeatIntervalText = "0"
                                 }
                                 if (notificationPermissionGranted) {
-                                    "通知计划已保存"
+                                    if (exactAlarmPermissionGranted) {
+                                        "通知计划已保存，将按设定时间准时提醒"
+                                    } else {
+                                        "计划已保存；请点击“允许准时提醒”避免系统延迟"
+                                    }
                                 } else {
                                     "计划已保存，请允许通知以免错过提醒"
                                 }

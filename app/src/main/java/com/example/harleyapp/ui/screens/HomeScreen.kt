@@ -2,24 +2,35 @@ package com.example.harleyapp.ui.screens
 
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -28,22 +39,28 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.harleyapp.model.CompanionCategory
 import com.example.harleyapp.model.CompanionProgress
 import com.example.harleyapp.model.DeviceSnapshot
+import com.example.harleyapp.model.ENGLISH_WORD_MASTERY_COUNT
+import com.example.harleyapp.model.EnglishWord
+import com.example.harleyapp.model.HomeFeatureId
 import com.example.harleyapp.model.LaunchableApp
 import com.example.harleyapp.model.WebsiteShortcut
 import com.example.harleyapp.system.DeviceMonitor
 import com.example.harleyapp.system.NetworkSample
+import com.example.harleyapp.system.OfflineEnglishTtsState
 import com.example.harleyapp.ui.components.bouncyClickable
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -52,11 +69,11 @@ import kotlinx.coroutines.withContext
 import java.util.Locale
 
 /**
- * 显示首页概览、实时设备状态和用户快捷应用。
+ * 显示首页概览、实时网络速率和用户快捷应用。
  *
  * 使用方法：
- * 由HarleyApp在首页导航项选中时调用。页面可见期间每秒读取一次轻量系统状态，
- * 离开页面后LaunchedEffect会自动取消，不会继续后台刷新。
+ * 由HarleyApp在首页导航项选中时调用。页面可见期间每秒读取一次轻量网络状态，
+ * 用于展示上传和下载速率；容量信息统一放在“我的”页面，离开首页后LaunchedEffect会自动取消。
  *
  * @param modifier 外部传入的页面安全边距。
  * @param deviceMonitor 设备状态读取服务。
@@ -67,9 +84,16 @@ import java.util.Locale
  * @param defaultWebsiteId 点击底部“网站”时默认打开的网站标识。
  * @param companionProgress 玩偶当前经验、分类和今日任务状态。
  * @param onOpenWebsite 前往内置网站页面的回调，参数为用户点击的网站。
+ * @param onOpenWebsiteDetails 打开网站收藏夹详情与管理页面的回调。
  * @param onSetDefaultWebsite 把指定网站设为底部网站页签默认入口的回调。
- * @param onOpenHotTopics 点击“每日热点”功能卡片后进入独立详情页的回调。
- * @param onOpenMobileData 点击“手机流量”功能卡片后进入蜂窝流量详情页的回调。
+ * @param selectedHomeFeatures 用户选择在首页展示的功能标识集合。
+ * @param onSaveHomeFeatures 覆盖保存首页功能选择的回调，成功返回true。
+ * @param onOpenFeature 点击首页功能卡片后的统一导航回调，参数为功能标识。
+ * @param englishWord 首页当前随机显示的尚未完成单词；全部达到三次时为null。
+ * @param englishRemainingCount 当前尚未达到三次、仍参与首页随机复习的单词数量。
+ * @param englishTtsState Android离线英语TTS当前状态。
+ * @param onSpeakEnglish 朗读英文单词或例句的回调，成功提交返回true。
+ * @param onMarkEnglishWordLearned 把指定首页单词学习次数增加一次的回调。
  * @param onSaveWebsite 新增或编辑网站的同步保存回调，成功返回true。
  * @param onDeleteWebsite 删除网站的同步回调，成功返回true。
  * @param onSelectCompanionCategory 更换玩偶分类的同步保存回调，成功返回true。
@@ -87,9 +111,16 @@ fun HomeScreen(
     defaultWebsiteId: String?,
     companionProgress: CompanionProgress,
     onOpenWebsite: (WebsiteShortcut) -> Unit,
+    onOpenWebsiteDetails: () -> Unit,
     onSetDefaultWebsite: (String) -> Boolean,
-    onOpenHotTopics: () -> Unit,
-    onOpenMobileData: () -> Unit,
+    selectedHomeFeatures: Set<HomeFeatureId>,
+    onSaveHomeFeatures: (Set<HomeFeatureId>) -> Boolean,
+    onOpenFeature: (HomeFeatureId) -> Unit,
+    englishWord: EnglishWord?,
+    englishRemainingCount: Int,
+    englishTtsState: OfflineEnglishTtsState,
+    onSpeakEnglish: (String) -> Boolean,
+    onMarkEnglishWordLearned: (String) -> Boolean,
     onSaveWebsite: (WebsiteShortcut) -> Boolean,
     onDeleteWebsite: (String) -> Boolean,
     onSelectCompanionCategory: (CompanionCategory) -> Boolean
@@ -136,6 +167,7 @@ fun HomeScreen(
                 websites = websites,
                 defaultWebsiteId = defaultWebsiteId,
                 onOpenWebsite = onOpenWebsite,
+                onOpenDetails = onOpenWebsiteDetails,
                 onSetDefaultWebsite = onSetDefaultWebsite,
                 onSaveWebsite = onSaveWebsite,
                 onDeleteWebsite = onDeleteWebsite
@@ -143,29 +175,21 @@ fun HomeScreen(
         }
 
         item {
-            SectionTitle(
-                title = "功能中心",
-                subtitle = "点击卡片进入独立功能页"
+            HomeFeatureCarousel(
+                selectedFeatures = selectedHomeFeatures,
+                onSaveSelection = onSaveHomeFeatures,
+                onOpenFeature = onOpenFeature
             )
         }
 
         item {
-            FeatureEntryCard(
-                title = "每日热点",
-                description = "查看微博、百度、知乎和抖音热门榜单",
-                symbol = "热",
-                statusLabel = "实时",
-                onClick = onOpenHotTopics
-            )
-        }
-
-        item {
-            FeatureEntryCard(
-                title = "手机流量",
-                description = "查看今日、本周、本月手机流量和应用排行",
-                symbol = "流",
-                statusLabel = "仅蜂窝",
-                onClick = onOpenMobileData
+            HomeEnglishWordCard(
+                word = englishWord,
+                remainingCount = englishRemainingCount,
+                ttsState = englishTtsState,
+                onSpeakEnglish = onSpeakEnglish,
+                onMarkLearned = onMarkEnglishWordLearned,
+                onOpenAll = { onOpenFeature(HomeFeatureId.ENGLISH_WORDS) }
             )
         }
 
@@ -214,35 +238,6 @@ fun HomeScreen(
         }
 
         item {
-            UsageCard(
-                title = "物理运行内存",
-                totalBytes = snapshot.totalMemoryBytes,
-                availableBytes = snapshot.availableMemoryBytes,
-                note = physicalMemoryNote(snapshot.totalMemoryBytes)
-            )
-        }
-
-        if (snapshot.totalSwapBytes > 0L) {
-            item {
-                UsageCard(
-                    title = "交换 / 扩展空间",
-                    totalBytes = snapshot.totalSwapBytes,
-                    availableBytes = snapshot.availableSwapBytes,
-                    note = "由系统用作内存扩展和交换空间，性能不等同于物理RAM"
-                )
-            }
-        }
-
-        item {
-            UsageCard(
-                title = "内部存储",
-                totalBytes = snapshot.totalStorageBytes,
-                availableBytes = snapshot.availableStorageBytes,
-                note = "手机主用户数据分区的容量"
-            )
-        }
-
-        item {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
@@ -265,13 +260,12 @@ fun HomeScreen(
             }
         } else {
             item {
-                LazyRow(
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    items(
-                        items = shortcuts,
-                        key = { it.packageName }
-                    ) { app ->
+                    shortcuts.forEach { app ->
                         ShortcutItem(
                             app = app,
                             onClick = {
@@ -283,6 +277,665 @@ fun HomeScreen(
             }
         }
     }
+}
+
+/** 首页功能轮播中单个功能所需的固定展示信息和点击行为。 */
+private data class HomeFeatureEntry(
+    val id: HomeFeatureId,
+    val title: String,
+    val description: String,
+    val symbol: String,
+    val statusLabel: String,
+    val onClick: () -> Unit
+)
+
+/**
+ * 创建首页功能的完整有序目录。
+ *
+ * 使用方法：
+ * 首页轮播和管理弹窗都调用本函数，确保可选择的功能、显示顺序和导航标识完全一致。新增功能时
+ * 在此补充展示信息，并在HarleyApp的onOpenFeature分支中补充实际导航。
+ *
+ * @param onOpenFeature 打开指定功能的统一导航回调。
+ *
+ * @return 与HomeFeatureId声明顺序一致的完整首页功能目录。
+ */
+private fun homeFeatureEntries(
+    onOpenFeature: (HomeFeatureId) -> Unit
+): List<HomeFeatureEntry> {
+    return listOf(
+        HomeFeatureEntry(
+            id = HomeFeatureId.TODAY,
+            title = "今日总览",
+            description = "天气、收支、提醒与运动",
+            symbol = "今",
+            statusLabel = "本地汇总",
+            onClick = { onOpenFeature(HomeFeatureId.TODAY) }
+        ),
+        HomeFeatureEntry(
+            id = HomeFeatureId.SEARCH,
+            title = "全局搜索",
+            description = "搜索全部本机数据",
+            symbol = "搜",
+            statusLabel = "本地",
+            onClick = { onOpenFeature(HomeFeatureId.SEARCH) }
+        ),
+        HomeFeatureEntry(
+            id = HomeFeatureId.LEDGER,
+            title = "记账",
+            description = "账目、汇总与微信账单",
+            symbol = "¥",
+            statusLabel = "本地",
+            onClick = { onOpenFeature(HomeFeatureId.LEDGER) }
+        ),
+        HomeFeatureEntry(
+            id = HomeFeatureId.FITNESS,
+            title = "运动",
+            description = "目标、记录与区间分析",
+            symbol = "动",
+            statusLabel = "本地",
+            onClick = { onOpenFeature(HomeFeatureId.FITNESS) }
+        ),
+        HomeFeatureEntry(
+            id = HomeFeatureId.HOT_TOPICS,
+            title = "每日热点",
+            description = "查看今日网络热点摘要",
+            symbol = "热",
+            statusLabel = "实时",
+            onClick = { onOpenFeature(HomeFeatureId.HOT_TOPICS) }
+        ),
+        HomeFeatureEntry(
+            id = HomeFeatureId.MOBILE_DATA,
+            title = "手机流量",
+            description = "蜂窝流量统计与排行",
+            symbol = "流",
+            statusLabel = "仅蜂窝",
+            onClick = { onOpenFeature(HomeFeatureId.MOBILE_DATA) }
+        ),
+        HomeFeatureEntry(
+            id = HomeFeatureId.WECHAT_REMINDER,
+            title = "微信消息提醒",
+            description = "未查看消息重复提醒",
+            symbol = "微",
+            statusLabel = "通知",
+            onClick = { onOpenFeature(HomeFeatureId.WECHAT_REMINDER) }
+        ),
+        HomeFeatureEntry(
+            id = HomeFeatureId.GENERAL_REMINDER,
+            title = "通知提醒",
+            description = "一次或重复本机通知",
+            symbol = "铃",
+            statusLabel = "通知",
+            onClick = { onOpenFeature(HomeFeatureId.GENERAL_REMINDER) }
+        ),
+        HomeFeatureEntry(
+            id = HomeFeatureId.BACKUP,
+            title = "本地备份",
+            description = "换手机导出与恢复",
+            symbol = "备",
+            statusLabel = "本地",
+            onClick = { onOpenFeature(HomeFeatureId.BACKUP) }
+        ),
+        HomeFeatureEntry(
+            id = HomeFeatureId.LOCAL_CLEANUP,
+            title = "手机清理",
+            description = "缓存统计与存储管理",
+            symbol = "清",
+            statusLabel = "设备",
+            onClick = { onOpenFeature(HomeFeatureId.LOCAL_CLEANUP) }
+        ),
+        HomeFeatureEntry(
+            id = HomeFeatureId.ENGLISH_WORDS,
+            title = "英语单词",
+            description = "离线词库、例句与发音",
+            symbol = "英",
+            statusLabel = "离线",
+            onClick = { onOpenFeature(HomeFeatureId.ENGLISH_WORDS) }
+        )
+    )
+}
+
+/**
+ * 显示首页随机单词卡，并允许用户不进入详情页就完成一次学习。
+ *
+ * 使用方法：
+ * HomeScreen传入上层已选择好的单词。点击“学会 +1”只在保存成功后由上层更换下一随机词；
+ * 候选全部完成三次后显示本轮完成状态，仍可进入详情页查看四个进度分栏。
+ *
+ * @param word 当前随机单词；全部完成时为null。
+ * @param remainingCount 尚未达到三次的单词数量。
+ * @param ttsState Android离线英语TTS状态。
+ * @param onSpeakEnglish 朗读英文文本的回调。
+ * @param onMarkLearned 学习次数加一的回调，保存成功返回true。
+ * @param onOpenAll 打开英语学习详情页的回调。
+ * @param modifier 外部布局修饰器。
+ *
+ * @return 无返回值。
+ */
+@Composable
+private fun HomeEnglishWordCard(
+    word: EnglishWord?,
+    remainingCount: Int,
+    ttsState: OfflineEnglishTtsState,
+    onSpeakEnglish: (String) -> Boolean,
+    onMarkLearned: (String) -> Boolean,
+    onOpenAll: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var saveFailed by remember(word?.id) {
+        mutableStateOf(false)
+    }
+
+    Card(
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(22.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(9.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "每日英语",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = if (word == null) {
+                            "本轮单词已全部完成"
+                        } else {
+                            "仍有 $remainingCount 个单词未完成三次"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                TextButton(onClick = onOpenAll) {
+                    Text(text = "查看全部")
+                }
+            }
+
+            if (word == null) {
+                Text(
+                    text = "做得很好！可以进入四个分栏，把想继续巩固的单词设为“重新学习”。",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        modifier = Modifier.weight(1f),
+                        text = word.word,
+                        style = MaterialTheme.typography.headlineMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+
+                    Text(
+                        text = "${word.learnedCount} / $ENGLISH_WORD_MASTERY_COUNT 次",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                Text(
+                    text = word.meaningZh,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Text(
+                    text = word.exampleEn,
+                    style = MaterialTheme.typography.bodyLarge
+                )
+                Text(
+                    text = word.exampleZh,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                if (ttsState != OfflineEnglishTtsState.READY) {
+                    Text(
+                        text = when (ttsState) {
+                            OfflineEnglishTtsState.INITIALIZING -> "正在检查本机离线发音…"
+                            OfflineEnglishTtsState.MISSING_OFFLINE_VOICE ->
+                                "需在系统文字转语音设置中安装英语离线语音包"
+                            OfflineEnglishTtsState.ERROR -> "系统文字转语音暂不可用"
+                            OfflineEnglishTtsState.READY -> ""
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        modifier = Modifier.weight(1f),
+                        enabled = ttsState == OfflineEnglishTtsState.READY,
+                        onClick = { onSpeakEnglish(word.word) }
+                    ) {
+                        Text(text = "单词发音")
+                    }
+
+                    OutlinedButton(
+                        modifier = Modifier.weight(1f),
+                        enabled = ttsState == OfflineEnglishTtsState.READY,
+                        onClick = { onSpeakEnglish(word.exampleEn) }
+                    ) {
+                        Text(text = "朗读例句")
+                    }
+                }
+
+                Button(
+                    modifier = Modifier.fillMaxWidth(),
+                    onClick = {
+                        saveFailed = !onMarkLearned(word.id)
+                    }
+                ) {
+                    Text(text = "学会 +1，并换下一个")
+                }
+
+                if (saveFailed) {
+                    Text(
+                        text = "学习进度保存失败，请重试",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 显示用户自定义的首页功能轮播。
+ *
+ * 使用方法：
+ * HomeScreen传入已保存的功能集合和导航回调。普通手机每页显示两个功能，宽度达到600dp的
+ * 平板或横屏设备每页显示三个；仅响应用户手动左右滑动，不创建自动轮播协程。点击“管理”
+ * 打开选择弹窗，未选择任何功能时仍保留恢复入口。
+ *
+ * @param selectedFeatures 当前需要展示在首页的功能集合。
+ * @param onSaveSelection 用户确认选择后的持久化回调，成功返回true。
+ * @param onOpenFeature 打开指定功能的统一导航回调。
+ * @param modifier 外部布局修饰器。
+ *
+ * @return 无返回值，直接输出标题、手动轮播、页码指示器和管理弹窗。
+ */
+@Composable
+private fun HomeFeatureCarousel(
+    selectedFeatures: Set<HomeFeatureId>,
+    onSaveSelection: (Set<HomeFeatureId>) -> Boolean,
+    onOpenFeature: (HomeFeatureId) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var managerVisible by rememberSaveable {
+        mutableStateOf(false)
+    }
+    val allFeatures = homeFeatureEntries(onOpenFeature)
+    val visibleFeatures = allFeatures.filter { feature ->
+        feature.id in selectedFeatures
+    }
+
+    if (managerVisible) {
+        HomeFeatureManagerDialog(
+            features = allFeatures,
+            selectedFeatures = selectedFeatures,
+            onDismiss = {
+                managerVisible = false
+            },
+            onSave = { newSelection ->
+                val saved = onSaveSelection(newSelection)
+                if (saved) {
+                    managerVisible = false
+                }
+                saved
+            }
+        )
+    }
+
+    Column(
+        modifier = modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            SectionTitle(
+                modifier = Modifier.weight(1f),
+                title = "功能中心",
+                subtitle = if (visibleFeatures.isEmpty()) {
+                    "选择需要放到首页的功能"
+                } else {
+                    "手动左右滑动 · ${visibleFeatures.size} 个功能"
+                }
+            )
+
+            TextButton(onClick = { managerVisible = true }) {
+                Text(text = "管理")
+            }
+        }
+
+        if (visibleFeatures.isEmpty()) {
+            EmptyHomeFeatureCard(onManage = { managerVisible = true })
+        } else {
+            HomeFeaturePager(features = visibleFeatures)
+        }
+    }
+}
+
+/**
+ * 根据可用宽度把首页功能按每页两个或三个进行手动分页。
+ *
+ * @param features 已经过滤且保持固定顺序的首页功能列表。
+ * @param modifier 外部布局修饰器。
+ *
+ * @return 无返回值，直接输出横向分页和当前位置指示器。
+ */
+@Composable
+private fun HomeFeaturePager(
+    features: List<HomeFeatureEntry>,
+    modifier: Modifier = Modifier
+) {
+    BoxWithConstraints(modifier = modifier.fillMaxWidth()) {
+        val itemsPerPage = if (maxWidth >= THREE_ITEM_PAGE_MIN_WIDTH) 3 else 2
+        val pages = features.chunked(itemsPerPage)
+        val pagerState = rememberPagerState(pageCount = { pages.size })
+
+        // 管理弹窗减少功能数量后及时修正页码，避免停留在已经不存在的空白页。
+        LaunchedEffect(pages.size) {
+            if (pages.isNotEmpty() && pagerState.currentPage > pages.lastIndex) {
+                pagerState.scrollToPage(pages.lastIndex)
+            }
+        }
+
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            HorizontalPager(
+                state = pagerState,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(HOME_FEATURE_PAGE_HEIGHT),
+                pageSpacing = 12.dp,
+                beyondViewportPageCount = 1,
+                userScrollEnabled = pages.size > 1
+            ) { pageIndex ->
+                val pageFeatures = pages[pageIndex]
+                Row(
+                    modifier = Modifier.fillMaxSize(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    pageFeatures.forEach { feature ->
+                        HomeFeatureCard(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxHeight(),
+                            feature = feature
+                        )
+                    }
+
+                    // 最后一页不足两项或三项时保留等宽占位，避免单张卡片被拉伸到整行。
+                    repeat(itemsPerPage - pageFeatures.size) {
+                        Spacer(modifier = Modifier.weight(1f))
+                    }
+                }
+            }
+
+            if (pages.size > 1) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    pages.indices.forEach { index ->
+                        val selected = index == pagerState.currentPage
+                        Box(
+                            modifier = Modifier
+                                .padding(horizontal = 3.dp)
+                                .size(if (selected) 9.dp else 6.dp)
+                                .clip(CircleShape)
+                                .background(
+                                    if (selected) {
+                                        MaterialTheme.colorScheme.primary
+                                    } else {
+                                        MaterialTheme.colorScheme.outlineVariant
+                                    }
+                                )
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 显示首页轮播中的一张紧凑功能卡片。
+ *
+ * @param feature 功能名称、说明、状态标签和点击行为。
+ * @param modifier 外部等宽、等高布局修饰器。
+ *
+ * @return 无返回值。
+ */
+@Composable
+private fun HomeFeatureCard(
+    feature: HomeFeatureEntry,
+    modifier: Modifier = Modifier
+) {
+    Card(
+        modifier = modifier.bouncyClickable(
+            role = Role.Button,
+            onClick = feature.onClick
+        ),
+        shape = RoundedCornerShape(22.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(7.dp)
+        ) {
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.primaryContainer
+            ) {
+                Text(
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                    text = feature.symbol,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                )
+            }
+
+            Text(
+                text = feature.title,
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = feature.description,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = feature.statusLabel,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.primary
+            )
+        }
+    }
+}
+
+/**
+ * 在首页没有选择任何功能时提供可恢复的管理入口。
+ *
+ * @param onManage 打开功能选择弹窗的回调。
+ *
+ * @return 无返回值。
+ */
+@Composable
+private fun EmptyHomeFeatureCard(onManage: () -> Unit) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .bouncyClickable(role = Role.Button, onClick = onManage),
+        shape = RoundedCornerShape(22.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f)
+        )
+    ) {
+        Row(
+            modifier = Modifier.padding(20.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                modifier = Modifier.weight(1f),
+                text = "首页暂未展示功能，可随时从完整功能中心重新选择。",
+                style = MaterialTheme.typography.bodyMedium
+            )
+            Spacer(modifier = Modifier.width(12.dp))
+            Text(
+                text = "去选择 ›",
+                color = MaterialTheme.colorScheme.primary,
+                fontWeight = FontWeight.SemiBold
+            )
+        }
+    }
+}
+
+/**
+ * 让用户勾选需要放到首页的功能。
+ *
+ * 使用方法：
+ * 打开弹窗时传入当前已保存集合。用户的勾选先保存在弹窗临时状态，只有点击“保存”并且
+ * onSave返回true后才关闭；点击取消不会改变首页。允许全部取消，完整功能中心不会受影响。
+ *
+ * @param features 当前版本支持的完整功能目录。
+ * @param selectedFeatures 打开弹窗时已经保存的功能集合。
+ * @param onDismiss 放弃本次修改并关闭弹窗的回调。
+ * @param onSave 保存完整选择集合的回调，成功返回true。
+ *
+ * @return 无返回值，直接输出功能选择对话框。
+ */
+@Composable
+private fun HomeFeatureManagerDialog(
+    features: List<HomeFeatureEntry>,
+    selectedFeatures: Set<HomeFeatureId>,
+    onDismiss: () -> Unit,
+    onSave: (Set<HomeFeatureId>) -> Boolean
+) {
+    var pendingSelection by remember(selectedFeatures) {
+        mutableStateOf(selectedFeatures)
+    }
+    var saveFailed by remember {
+        mutableStateOf(false)
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(text = "管理首页功能")
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = "勾选需要放到首页的功能。普通手机每页显示2项，宽屏显示3项；完整功能中心始终保留全部入口。",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+
+                Column(
+                    modifier = Modifier
+                        .heightIn(max = 460.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    features.forEach { feature ->
+                        val checked = feature.id in pendingSelection
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(14.dp))
+                                .bouncyClickable(
+                                    role = Role.Checkbox,
+                                    onClick = {
+                                        pendingSelection = if (checked) {
+                                            pendingSelection - feature.id
+                                        } else {
+                                            pendingSelection + feature.id
+                                        }
+                                        saveFailed = false
+                                    }
+                                )
+                                .padding(horizontal = 6.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Checkbox(
+                                checked = checked,
+                                onCheckedChange = null
+                            )
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = feature.title,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    text = feature.description,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+
+                if (saveFailed) {
+                    Text(
+                        text = "保存失败，请重试。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    saveFailed = !onSave(pendingSelection)
+                }
+            ) {
+                Text(text = "保存")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(text = "取消")
+            }
+        }
+    )
 }
 
 /**
@@ -371,82 +1024,6 @@ private fun MetricCard(
                 style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.Bold,
                 maxLines = 1
-            )
-        }
-    }
-}
-
-/**
- * 显示内存或存储空间的已用量、总量和比例进度条。
- *
- * @param title 指标名称。
- * @param totalBytes 总容量。
- * @param availableBytes 当前可用容量。
- * @param note 指标口径说明。
- *
- * @return 无返回值。
- */
-@Composable
-private fun UsageCard(
-    title: String,
-    totalBytes: Long,
-    availableBytes: Long,
-    note: String
-) {
-    val usedBytes = (totalBytes - availableBytes).coerceAtLeast(0L)
-    val progress = if (totalBytes > 0L) {
-        (usedBytes.toDouble() / totalBytes.toDouble()).toFloat().coerceIn(0f, 1f)
-    } else {
-        0f
-    }
-
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(22.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surface
-        ),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
-    ) {
-        Column(
-            modifier = Modifier.padding(18.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    modifier = Modifier.weight(1f),
-                    text = title,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold
-                )
-                Text(
-                    text = "${(progress * 100).toInt()}%",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = MaterialTheme.colorScheme.primary
-                )
-            }
-
-            LinearProgressIndicator(
-                progress = { progress },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(8.dp)
-                    .clip(RoundedCornerShape(8.dp))
-            )
-
-            Text(
-                text = "已用 ${formatBytes(usedBytes)}  ·  可用 ${formatBytes(availableBytes)}  ·  总计 ${formatBytes(totalBytes)}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-
-            Text(
-                text = note,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.78f)
             )
         }
     }
@@ -569,27 +1146,8 @@ private fun formatSpeed(bytesPerSecond: Long): String {
     return "${formatBytes(bytesPerSecond)}/s"
 }
 
-/**
- * 根据Android实际可用物理RAM估算常见的厂商标称容量，并生成口径说明。
- *
- * @param totalBytes Android内核报告的物理RAM字节数。
- *
- * @return 包含厂商标称容量和“不含内存扩展”提醒的说明文本。
- */
-private fun physicalMemoryNote(totalBytes: Long): String {
-    if (totalBytes <= 0L) {
-        return "系统物理RAM，不含内存扩展"
-    }
+/** 宽度达到该值时每页显示三个首页功能，普通手机保持每页两个。 */
+private val THREE_ITEM_PAGE_MIN_WIDTH = 600.dp
 
-    val decimalGigabytes = totalBytes.toDouble() / 1_000_000_000.0
-    val commonCapacities = listOf(2, 3, 4, 6, 8, 12, 16, 24, 32)
-    val marketingCapacity = commonCapacities.minByOrNull { capacity ->
-        kotlin.math.abs(capacity - decimalGigabytes)
-    }
-
-    return if (marketingCapacity != null) {
-        "约等于厂商标称 $marketingCapacity GB，不含下方内存扩展"
-    } else {
-        "系统物理RAM，不含内存扩展"
-    }
-}
+/** 首页功能卡片区域固定高度，保证每一页切换时纵向布局不跳动。 */
+private val HOME_FEATURE_PAGE_HEIGHT = 166.dp

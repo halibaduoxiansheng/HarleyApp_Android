@@ -49,25 +49,21 @@ class ReminderReceiver : BroadcastReceiver() {
             return
         }
 
-        val updatedReminder = repository.recordTriggered(
-            reminderId = reminder.id,
-            expectedTriggerAtMillis = reminder.nextTriggerAtMillis,
-            triggeredAtMillis = nowMillis
-        ) ?: return
-
-        if (updatedReminder.repeatIntervalDays > 0 &&
-            !ReminderScheduler(applicationContext).schedule(updatedReminder)
-        ) {
-            Log.e(TAG, "Failed to schedule next recurring reminder")
-        }
-
+        val scheduler = ReminderScheduler(applicationContext)
         if (!canPostNotifications(context)) {
             Log.w(TAG, "Notification permission missing for local reminder")
+            scheduler.scheduleRetry(reminder.id, NOTIFICATION_RETRY_DELAY_MILLIS)
             return
         }
 
         val notificationManager = context.getSystemService(NotificationManager::class.java)
         createNotificationChannel(notificationManager)
+        if (!notificationManager.areNotificationsEnabled()) {
+            Log.w(TAG, "App notifications disabled for local reminder")
+            scheduler.scheduleRetry(reminder.id, NOTIFICATION_RETRY_DELAY_MILLIS)
+            return
+        }
+
         val openAppIntent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
@@ -88,12 +84,28 @@ class ReminderReceiver : BroadcastReceiver() {
             .setVisibility(Notification.VISIBILITY_PRIVATE)
             .build()
 
-        runCatching {
+        val notificationDisplayed = runCatching {
             notificationManager.notify(reminder.id.toNotificationId(), notification)
+            true
         }.onSuccess {
             Log.i(TAG, "Displayed scheduled local reminder")
         }.onFailure { error ->
             Log.e(TAG, "Failed to display scheduled reminder", error)
+        }.getOrDefault(false)
+        if (!notificationDisplayed) {
+            scheduler.scheduleRetry(reminder.id, NOTIFICATION_RETRY_DELAY_MILLIS)
+            return
+        }
+
+        // 只有系统通知成功发布后才更新“已提醒”状态，避免权限或渠道问题让计划静默丢失。
+        val updatedReminder = repository.recordTriggered(
+            reminderId = reminder.id,
+            expectedTriggerAtMillis = reminder.nextTriggerAtMillis,
+            triggeredAtMillis = nowMillis
+        ) ?: return
+
+        if (updatedReminder.repeatIntervalDays > 0 && !scheduler.schedule(updatedReminder)) {
+            Log.e(TAG, "Failed to schedule next recurring reminder")
         }
     }
 
@@ -142,5 +154,6 @@ class ReminderReceiver : BroadcastReceiver() {
         const val TAG = "ReminderReceiver"
         const val CHANNEL_ID = "scheduled_local_reminders"
         const val EARLY_ALARM_TOLERANCE_MILLIS = 60_000L
+        const val NOTIFICATION_RETRY_DELAY_MILLIS = 60_000L
     }
 }

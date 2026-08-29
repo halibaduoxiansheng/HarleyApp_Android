@@ -1,11 +1,16 @@
 package com.example.harleyapp.ui.screens
 
+import android.annotation.SuppressLint
+import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.graphics.Bitmap
-import android.net.Uri
 import android.util.Log
+import android.view.View
+import android.view.ViewGroup
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
@@ -13,6 +18,8 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,6 +27,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LinearProgressIndicator
@@ -29,28 +37,44 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+import androidx.core.net.toUri
+import com.example.harleyapp.data.WebsiteToolRepository
+import com.example.harleyapp.model.MAX_WEBSITE_PLAYBACK_RATE
+import com.example.harleyapp.model.MIN_WEBSITE_PLAYBACK_RATE
+import com.example.harleyapp.model.WEBSITE_PLAYBACK_RATE_STEP
 import com.example.harleyapp.model.WebsiteShortcut
+import com.example.harleyapp.model.WebsiteToolSettings
+import com.example.harleyapp.web.WebsiteScriptController
+import kotlinx.coroutines.delay
 import java.util.Locale
+import kotlin.math.roundToInt
 
 /**
- * 在应用内部安全加载用户当前选择的网站，并提供刷新、返回和外部浏览器入口。
+ * 在应用内部安全加载用户当前选择的网站，并提供网页工具、增强视频全屏、刷新和外部浏览器入口。
  *
  * 使用方法：
- * 由HarleyApp在“网站”导航项选中时调用。离开页面时会主动销毁WebView，
- * 防止Chromium渲染对象长期占用内存。
+ * 由HarleyApp在“网站”导航项选中时调用。网页工具设置按网站保存在本机；离开页面时会主动
+ * 退出自定义全屏并销毁WebView，防止Chromium渲染对象长期占用内存。
  *
  * @param website 当前需要加载的网站；用户删除全部网站时传null。
  * @param onManageWebsites 无网站时返回首页添加网站的回调。
+ * @param onFullscreenChanged 自定义视频全屏状态回调，用于让宿主隐藏底部导航。
  * @param modifier 外部传入的页面安全边距。
  *
  * @return 无返回值，直接输出网站浏览页面。
@@ -59,6 +83,7 @@ import java.util.Locale
 fun WebsiteScreen(
     website: WebsiteShortcut?,
     onManageWebsites: () -> Unit,
+    onFullscreenChanged: (Boolean) -> Unit,
     modifier: Modifier = Modifier
 ) {
     if (website == null) {
@@ -70,6 +95,35 @@ fun WebsiteScreen(
     }
 
     val context = androidx.compose.ui.platform.LocalContext.current
+    val activity = remember(context) { context.findActivity() }
+    val websiteToolRepository = remember(context) {
+        WebsiteToolRepository(context.applicationContext)
+    }
+    val scriptController = remember {
+        WebsiteScriptController()
+    }
+    var toolSettings by remember(website.id) {
+        mutableStateOf(websiteToolRepository.getSettings(website.id))
+    }
+    var showToolbox by remember(website.id) {
+        mutableStateOf(false)
+    }
+    var toolMessage by remember(website.id) {
+        mutableStateOf<String?>(null)
+    }
+    var pageGeneration by remember(website.id) {
+        mutableIntStateOf(0)
+    }
+    var findQuery by remember(website.id) {
+        mutableStateOf("")
+    }
+    var findResultText by remember(website.id) {
+        mutableStateOf("")
+    }
+    var fullscreenContent by remember(website.id) {
+        mutableStateOf<FullscreenWebContent?>(null)
+    }
+    val currentOnFullscreenChanged by rememberUpdatedState(onFullscreenChanged)
     var loadingProgress by remember {
         mutableIntStateOf(0)
     }
@@ -79,10 +133,18 @@ fun WebsiteScreen(
     var canGoBack by remember {
         mutableStateOf(false)
     }
+    /** 关闭当前全屏View并只回调网站一次。 */
+    fun exitFullscreen() {
+        val content = fullscreenContent ?: return
+        fullscreenContent = null
+        content.close()
+    }
+
     val webView = remember(context, website.id, website.url) {
         createWebsiteWebView(
             context = context,
             initialUrl = website.url,
+            initialSettings = toolSettings,
             onProgressChanged = { progress ->
                 loadingProgress = progress
             },
@@ -91,24 +153,289 @@ fun WebsiteScreen(
             },
             onError = { message ->
                 errorText = message
+            },
+            onPageFinished = {
+                pageGeneration++
+            },
+            onShowFullscreen = { view, callback ->
+                fullscreenContent?.close()
+                fullscreenContent = FullscreenWebContent(view, callback)
+            },
+            onHideFullscreen = {
+                exitFullscreen()
+            },
+            onFindResult = { activeMatchOrdinal, numberOfMatches, isDoneCounting ->
+                if (isDoneCounting) {
+                    findResultText = if (numberOfMatches <= 0) {
+                        "当前网页没有匹配内容"
+                    } else {
+                        "第${activeMatchOrdinal + 1}项，共${numberOfMatches}项"
+                    }
+                }
             }
         )
     }
 
-    // 优先让系统返回键回到网页历史记录，而不是直接退出当前App。
-    BackHandler(enabled = canGoBack) {
-        webView.goBack()
+    /**
+     * 保存并立即应用当前网站的工具设置。
+     *
+     * @param updatedSettings 用户刚修改的完整设置。
+     * @return 写入Room及兼容副本成功返回true，失败时保留旧设置并显示提示。
+     */
+    fun updateToolSettings(updatedSettings: WebsiteToolSettings): Boolean {
+        val normalizedSettings = updatedSettings.normalized()
+        val desktopModeChanged =
+            normalizedSettings.desktopModeEnabled != toolSettings.desktopModeEnabled
+        if (!websiteToolRepository.saveSettings(website.id, normalizedSettings)) {
+            toolMessage = "网页工具设置保存失败，请重试"
+            return false
+        }
+
+        toolSettings = normalizedSettings
+        if (desktopModeChanged) {
+            applyDesktopUserAgent(
+                context = context,
+                webView = webView,
+                enabled = normalizedSettings.desktopModeEnabled
+            )
+            webView.reload()
+            toolMessage = "已切换网页模式并重新加载"
+        }
+        return true
+    }
+
+    // 全屏优先于网页历史；用户按一次返回即可恢复工具栏和系统栏。
+    BackHandler(enabled = fullscreenContent != null || canGoBack) {
+        if (fullscreenContent != null) {
+            exitFullscreen()
+        } else {
+            webView.goBack()
+        }
+    }
+
+    // 通知外层Scaffold隐藏底部导航；页面销毁时无条件恢复，避免其他一级页面丢失导航栏。
+    LaunchedEffect(fullscreenContent != null) {
+        currentOnFullscreenChanged(fullscreenContent != null)
+    }
+    DisposableEffect(Unit) {
+        onDispose {
+            currentOnFullscreenChanged(false)
+        }
+    }
+
+    // 页面加载完成或设置变化后重应用脚本；同时更新不依赖JavaScript的原生文字缩放和常亮状态。
+    LaunchedEffect(webView, pageGeneration, toolSettings) {
+        webView.settings.textZoom = toolSettings.textZoomPercent
+        webView.keepScreenOn = toolSettings.keepScreenOn
+        scriptController.applySettings(webView, toolSettings)
+    }
+
+    // 操作结果只短暂显示，避免占用网页可视区域。
+    LaunchedEffect(toolMessage) {
+        if (toolMessage != null) {
+            delay(TOOL_MESSAGE_DURATION_MILLIS)
+            toolMessage = null
+        }
+    }
+
+    // 网站进入自定义全屏后隐藏系统栏并允许设备自由旋转；退出时恢复Activity原状态。
+    DisposableEffect(fullscreenContent, activity) {
+        val content = fullscreenContent
+        if (content == null || activity == null) {
+            onDispose { }
+        } else {
+            val previousOrientation = activity.requestedOrientation
+            val insetsController = WindowCompat.getInsetsController(
+                activity.window,
+                activity.window.decorView
+            )
+            content.view.keepScreenOn = true
+            insetsController.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            insetsController.hide(WindowInsetsCompat.Type.systemBars())
+            activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR
+
+            onDispose {
+                content.view.keepScreenOn = false
+                content.close()
+                insetsController.show(WindowInsetsCompat.Type.systemBars())
+                activity.requestedOrientation = previousOrientation
+            }
+        }
     }
 
     // WebView包含独立渲染进程资源，页面离开时必须显式停止并销毁。
     DisposableEffect(webView) {
         onDispose {
             webView.stopLoading()
+            webView.keepScreenOn = false
+            webView.clearMatches()
             webView.webChromeClient = null
             webView.webViewClient = WebViewClient()
             webView.removeAllViews()
             webView.destroy()
         }
+    }
+
+    fullscreenContent?.let { content ->
+        Box(
+            modifier = modifier
+                .fillMaxSize()
+                .background(Color.Black)
+        ) {
+            AndroidView(
+                modifier = Modifier.fillMaxSize(),
+                factory = {
+                    (content.view.parent as? ViewGroup)?.removeView(content.view)
+                    content.view
+                }
+            )
+
+            // 全屏夜间模式使用原生半透明层，保证Chromium自定义视频View也能降低亮度。
+            if (toolSettings.nightModeEnabled) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = toolSettings.nightOverlayAlpha))
+                )
+            }
+
+            toolMessage?.let { message ->
+                Surface(
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = 12.dp),
+                    color = Color.Black.copy(alpha = 0.46f),
+                    shape = MaterialTheme.shapes.large
+                ) {
+                    Text(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
+                        text = message,
+                        color = Color.White,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
+
+            Surface(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth(),
+                color = Color.Black.copy(alpha = 0.38f),
+                shape = MaterialTheme.shapes.large
+            ) {
+                Row(
+                    modifier = Modifier
+                        .horizontalScroll(rememberScrollState())
+                        .padding(horizontal = 8.dp, vertical = 3.dp),
+                    horizontalArrangement = Arrangement.spacedBy(1.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    FullscreenToolButton(
+                        text = "倍速−",
+                        onClick = {
+                            updateToolSettings(
+                                toolSettings.copy(
+                                    playbackRate = adjustedPlaybackRate(
+                                        toolSettings.playbackRate,
+                                        -WEBSITE_PLAYBACK_RATE_STEP
+                                    )
+                                )
+                            )
+                        }
+                    )
+                    FullscreenToolButton(
+                        text = formatToolbarRate(toolSettings.playbackRate),
+                        active = toolSettings.playbackRate != 1f,
+                        onClick = {
+                            updateToolSettings(toolSettings.copy(playbackRate = 1f))
+                        }
+                    )
+                    FullscreenToolButton(
+                        text = "倍速+",
+                        onClick = {
+                            updateToolSettings(
+                                toolSettings.copy(
+                                    playbackRate = adjustedPlaybackRate(
+                                        toolSettings.playbackRate,
+                                        WEBSITE_PLAYBACK_RATE_STEP
+                                    )
+                                )
+                            )
+                        }
+                    )
+                    FullscreenToolButton(
+                        text = "播放/暂停",
+                        onClick = {
+                            scriptController.togglePlayback(webView) { count ->
+                                toolMessage = mediaActionMessage(count, "已切换播放状态")
+                            }
+                        }
+                    )
+                    FullscreenToolButton(
+                        text = "-10秒",
+                        onClick = {
+                            scriptController.seekBy(webView, -10) { count ->
+                                toolMessage = mediaActionMessage(count, "已快退10秒")
+                            }
+                        }
+                    )
+                    FullscreenToolButton(
+                        text = "+10秒",
+                        onClick = {
+                            scriptController.seekBy(webView, 10) { count ->
+                                toolMessage = mediaActionMessage(count, "已快进10秒")
+                            }
+                        }
+                    )
+                    FullscreenToolButton(
+                        text = if (toolSettings.videoMuted) "静音开" else "静音",
+                        active = toolSettings.videoMuted,
+                        onClick = {
+                            updateToolSettings(
+                                toolSettings.copy(videoMuted = !toolSettings.videoMuted)
+                            )
+                        }
+                    )
+                    FullscreenToolButton(
+                        text = if (toolSettings.videoLoopEnabled) "循环开" else "循环",
+                        active = toolSettings.videoLoopEnabled,
+                        onClick = {
+                            updateToolSettings(
+                                toolSettings.copy(
+                                    videoLoopEnabled = !toolSettings.videoLoopEnabled
+                                )
+                            )
+                        }
+                    )
+                    FullscreenToolButton(
+                        text = if (toolSettings.nightModeEnabled) "夜间开" else "夜间",
+                        active = toolSettings.nightModeEnabled,
+                        onClick = {
+                            updateToolSettings(
+                                toolSettings.copy(
+                                    nightModeEnabled = !toolSettings.nightModeEnabled
+                                )
+                            )
+                        }
+                    )
+                    FullscreenToolButton(
+                        text = if (toolSettings.blockAutoplay) "防自动播开" else "防自动播",
+                        active = toolSettings.blockAutoplay,
+                        onClick = {
+                            updateToolSettings(
+                                toolSettings.copy(blockAutoplay = !toolSettings.blockAutoplay)
+                            )
+                        }
+                    )
+                    FullscreenToolButton(
+                        text = "退出全屏",
+                        onClick = ::exitFullscreen
+                    )
+                }
+            }
+        }
+        return
     }
 
     Column(
@@ -171,6 +498,76 @@ fun WebsiteScreen(
             )
         }
 
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            color = MaterialTheme.colorScheme.surfaceContainerLow
+        ) {
+            Row(
+                modifier = Modifier
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 10.dp, vertical = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                TextButton(onClick = { showToolbox = true }) {
+                    Text(text = "网页工具")
+                }
+                TextButton(onClick = { showToolbox = true }) {
+                    Text(text = formatToolbarRate(toolSettings.playbackRate))
+                }
+                TextButton(
+                    onClick = {
+                        scriptController.togglePlayback(webView) { count ->
+                            toolMessage = mediaActionMessage(count, "已切换播放状态")
+                        }
+                    }
+                ) {
+                    Text(text = "播放/暂停")
+                }
+                TextButton(
+                    onClick = {
+                        scriptController.seekBy(webView, -10) { count ->
+                            toolMessage = mediaActionMessage(count, "已快退10秒")
+                        }
+                    }
+                ) {
+                    Text(text = "-10秒")
+                }
+                TextButton(
+                    onClick = {
+                        scriptController.seekBy(webView, 10) { count ->
+                            toolMessage = mediaActionMessage(count, "已快进10秒")
+                        }
+                    }
+                ) {
+                    Text(text = "+10秒")
+                }
+                TextButton(
+                    onClick = {
+                        scriptController.requestFullscreen(webView) { count ->
+                            toolMessage = mediaActionMessage(count, "已向播放器请求全屏")
+                        }
+                    }
+                ) {
+                    Text(text = "全屏")
+                }
+            }
+        }
+
+        toolMessage?.let { message ->
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                color = MaterialTheme.colorScheme.secondaryContainer
+            ) {
+                Text(
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
+                    text = message,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer
+                )
+            }
+        }
+
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -202,6 +599,55 @@ fun WebsiteScreen(
                 )
             }
         }
+    }
+
+    if (showToolbox) {
+        WebsiteToolboxDialog(
+            settings = toolSettings,
+            findQuery = findQuery,
+            findResultText = findResultText,
+            onSettingsChanged = { updatedSettings ->
+                updateToolSettings(updatedSettings)
+            },
+            onFindQueryChanged = { query ->
+                findQuery = query
+                if (query.isBlank()) {
+                    findResultText = ""
+                    webView.clearMatches()
+                } else {
+                    findResultText = "正在查找…"
+                    webView.findAllAsync(query)
+                }
+            },
+            onFindPrevious = {
+                webView.findNext(false)
+            },
+            onFindNext = {
+                webView.findNext(true)
+            },
+            onTogglePlayback = {
+                scriptController.togglePlayback(webView) { count ->
+                    toolMessage = mediaActionMessage(count, "已切换播放状态")
+                }
+            },
+            onSeekBy = { seconds ->
+                scriptController.seekBy(webView, seconds) { count ->
+                    toolMessage = mediaActionMessage(
+                        count,
+                        if (seconds < 0) "已快退${-seconds}秒" else "已快进${seconds}秒"
+                    )
+                }
+            },
+            onRequestFullscreen = {
+                showToolbox = false
+                scriptController.requestFullscreen(webView) { count ->
+                    toolMessage = mediaActionMessage(count, "已向播放器请求全屏")
+                }
+            },
+            onDismiss = {
+                showToolbox = false
+            }
+        )
     }
 }
 
@@ -250,18 +696,29 @@ private fun EmptyWebsiteScreen(
  *
  * @param context 页面上下文，用于创建WebView和打开外部协议。
  * @param initialUrl 当前网站的完整HTTPS网址。
+ * @param initialSettings 当前网站首次创建WebView时应用的原生设置。
  * @param onProgressChanged 页面加载进度变化回调，范围为0到100。
  * @param onNavigationStateChanged 是否可以网页后退的状态回调。
  * @param onError 主页面加载失败时的中文错误提示回调；传null表示清除旧错误。
+ * @param onPageFinished 页面完成加载后的脚本重应用通知。
+ * @param onShowFullscreen 网站请求显示自定义全屏View的回调。
+ * @param onHideFullscreen 网站请求退出自定义全屏的回调。
+ * @param onFindResult 页内查找位置和总数回调。
  *
  * @return 已完成安全设置并开始加载网站的WebView实例。
  */
+@SuppressLint("SetJavaScriptEnabled")
 private fun createWebsiteWebView(
     context: Context,
     initialUrl: String,
+    initialSettings: WebsiteToolSettings,
     onProgressChanged: (Int) -> Unit,
     onNavigationStateChanged: (Boolean) -> Unit,
-    onError: (String?) -> Unit
+    onError: (String?) -> Unit,
+    onPageFinished: () -> Unit,
+    onShowFullscreen: (View, WebChromeClient.CustomViewCallback) -> Unit,
+    onHideFullscreen: () -> Unit,
+    onFindResult: (Int, Int, Boolean) -> Unit
 ): WebView {
     return WebView(context).apply {
         settings.apply {
@@ -274,6 +731,13 @@ private fun createWebsiteWebView(
             javaScriptCanOpenWindowsAutomatically = false
             safeBrowsingEnabled = true
         }
+        settings.textZoom = initialSettings.textZoomPercent
+        keepScreenOn = initialSettings.keepScreenOn
+        applyDesktopUserAgent(
+            context = context,
+            webView = this,
+            enabled = initialSettings.desktopModeEnabled
+        )
 
         webViewClient = HarleyWebViewClient(
             context = context,
@@ -282,12 +746,18 @@ private fun createWebsiteWebView(
             },
             onPageFinishedCallback = {
                 onNavigationStateChanged(canGoBack())
+                onPageFinished()
             },
             onMainFrameErrorCallback = { message ->
                 onError(message)
             }
         )
-        webChromeClient = HarleyWebChromeClient(onProgressChanged)
+        webChromeClient = HarleyWebChromeClient(
+            onProgressChangedCallback = onProgressChanged,
+            onShowFullscreenCallback = onShowFullscreen,
+            onHideFullscreenCallback = onHideFullscreen
+        )
+        setFindListener(onFindResult)
         loadUrl(initialUrl)
     }
 }
@@ -349,7 +819,7 @@ private fun WebsiteErrorView(
  */
 private fun openExternalUrl(context: Context, url: String): Boolean {
     return try {
-        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+        val intent = Intent(Intent.ACTION_VIEW, url.toUri()).apply {
             addCategory(Intent.CATEGORY_BROWSABLE)
         }
         context.startActivity(intent)
@@ -460,9 +930,13 @@ private class HarleyWebViewClient(
  * 把WebView加载进度转发给Compose状态。
  *
  * @param onProgressChangedCallback 进度变化回调，范围为0到100。
+ * @param onShowFullscreenCallback 网站请求显示自定义视频View的回调。
+ * @param onHideFullscreenCallback 网站或系统请求退出视频全屏的回调。
  */
 private class HarleyWebChromeClient(
-    private val onProgressChangedCallback: (Int) -> Unit
+    private val onProgressChangedCallback: (Int) -> Unit,
+    private val onShowFullscreenCallback: (View, CustomViewCallback) -> Unit,
+    private val onHideFullscreenCallback: () -> Unit
 ) : WebChromeClient() {
 
     /**
@@ -477,6 +951,145 @@ private class HarleyWebChromeClient(
         super.onProgressChanged(view, newProgress)
         onProgressChangedCallback(newProgress.coerceIn(0, 100))
     }
+
+    /**
+     * 接收网页播放器通过HTML5 Fullscreen API创建的自定义全屏View。
+     *
+     * @param view Chromium提供的视频View；为空时立即结束本次请求。
+     * @param callback 宿主退出全屏后必须调用的完成回调。
+     * @return 无返回值。
+     */
+    override fun onShowCustomView(view: View?, callback: CustomViewCallback?) {
+        if (view == null || callback == null) {
+            callback?.onCustomViewHidden()
+            return
+        }
+        onShowFullscreenCallback(view, callback)
+    }
+
+    /**
+     * 接收网站播放器主动退出全屏的请求。
+     *
+     * @return 无返回值。
+     */
+    override fun onHideCustomView() {
+        onHideFullscreenCallback()
+    }
+}
+
+/**
+ * 保存一次WebView自定义全屏会话并保证完成回调最多执行一次。
+ *
+ * @param view Chromium交给宿主展示的全屏View。
+ * @param callback 全屏View被隐藏后通知Chromium的回调。
+ */
+private class FullscreenWebContent(
+    val view: View,
+    private val callback: WebChromeClient.CustomViewCallback
+) {
+    private var closed = false
+
+    /**
+     * 结束全屏会话。
+     *
+     * @return 无返回值；重复调用会安全忽略。
+     */
+    fun close() {
+        if (closed) return
+        closed = true
+        callback.onCustomViewHidden()
+    }
+}
+
+/**
+ * 显示全屏视频底部半透明工具条中的一个紧凑操作按钮。
+ *
+ * @param text 按钮文字或当前状态。
+ * @param active 是否使用强调色表示功能已经开启。
+ * @param onClick 点击回调。
+ * @return 无返回值。
+ */
+@Composable
+private fun FullscreenToolButton(
+    text: String,
+    active: Boolean = false,
+    onClick: () -> Unit
+) {
+    TextButton(onClick = onClick) {
+        Text(
+            text = text,
+            color = if (active) FULLSCREEN_ACTIVE_COLOR else Color.White,
+            fontWeight = if (active) FontWeight.Bold else FontWeight.Medium
+        )
+    }
+}
+
+/**
+ * 从可能经过主题包装的Compose Context中查找Activity。
+ *
+ * @return 当前Activity；无法解析时返回null，此时仍可展示网页但不控制系统栏和方向。
+ */
+private tailrec fun Context.findActivity(): Activity? {
+    return when (this) {
+        is Activity -> this
+        is ContextWrapper -> baseContext.findActivity()
+        else -> null
+    }
+}
+
+/**
+ * 切换WebView桌面版或系统默认手机版User-Agent。
+ *
+ * @param context 用于读取系统WebView默认User-Agent。
+ * @param webView 目标网页视图。
+ * @param enabled true使用桌面标识，false恢复当前系统默认标识。
+ * @return 无返回值；调用方需要自行决定是否重新加载当前页面。
+ */
+private fun applyDesktopUserAgent(context: Context, webView: WebView, enabled: Boolean) {
+    val defaultUserAgent = WebSettings.getDefaultUserAgent(context)
+    webView.settings.userAgentString = if (enabled) {
+        defaultUserAgent
+            .replace(Regex("\\([^)]*\\)"), "(X11; Linux x86_64)")
+            .replace("Version/4.0 ", "")
+            .replace(" Mobile ", " ")
+    } else {
+        defaultUserAgent
+    }
+}
+
+/** @return 工具栏使用的两位小数倍速文本。 */
+private fun formatToolbarRate(rate: Float): String {
+    return String.format(Locale.CHINA, "%.2f×", rate)
+}
+
+/**
+ * 按0.05步长调整并限制视频倍速。
+ *
+ * @param currentRate 当前播放倍速。
+ * @param delta 本次增减量。
+ * @return 0.25到5.00范围内且对齐0.05步长的新倍速。
+ */
+private fun adjustedPlaybackRate(currentRate: Float, delta: Float): Float {
+    val changed = currentRate + delta
+    return ((changed / WEBSITE_PLAYBACK_RATE_STEP).roundToInt() * WEBSITE_PLAYBACK_RATE_STEP)
+        .coerceIn(MIN_WEBSITE_PLAYBACK_RATE, MAX_WEBSITE_PLAYBACK_RATE)
+}
+
+/**
+ * 根据脚本找到的媒体数量生成操作反馈。
+ *
+ * @param mediaCount 脚本找到并尝试控制的媒体数量。
+ * @param successMessage 找到媒体时显示的成功说明。
+ * @return 可直接显示在网页工具栏下方的中文反馈。
+ */
+private fun mediaActionMessage(mediaCount: Int, successMessage: String): String {
+    return if (mediaCount > 0) {
+        successMessage
+    } else {
+        "当前页面未检测到可控制的HTML5视频"
+    }
 }
 
 private const val TAG = "WebsiteScreen"
+private const val TOOL_MESSAGE_DURATION_MILLIS = 2_600L
+private val FULLSCREEN_ACTIVE_COLOR = Color(0xFFFFD54F)

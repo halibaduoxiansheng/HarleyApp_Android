@@ -3,6 +3,7 @@ package com.example.harleyapp.data
 import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
+import com.example.harleyapp.data.local.RoomBackedPreferences
 import com.example.harleyapp.model.BillImportResult
 import com.example.harleyapp.model.LedgerEntry
 import com.example.harleyapp.model.LedgerSource
@@ -12,7 +13,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * 使用SharedPreferences和JSON在本机保存账目与待确认微信通知。
+ * 使用Room文档和JSON在本机保存账目与待确认微信通知，同时保留SharedPreferences兼容副本。
  *
  * 使用方法：
  * 使用Application Context创建一个实例，然后调用getEntries、upsertEntry、importEntries、
@@ -22,9 +23,9 @@ import org.json.JSONObject
  */
 class LedgerRepository(context: Context) {
 
-    private val preferences = context.applicationContext.getSharedPreferences(
-        PREFERENCE_NAME,
-        Context.MODE_PRIVATE
+    private val preferences = RoomBackedPreferences.create(
+        context = context,
+        preferenceName = PREFERENCE_NAME
     )
 
     /**

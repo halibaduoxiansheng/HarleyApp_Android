@@ -1,5 +1,6 @@
 package com.example.harleyapp
 
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -18,6 +19,9 @@ import com.example.harleyapp.ui.theme.HarleyAppTheme
 
 class MainActivity : ComponentActivity() {
 
+    // 小组件既可能冷启动Activity，也可能把新Intent交给现有Activity，因此使用Compose状态统一驱动导航。
+    private var openTodayRequest by mutableStateOf(false)
+
     /**
      * 创建应用主界面并启用沉浸式边到边显示。
      *
@@ -30,6 +34,11 @@ class MainActivity : ComponentActivity() {
      */
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        openTodayRequest = intent?.getBooleanExtra(
+            com.example.harleyapp.widget.TodayWeatherWidgetProvider.EXTRA_OPEN_TODAY,
+            false
+        ) == true
 
         // 让Compose自行处理状态栏、导航栏与内容区域之间的安全边距。
         enableEdgeToEdge()
@@ -60,6 +69,10 @@ class MainActivity : ComponentActivity() {
             ) {
                 HarleyApp(
                     isDarkTheme = darkThemeEnabled,
+                    openTodayRequest = openTodayRequest,
+                    onOpenTodayRequestConsumed = {
+                        openTodayRequest = false
+                    },
                     onSetDarkTheme = { enabled ->
                         val saved = appearanceRepository.setDarkTheme(enabled)
                         if (saved) {
@@ -69,6 +82,29 @@ class MainActivity : ComponentActivity() {
                     }
                 )
             }
+        }
+    }
+
+    /**
+     * 接收桌面小组件在Activity已经存在时发送的新导航请求。
+     *
+     * 使用方法：
+     * 由Android系统在singleTop或CLEAR_TOP复用当前Activity时自动调用。函数读取小组件约定的
+     * 布尔参数，并通过Compose状态让现有界面进入“今日总览”。
+     *
+     * @param intent 系统交付的新Intent，可能包含打开今日总览的请求。
+     *
+     * @return 无返回值。
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.getBooleanExtra(
+                com.example.harleyapp.widget.TodayWeatherWidgetProvider.EXTRA_OPEN_TODAY,
+                false
+            )
+        ) {
+            openTodayRequest = true
         }
     }
 }

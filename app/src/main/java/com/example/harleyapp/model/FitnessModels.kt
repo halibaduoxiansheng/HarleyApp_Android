@@ -13,6 +13,20 @@ enum class FitnessTrackingType {
 }
 
 /**
+ * 运动项目目标的累计周期。
+ *
+ * 使用方法：
+ * 每天需要独立完成的项目使用[DAILY]；需要在周一到周日之间累计的有氧分钟数、训练次数等
+ * 使用[WEEKLY]。自动计步项目固定使用[DAILY]，避免系统当天步数被重复累计到其他日期。
+ *
+ * @param displayName 页面显示的中文周期名称。
+ */
+enum class FitnessGoalPeriod(val displayName: String) {
+    DAILY("每日"),
+    WEEKLY("每周")
+}
+
+/**
  * 用户可以增删改查的运动项目定义。
  *
  * 使用方法：
@@ -23,9 +37,10 @@ enum class FitnessTrackingType {
  * @param id 项目稳定标识；新建项目可传空字符串，由仓库生成唯一标识。
  * @param name 用户看到的项目名称，例如“俯卧撑”“跳绳”。
  * @param unit 数量单位，例如“次”“分钟”“公里”。当前版本使用非负整数记录数量。
- * @param dailyGoal 每日目标数量。
+ * @param dailyGoal 目标数量；字段名为兼容旧数据保留，实际周期由[goalPeriod]决定。
  * @param quickIncrement 今日卡片每次快速增加的数量。
  * @param trackingType 手动记录或手机自动计步类型。
+ * @param goalPeriod 目标按每日独立计算或按自然周累计。
  */
 data class FitnessExerciseDefinition(
     val id: String,
@@ -33,7 +48,8 @@ data class FitnessExerciseDefinition(
     val unit: String,
     val dailyGoal: Int,
     val quickIncrement: Int,
-    val trackingType: FitnessTrackingType = FitnessTrackingType.MANUAL
+    val trackingType: FitnessTrackingType = FitnessTrackingType.MANUAL,
+    val goalPeriod: FitnessGoalPeriod = FitnessGoalPeriod.DAILY
 ) {
 
     /**
@@ -50,7 +66,8 @@ data class FitnessExerciseDefinition(
             unit = unit,
             count = count,
             goal = dailyGoal,
-            trackingType = trackingType
+            trackingType = trackingType,
+            goalPeriod = goalPeriod
         )
     }
 
@@ -117,6 +134,7 @@ data class FitnessExerciseDefinition(
  * @param count 当天实际完成量。
  * @param goal 当天目标快照。
  * @param trackingType 当天采用的记录方式快照。
+ * @param goalPeriod 目标按每日计算或按自然周累计的快照。
  */
 data class FitnessRecordItem(
     val exerciseId: String,
@@ -124,7 +142,8 @@ data class FitnessRecordItem(
     val unit: String,
     val count: Int = 0,
     val goal: Int,
-    val trackingType: FitnessTrackingType = FitnessTrackingType.MANUAL
+    val trackingType: FitnessTrackingType = FitnessTrackingType.MANUAL,
+    val goalPeriod: FitnessGoalPeriod = FitnessGoalPeriod.DAILY
 ) {
 
     /**
@@ -137,12 +156,12 @@ data class FitnessRecordItem(
     }
 
     /**
-     * 判断该项目当天是否达到目标。
+     * 判断该项目是否在单日记录中达到目标。
      *
-     * @return 完成量大于等于正数目标时返回true。
+     * @return 每日项目完成量大于等于正数目标时返回true；每周项目需要跨日累计，固定返回false。
      */
     fun isComplete(): Boolean {
-        return goal > 0 && count >= goal
+        return goalPeriod == FitnessGoalPeriod.DAILY && goal > 0 && count >= goal
     }
 }
 
@@ -240,7 +259,9 @@ data class DailyFitnessRecord(
      * @return 0到items.size之间的达标项数。
      */
     fun completedTaskCount(): Int {
-        return items.count(FitnessRecordItem::isComplete)
+        return items.count { item ->
+            item.goalPeriod == FitnessGoalPeriod.DAILY && item.isComplete()
+        }
     }
 
     /**
@@ -253,7 +274,9 @@ data class DailyFitnessRecord(
     fun completedTaskCount(
         definitions: List<FitnessExerciseDefinition>
     ): Int {
-        val activeIds = definitions.mapTo(hashSetOf()) { it.id }
+        val activeIds = definitions
+            .filter { definition -> definition.goalPeriod == FitnessGoalPeriod.DAILY }
+            .mapTo(hashSetOf()) { definition -> definition.id }
         return items.count { item ->
             item.exerciseId in activeIds && item.isComplete()
         }
@@ -265,7 +288,8 @@ data class DailyFitnessRecord(
      * @return 当天至少有一个项目且全部达标时返回true。
      */
     fun isComplete(): Boolean {
-        return items.isNotEmpty() && completedTaskCount() == items.size
+        val dailyItems = items.filter { item -> item.goalPeriod == FitnessGoalPeriod.DAILY }
+        return dailyItems.isNotEmpty() && dailyItems.all(FitnessRecordItem::isComplete)
     }
 
     /**
@@ -278,8 +302,11 @@ data class DailyFitnessRecord(
     fun isComplete(
         definitions: List<FitnessExerciseDefinition>
     ): Boolean {
-        return definitions.isNotEmpty() &&
-            completedTaskCount(definitions) == definitions.size
+        val dailyDefinitions = definitions.filter { definition ->
+            definition.goalPeriod == FitnessGoalPeriod.DAILY
+        }
+        return dailyDefinitions.isNotEmpty() &&
+            completedTaskCount(dailyDefinitions) == dailyDefinitions.size
     }
 
     /**
@@ -300,7 +327,8 @@ data class DailyFitnessRecord(
  * @param unit 区间内最近一条记录保存的单位。
  * @param totalCount 区间总完成量。
  * @param activeDays 完成量大于0的天数。
- * @param goalReachedDays 达到当天目标的天数。
+ * @param goalReachedDays 每日项目达到当天目标的天数；每周项目固定为0并由页面显示按周累计。
+ * @param goalPeriod 该项目在最近记录中的目标周期快照。
  */
 data class FitnessRangeItemSummary(
     val exerciseId: String,
@@ -308,7 +336,8 @@ data class FitnessRangeItemSummary(
     val unit: String,
     val totalCount: Long,
     val activeDays: Int,
-    val goalReachedDays: Int
+    val goalReachedDays: Int,
+    val goalPeriod: FitnessGoalPeriod = FitnessGoalPeriod.DAILY
 )
 
 /**
@@ -361,7 +390,8 @@ fun calculateFitnessRangeSummary(
                 MutableRangeItemSummary(
                     exerciseId = item.exerciseId,
                     name = item.name,
-                    unit = item.unit
+                    unit = item.unit,
+                    goalPeriod = item.goalPeriod
                 )
             }
             summary.totalCount += item.count.toLong()
@@ -389,7 +419,8 @@ fun calculateFitnessRangeSummary(
                     unit = summary.unit,
                     totalCount = summary.totalCount,
                     activeDays = summary.activeDays,
-                    goalReachedDays = summary.goalReachedDays
+                    goalReachedDays = summary.goalReachedDays,
+                    goalPeriod = summary.goalPeriod
                 )
             }
     )
@@ -402,6 +433,7 @@ private data class MutableRangeItemSummary(
     val exerciseId: String,
     val name: String,
     val unit: String,
+    val goalPeriod: FitnessGoalPeriod,
     var totalCount: Long = 0L,
     var activeDays: Int = 0,
     var goalReachedDays: Int = 0

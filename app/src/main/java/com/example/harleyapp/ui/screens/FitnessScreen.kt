@@ -55,6 +55,7 @@ import com.example.harleyapp.data.FitnessRepository
 import com.example.harleyapp.model.CompanionTask
 import com.example.harleyapp.model.DailyFitnessRecord
 import com.example.harleyapp.model.FitnessExerciseDefinition
+import com.example.harleyapp.model.FitnessGoalPeriod
 import com.example.harleyapp.model.FitnessRangeSummary
 import com.example.harleyapp.model.FitnessTrackingType
 import com.example.harleyapp.model.calculateFitnessRangeSummary
@@ -106,6 +107,9 @@ fun FitnessScreen(
     }
     var todayRecord by remember {
         mutableStateOf(repository.getTodayRecord(todayEpochDay))
+    }
+    var goalProgressCounts by remember {
+        mutableStateOf(repository.getGoalProgressCounts(todayEpochDay))
     }
     var rangeRecords by remember {
         mutableStateOf(
@@ -198,6 +202,7 @@ fun FitnessScreen(
         val refreshedDefinitions = repository.getExerciseDefinitions()
         definitions = refreshedDefinitions
         todayRecord = repository.getTodayRecord(todayEpochDay)
+        goalProgressCounts = repository.getGoalProgressCounts(todayEpochDay)
         rangeRecords = repository.getRecordsInRange(
             startEpochDay = rangeStartEpochDay,
             endEpochDay = rangeEndEpochDay
@@ -503,7 +508,7 @@ fun FitnessScreen(
             ) {
                 Text(
                     modifier = Modifier.weight(1f),
-                    text = "今日训练",
+                    text = "运动计划",
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.Bold
                 )
@@ -557,7 +562,8 @@ fun FitnessScreen(
                 } else {
                     ExerciseTaskCard(
                         definition = definition,
-                        count = recordItem.count,
+                        count = goalProgressCounts[definition.id] ?: recordItem.count,
+                        todayCount = recordItem.count,
                         goal = recordItem.goal,
                         onSubtract = {
                             val updated = repository.updateExercise(
@@ -737,11 +743,18 @@ private fun FitnessSummaryCard(
     streakDays: Int,
     onManageExercises: () -> Unit
 ) {
-    val completedCount = record.completedTaskCount(definitions)
-    val totalCount = definitions.size
+    val dailyDefinitions = definitions.filter { definition ->
+        definition.goalPeriod == FitnessGoalPeriod.DAILY
+    }
+    val weeklyCount = definitions.count { definition ->
+        definition.goalPeriod == FitnessGoalPeriod.WEEKLY
+    }
+    val completedCount = record.completedTaskCount(dailyDefinitions)
+    val totalCount = dailyDefinitions.size
     val summaryText = when {
-        totalCount == 0 -> "还没有运动项目，请先新增"
-        record.isComplete(definitions) -> "今天$totalCount 项目标已全部完成"
+        definitions.isEmpty() -> "还没有运动项目，请先新增"
+        totalCount == 0 -> "当前$weeklyCount 项计划按自然周累计"
+        record.isComplete(dailyDefinitions) -> "今天$totalCount 项每日目标已全部完成"
         else -> "已完成$completedCount 项，还差${totalCount - completedCount}项"
     }
     val progress = if (totalCount > 0) {
@@ -768,7 +781,7 @@ private fun FitnessSummaryCard(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "每日运动监督",
+                        text = "运动计划监督",
                         style = MaterialTheme.typography.headlineSmall,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onPrimary
@@ -846,8 +859,9 @@ private fun EmptyExerciseCard(onAddExercise: () -> Unit) {
  * 显示一个手动运动项目的进度和快捷打卡按钮。
  *
  * @param definition 当前项目定义。
- * @param count 今日完成量。
- * @param goal 今日目标快照。
+ * @param count 当前目标周期累计完成量。
+ * @param todayCount 今天实际记录量，用于判断能否撤销本日快捷记录。
+ * @param goal 当前目标周期目标快照。
  * @param onSubtract 减少一个快速增量的回调。
  * @param onAddSmall 增加一个快速增量的回调。
  * @param onAddLarge 增加两个快速增量的回调。
@@ -859,6 +873,7 @@ private fun EmptyExerciseCard(onAddExercise: () -> Unit) {
 private fun ExerciseTaskCard(
     definition: FitnessExerciseDefinition,
     count: Int,
+    todayCount: Int,
     goal: Int,
     onSubtract: () -> Unit,
     onAddSmall: () -> Unit,
@@ -869,6 +884,11 @@ private fun ExerciseTaskCard(
     val progress = (count.toFloat() / goal.coerceAtLeast(1)).coerceIn(0f, 1f)
     val quickIncrement = definition.quickIncrement
     val largeIncrement = (quickIncrement * 2).coerceAtMost(MAX_RECORD_COUNT)
+    val periodText = if (definition.goalPeriod == FitnessGoalPeriod.WEEKLY) {
+        "本周"
+    } else {
+        "今日"
+    }
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -920,7 +940,8 @@ private fun ExerciseTaskCard(
             )
 
             Text(
-                text = "今日累计$count${definition.unit}，目标$goal${definition.unit}",
+                text = "$periodText 累计$count${definition.unit}，" +
+                    "${definition.goalPeriod.displayName}目标$goal${definition.unit}",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -931,7 +952,7 @@ private fun ExerciseTaskCard(
             ) {
                 OutlinedButton(
                     modifier = Modifier.weight(1f),
-                    enabled = count > 0,
+                    enabled = todayCount > 0,
                     onClick = onSubtract,
                     contentPadding = PaddingValues(horizontal = 4.dp)
                 ) {
@@ -1162,7 +1183,7 @@ private fun FitnessRangeSummaryCard(
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = "全部项目达标 ${summary.fullyCompletedDays} 天",
+                        text = "全部每日项目达标 ${summary.fullyCompletedDays} 天",
                         color = MaterialTheme.colorScheme.onSecondaryContainer
                     )
                 }
@@ -1185,7 +1206,11 @@ private fun FitnessRangeSummaryCard(
                                 fontWeight = FontWeight.SemiBold
                             )
                             Text(
-                                text = "运动${item.activeDays}天 · 达标${item.goalReachedDays}天",
+                                text = if (item.goalPeriod == FitnessGoalPeriod.WEEKLY) {
+                                    "运动${item.activeDays}天 · 目标按自然周累计"
+                                } else {
+                                    "运动${item.activeDays}天 · 达标${item.goalReachedDays}天"
+                                },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -1385,7 +1410,8 @@ private fun ExerciseManagerDialog(
                                         fontWeight = FontWeight.Bold
                                     )
                                     Text(
-                                        text = "目标 ${definition.dailyGoal}${definition.unit}" +
+                                        text = "${definition.goalPeriod.displayName}目标 " +
+                                            "${definition.dailyGoal}${definition.unit}" +
                                             if (definition.trackingType == FitnessTrackingType.STEP_COUNTER) {
                                                 " · 自动计步"
                                             } else {
@@ -1455,6 +1481,9 @@ private fun ExerciseEditorDialog(
     var trackingType by rememberSaveable(definition?.id) {
         mutableStateOf(definition?.trackingType ?: FitnessTrackingType.MANUAL)
     }
+    var goalPeriod by rememberSaveable(definition?.id) {
+        mutableStateOf(definition?.goalPeriod ?: FitnessGoalPeriod.DAILY)
+    }
     var errorText by rememberSaveable(definition?.id) {
         mutableStateOf("")
     }
@@ -1501,8 +1530,33 @@ private fun ExerciseEditorDialog(
                         goalText = it.filter(Char::isDigit).take(MAX_NUMBER_INPUT_LENGTH)
                         errorText = ""
                     },
-                    label = "每日目标"
+                    label = "${goalPeriod.displayName}目标"
                 )
+
+                Text(
+                    text = "目标周期",
+                    fontWeight = FontWeight.SemiBold
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FitnessGoalPeriod.entries.forEach { period ->
+                        val selected = goalPeriod == period
+                        if (selected) {
+                            Button(
+                                onClick = { goalPeriod = period }
+                            ) {
+                                Text(text = period.displayName)
+                            }
+                        } else {
+                            OutlinedButton(
+                                enabled = trackingType != FitnessTrackingType.STEP_COUNTER ||
+                                    period == FitnessGoalPeriod.DAILY,
+                                onClick = { goalPeriod = period }
+                            ) {
+                                Text(text = period.displayName)
+                            }
+                        }
+                    }
+                }
 
                 Text(
                     text = "记录方式",
@@ -1526,7 +1580,10 @@ private fun ExerciseEditorDialog(
                     } else {
                         OutlinedButton(
                             enabled = !anotherStepDefinitionExists,
-                            onClick = { trackingType = FitnessTrackingType.STEP_COUNTER }
+                            onClick = {
+                                trackingType = FitnessTrackingType.STEP_COUNTER
+                                goalPeriod = FitnessGoalPeriod.DAILY
+                            }
                         ) {
                             Text(text = "手机自动步数")
                         }
@@ -1586,7 +1643,7 @@ private fun ExerciseEditorDialog(
                                 existing.name.equals(safeName, ignoreCase = true)
                         } -> "项目名称不能重复"
                         goal == null || goal !in MIN_EXERCISE_GOAL..MAX_RECORD_COUNT -> {
-                            "每日目标请输入1到1000000"
+                            "${goalPeriod.displayName}目标请输入1到1000000"
                         }
                         quickIncrement == null ||
                             quickIncrement !in MIN_QUICK_INCREMENT..MAX_QUICK_INCREMENT -> {
@@ -1601,7 +1658,14 @@ private fun ExerciseEditorDialog(
                                 unit = safeUnit,
                                 dailyGoal = goal,
                                 quickIncrement = quickIncrement,
-                                trackingType = trackingType
+                                trackingType = trackingType,
+                                goalPeriod = if (
+                                    trackingType == FitnessTrackingType.STEP_COUNTER
+                                ) {
+                                    FitnessGoalPeriod.DAILY
+                                } else {
+                                    goalPeriod
+                                }
                             )
                         ) -> ""
                         else -> "项目保存失败，请重试"
@@ -1720,7 +1784,11 @@ private fun FitnessRecordEditorDialog(
                                 )
                             errorText = ""
                         },
-                        label = "${item.name}（${item.unit}，当天目标${item.goal}）"
+                        label = if (item.goalPeriod == FitnessGoalPeriod.WEEKLY) {
+                            "${item.name}（本日完成${item.unit}，周目标${item.goal}）"
+                        } else {
+                            "${item.name}（${item.unit}，每日目标${item.goal}）"
+                        }
                     )
                 }
 

@@ -9,9 +9,15 @@
         android:name="android.permission.PACKAGE_USAGE_STATS"
         tools:ignore="ProtectedPermissions" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- OTA下载完成后仍由用户在Android系统安装界面确认，不执行静默安装。 -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- Android 12及以上需要用户在系统页面单独允许，定时提醒才能避开较大的非精确时间窗口。 -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- Android 10及以上读取系统计步传感器需要用户主动授予身体活动权限。 -->
     <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
+    <!-- 天气只在用户打开今日页面时申请前台粗略位置，不申请后台或精确位置。 -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
     <!--
         只声明需要查询具备桌面入口的应用，用于用户自定义首页快捷方式。
@@ -29,18 +35,27 @@
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LAUNCHER" />
         </intent>
+
+        <!-- Android 11及以上只查询能够提供系统文字转语音服务的引擎，用于本机英语离线发音。 -->
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
     </queries>
 
     <application
         android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_family_launcher"
         android:label="@string/app_name"
+        android:networkSecurityConfig="@xml/network_security_config"
         android:roundIcon="@mipmap/ic_family_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.HarleyApp"
-        android:usesCleartextTraffic="true">
+        android:usesCleartextTraffic="false">
         <activity
             android:name=".MainActivity"
+            android:configChanges="keyboardHidden|orientation|screenSize"
             android:exported="true"
             android:label="@string/app_name"
             android:theme="@style/Theme.HarleyApp"
@@ -72,6 +87,14 @@
             android:name=".notification.WechatReminderReceiver"
             android:exported="false" />
 
+        <!-- 用户点击本App微信提醒后，先结束后续提醒再跳转微信，不在桌面显示独立入口。 -->
+        <activity
+            android:name=".notification.WechatReminderOpenActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:noHistory="true"
+            android:theme="@style/Theme.HarleyApp" />
+
         <!-- 只接收本应用按自定义日期和时间创建的显式Alarm广播。 -->
         <receiver
             android:name=".reminder.ReminderReceiver"
@@ -87,28 +110,19 @@
             </intent-filter>
         </receiver>
 
-        <!-- 用户点击提醒后才打开微信分享确认流程，不会在后台自动选择联系人或发送。 -->
-        <activity
-            android:name=".scheduled.ScheduledShareActivity"
-            android:excludeFromRecents="true"
-            android:exported="false"
-            android:noHistory="true"
-            android:theme="@style/Theme.HarleyApp" />
-
-        <!-- 显式Alarm广播只允许系统和本应用触发。 -->
+        <!-- 桌面小组件只显示App已缓存数据，不会在后台读取位置或访问天气接口。 -->
         <receiver
-            android:name=".scheduled.ScheduledMessageReceiver"
-            android:exported="false" />
-
-        <!-- 手机重启会清除AlarmManager任务，因此启动完成后恢复未来提醒。 -->
-        <receiver
-            android:name=".scheduled.ScheduledMessageBootReceiver"
-            android:enabled="true"
+            android:name=".widget.TodayWeatherWidgetProvider"
             android:exported="false">
             <intent-filter>
-                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
             </intent-filter>
+
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/today_weather_widget_info" />
         </receiver>
+
     </application>
 
 </manifest>

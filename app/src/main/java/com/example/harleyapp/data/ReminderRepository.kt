@@ -3,6 +3,7 @@ package com.example.harleyapp.data
 import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
+import com.example.harleyapp.data.local.RoomBackedPreferences
 import com.example.harleyapp.model.ScheduledReminder
 import com.example.harleyapp.model.calculateNextReminderAt
 import org.json.JSONArray
@@ -20,9 +21,9 @@ import org.json.JSONObject
  */
 class ReminderRepository(context: Context) {
 
-    private val preferences = context.getSharedPreferences(
-        PREFERENCE_NAME,
-        Context.MODE_PRIVATE
+    private val preferences = RoomBackedPreferences.create(
+        context = context,
+        preferenceName = PREFERENCE_NAME
     )
 
     /**
