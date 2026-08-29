@@ -26,6 +26,7 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -645,6 +646,9 @@ private fun AppInfoCard(appInfo: AppInfo) {
     var downloadState by remember {
         mutableStateOf(AppUpdateDownloadState())
     }
+    var confirmDeleteDownload by remember {
+        mutableStateOf(false)
+    }
 
     // 页面重新进入时恢复系统下载任务，避免App退到后台后进度条丢失。
     LaunchedEffect(updateRepository) {
@@ -713,6 +717,57 @@ private fun AppInfoCard(appInfo: AppInfo) {
                     }
                 ) {
                     Text(text = "暂不升级")
+                }
+            }
+        )
+    }
+
+    if (confirmDeleteDownload) {
+        AlertDialog(
+            onDismissRequest = {
+                confirmDeleteDownload = false
+            },
+            title = {
+                Text(text = "删除已下载安装包？")
+            },
+            text = {
+                Text(
+                    text = "将删除版本 ${downloadState.targetVersion} 的APK和系统下载记录。" +
+                        "以后仍可重新检查并下载。"
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        confirmDeleteDownload = false
+                        coroutineScope.launch {
+                            val deleted = withContext(Dispatchers.IO) {
+                                updateRepository.deleteTrackedDownload()
+                            }
+                            if (deleted) {
+                                downloadState = AppUpdateDownloadState()
+                                feedbackTitle = "安装包已删除"
+                                feedbackMessage = "已清理下载文件，需要时可重新检查更新。"
+                            } else {
+                                downloadState = withContext(Dispatchers.IO) {
+                                    updateRepository.getTrackedDownloadState()
+                                }
+                                feedbackTitle = "删除失败"
+                                feedbackMessage = "无法完整删除安装包，请稍后重试。"
+                            }
+                        }
+                    }
+                ) {
+                    Text(text = "确认删除")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        confirmDeleteDownload = false
+                    }
+                ) {
+                    Text(text = "保留安装包")
                 }
             }
         )
@@ -838,6 +893,9 @@ private fun AppInfoCard(appInfo: AppInfo) {
                         feedbackMessage = "无法取消下载，请稍后重试。"
                     }
                 },
+                onDeleteDownload = {
+                    confirmDeleteDownload = true
+                },
                 onInstallUpdate = { downloadId ->
                     when (val result = updateRepository.openInstaller(downloadId)) {
                         AppUpdateInstallResult.InstallerOpened -> Unit
@@ -874,6 +932,7 @@ private fun AppInfoCard(appInfo: AppInfo) {
  *
  * @param state 当前下载状态。
  * @param onCancelDownload 用户取消后台下载时的回调。
+ * @param onDeleteDownload 下载完成后请求删除APK的回调。
  * @param onInstallUpdate 下载完成后请求安装的回调，参数为DownloadManager编号。
  *
  * @return 无返回值；IDLE状态下不输出任何内容。
@@ -882,6 +941,7 @@ private fun AppInfoCard(appInfo: AppInfo) {
 private fun AppUpdateDownloadStatus(
     state: AppUpdateDownloadState,
     onCancelDownload: () -> Unit,
+    onDeleteDownload: () -> Unit,
     onInstallUpdate: (Long) -> Unit
 ) {
     if (state.phase == AppUpdateDownloadPhase.IDLE) {
@@ -949,12 +1009,19 @@ private fun AppUpdateDownloadStatus(
             }
 
             state.phase == AppUpdateDownloadPhase.SUCCESSFUL && state.downloadId != null -> {
-                Button(
-                    onClick = {
-                        onInstallUpdate(state.downloadId)
-                    }
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Text(text = "安装更新")
+                    OutlinedButton(onClick = onDeleteDownload) {
+                        Text(text = "删除安装包")
+                    }
+                    Button(
+                        onClick = {
+                            onInstallUpdate(state.downloadId)
+                        }
+                    ) {
+                        Text(text = "安装更新")
+                    }
                 }
             }
 

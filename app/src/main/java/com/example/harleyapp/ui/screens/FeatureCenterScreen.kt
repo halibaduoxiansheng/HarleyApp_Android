@@ -64,7 +64,8 @@ enum class FeatureCenterPage {
     WECHAT_REMINDER,
     GENERAL_REMINDER,
     LOCAL_CLEANUP,
-    ENGLISH_WORDS
+    ENGLISH_WORDS,
+    NOTEBOOK
 }
 
 /**
@@ -162,6 +163,9 @@ fun FeatureCenterScreen(
             onOpenToday = onOpenToday,
             onOpenSearch = onOpenSearch,
             onOpenBackup = onOpenBackup,
+            onOpenNotebook = {
+                onPageChanged(FeatureCenterPage.NOTEBOOK)
+            },
             onOpenEnglishWords = {
                 onPageChanged(FeatureCenterPage.ENGLISH_WORDS)
             },
@@ -237,6 +241,11 @@ fun FeatureCenterScreen(
             onResetWord = onResetEnglishWord,
             onBack = { onPageChanged(FeatureCenterPage.OVERVIEW) }
         )
+
+        FeatureCenterPage.NOTEBOOK -> NotebookScreen(
+            modifier = modifier,
+            onBack = { onPageChanged(FeatureCenterPage.OVERVIEW) }
+        )
     }
 }
 
@@ -256,6 +265,7 @@ fun FeatureCenterScreen(
  * @param onOpenToday 打开今日总览的回调。
  * @param onOpenSearch 打开全局本地搜索的回调。
  * @param onOpenBackup 打开本地备份与恢复的回调。
+ * @param onOpenNotebook 打开富内容记事本的回调。
  * @param onOpenEnglishWords 打开离线英语单词学习页的回调。
  *
  * @return 无返回值，直接输出功能入口网格。
@@ -272,6 +282,7 @@ private fun FeatureCenterOverview(
     onOpenToday: () -> Unit,
     onOpenSearch: () -> Unit,
     onOpenBackup: () -> Unit,
+    onOpenNotebook: () -> Unit,
     onOpenEnglishWords: () -> Unit,
     onOpenWechatReminder: () -> Unit,
     onOpenGeneralReminder: () -> Unit,
@@ -296,6 +307,7 @@ private fun FeatureCenterOverview(
         onOpenToday = onOpenToday,
         onOpenSearch = onOpenSearch,
         onOpenBackup = onOpenBackup,
+        onOpenNotebook = onOpenNotebook,
         onOpenEnglishWords = onOpenEnglishWords,
         onOpenWechatReminder = onOpenWechatReminder,
         onOpenGeneralReminder = onOpenGeneralReminder,
@@ -450,6 +462,7 @@ private data class FeatureEntry(
  * @param onOpenToday 打开今日总览的回调。
  * @param onOpenSearch 打开全局搜索的回调。
  * @param onOpenBackup 打开本地备份的回调。
+ * @param onOpenNotebook 打开富内容记事本的回调。
  * @param onOpenEnglishWords 打开离线英语单词学习页的回调。
  * @param onOpenWechatReminder 打开微信消息提醒的回调。
  * @param onOpenGeneralReminder 打开通知提醒的回调。
@@ -465,6 +478,7 @@ private fun featureCenterEntries(
     onOpenToday: () -> Unit,
     onOpenSearch: () -> Unit,
     onOpenBackup: () -> Unit,
+    onOpenNotebook: () -> Unit,
     onOpenEnglishWords: () -> Unit,
     onOpenWechatReminder: () -> Unit,
     onOpenGeneralReminder: () -> Unit,
@@ -481,7 +495,8 @@ private fun featureCenterEntries(
         FeatureEntry(HomeFeatureId.GENERAL_REMINDER, "铃", "通知提醒", "一次或重复本机通知", onOpenGeneralReminder),
         FeatureEntry(HomeFeatureId.BACKUP, "备", "本地备份", "换手机导出与恢复", onOpenBackup),
         FeatureEntry(HomeFeatureId.LOCAL_CLEANUP, "清", "手机清理", "缓存统计与存储管理", onOpenLocalCleanup),
-        FeatureEntry(HomeFeatureId.ENGLISH_WORDS, "英", "英语单词", "离线词库、例句与发音", onOpenEnglishWords)
+        FeatureEntry(HomeFeatureId.ENGLISH_WORDS, "英", "英语单词", "离线词库、例句与发音", onOpenEnglishWords),
+        FeatureEntry(HomeFeatureId.NOTEBOOK, "记", "记事本", "富内容文章、查询与往期回顾", onOpenNotebook)
     )
 }
 

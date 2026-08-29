@@ -30,6 +30,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.harleyapp.model.ScheduledReminder
+import com.example.harleyapp.model.isReminderTriggerInFuture
 import com.example.harleyapp.ui.components.HarleyDatePickerDialog
 import com.example.harleyapp.ui.components.HarleyTimePickerDialog
 import java.time.Instant
@@ -289,12 +290,13 @@ fun ReminderCard(
                         .atZone(ZoneId.systemDefault())
                         .toInstant()
                         .toEpochMilli()
+                    val currentTimeMillis = System.currentTimeMillis()
                     feedbackText = when {
                         contentText.trim().isBlank() -> "请填写通知内容"
                         repeatIntervalDays == null || repeatIntervalDays !in 0..MAX_REPEAT_DAYS ->
                             "重复间隔请输入0到${MAX_REPEAT_DAYS}天"
-                        triggerAtMillis <= System.currentTimeMillis() + MIN_LEAD_MILLIS ->
-                            "首次提醒时间至少要比现在晚1分钟"
+                        !isReminderTriggerInFuture(triggerAtMillis, currentTimeMillis) ->
+                            "首次提醒时间必须晚于当前时间"
                         else -> {
                             val oldReminder = editingReminder
                             val success = onSaveReminder(
@@ -555,4 +557,3 @@ private const val NEW_REMINDER_ID = 0L
 private const val MAX_CONTENT_LENGTH = 1_000
 private const val MAX_REPEAT_TEXT_LENGTH = 3
 private const val MAX_REPEAT_DAYS = 365
-private const val MIN_LEAD_MILLIS = 60_000L

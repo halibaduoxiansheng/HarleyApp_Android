@@ -784,6 +784,11 @@ fun HarleyApp(
                             featureCenterPageName = FeatureCenterPage.ENGLISH_WORDS.name
                             currentSectionName = AppSection.FEATURES.name
                         }
+
+                        HomeFeatureId.NOTEBOOK -> {
+                            featureCenterPageName = FeatureCenterPage.NOTEBOOK.name
+                            currentSectionName = AppSection.FEATURES.name
+                        }
                     }
                 },
                 englishWord = homeEnglishWord,

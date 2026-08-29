@@ -3,17 +3,25 @@ package com.example.harleyapp.ui.screens
 import android.content.Context
 import android.content.Intent
 import android.graphics.BitmapFactory
+import android.graphics.ImageDecoder
+import android.graphics.drawable.Animatable
+import android.graphics.drawable.AnimatedImageDrawable
+import android.graphics.drawable.BitmapDrawable
+import android.graphics.drawable.Drawable
+import android.os.Build
 import android.util.Log
+import android.view.View
+import android.widget.ImageView
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
@@ -36,6 +44,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -45,13 +54,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.net.toUri
 import com.example.harleyapp.data.FitnessPlanSyncResult
 import com.example.harleyapp.data.FitnessRepository
@@ -66,6 +73,7 @@ import com.example.harleyapp.model.buildAdultHealthRecommendation
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.util.Locale
+import kotlin.math.roundToInt
 
 /**
  * 在“我的”页面显示用户资料、健康提示和可编辑的一键同步入口。
@@ -398,7 +406,7 @@ private fun UserProfileEditorDialog(
                     Spacer(modifier = Modifier.width(12.dp))
                     Column {
                         OutlinedButton(onClick = { avatarPicker.launch(arrayOf("image/*")) }) {
-                            Text(text = "从相册选择头像")
+                            Text(text = "选择头像（支持GIF）")
                         }
                         if (avatarUri.isNotBlank()) {
                             TextButton(onClick = { avatarUri = "" }) {
@@ -864,7 +872,11 @@ private fun RecommendationEditorCard(
 }
 
 /**
- * 显示本地头像；图片不可读时自动回退到姓名首字或默认文字。
+ * 显示本地静态或动态头像；GIF、动态WebP可自动循环播放，图片不可读时回退到姓名首字。
+ *
+ * 使用方法：
+ * 在个人资料展示或编辑区域传入已经取得持久读取权限的系统文档Uri。Android 9及以上
+ * 使用ImageDecoder保留图片动画，Android 8则显示动态图的第一帧；组件离开页面时自动停止动画。
  *
  * @param avatarUri 系统文档Uri文本。
  * @param name 用户姓名，用于生成回退首字。
@@ -877,7 +889,7 @@ private fun ProfileAvatar(
     name: String
 ) {
     val context = LocalContext.current
-    val bitmap by produceState<ImageBitmap?>(
+    val avatarDrawable by produceState<Drawable?>(
         initialValue = null,
         key1 = avatarUri
     ) {
@@ -885,27 +897,77 @@ private fun ProfileAvatar(
             null
         } else {
             withContext(Dispatchers.IO) {
-                runCatching {
-                    context.contentResolver.openInputStream(avatarUri.toUri())?.use { stream ->
-                        BitmapFactory.decodeStream(stream)?.asImageBitmap()
-                    }
-                }.onFailure { error ->
-                    Log.e(PROFILE_UI_TAG, "Failed to decode avatar image", error)
-                }.getOrNull()
+                decodeAvatarDrawable(
+                    context = context,
+                    avatarUri = avatarUri,
+                    maxDimensionPx = (
+                        PROFILE_AVATAR_DECODE_SIZE_DP * context.resources.displayMetrics.density
+                    ).roundToInt()
+                )
             }
         }
     }
+
+    DisposableEffect(avatarDrawable) {
+        onDispose {
+            // 页面离开或头像改变时停止旧动画，避免Drawable继续占用刷新资源。
+            (avatarDrawable as? Animatable)?.stop()
+        }
+    }
+
     Surface(
         modifier = Modifier.size(68.dp),
         shape = CircleShape,
         color = MaterialTheme.colorScheme.primary
     ) {
-        if (bitmap != null) {
-            Image(
-                modifier = Modifier.clip(CircleShape),
-                bitmap = bitmap!!,
-                contentDescription = "用户头像",
-                contentScale = ContentScale.Crop
+        if (avatarDrawable != null) {
+            AndroidView(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clip(CircleShape),
+                factory = { viewContext ->
+                    ImageView(viewContext).apply {
+                        contentDescription = "用户头像"
+                        scaleType = ImageView.ScaleType.CENTER_CROP
+                        addOnAttachStateChangeListener(
+                            object : View.OnAttachStateChangeListener {
+
+                                /**
+                                 * 头像控件真正加入窗口后启动动态图，避免部分系统忽略提前启动请求。
+                                 *
+                                 * @param view 已附着到窗口的头像ImageView。
+                                 *
+                                * @return 无返回值。
+                                 */
+                                override fun onViewAttachedToWindow(view: View) {
+                                    startAvatarAnimationAfterAttach(view as ImageView)
+                                }
+
+                                /**
+                                 * 头像控件离开窗口时停止动画，防止不可见页面继续请求绘制帧。
+                                 *
+                                 * @param view 已从窗口分离的头像ImageView。
+                                 *
+                                 * @return 无返回值。
+                                 */
+                                override fun onViewDetachedFromWindow(view: View) {
+                                    ((view as ImageView).drawable as? Animatable)?.stop()
+                                }
+                            }
+                        )
+                    }
+                },
+                update = { imageView ->
+                    // 避免重组时重复替换相同Drawable，并在切换头像前停止旧动画。
+                    if (imageView.drawable !== avatarDrawable) {
+                        (imageView.drawable as? Animatable)?.stop()
+                        imageView.setImageDrawable(avatarDrawable)
+                    }
+                    // 重组可能早于View附着；已附着时立即启动，否则交给上面的附着监听器。
+                    if (imageView.isAttachedToWindow) {
+                        startAvatarAnimationAfterAttach(imageView)
+                    }
+                }
             )
         } else {
             Box(contentAlignment = Alignment.Center) {
@@ -918,6 +980,89 @@ private fun ProfileAvatar(
             }
         }
     }
+}
+
+/**
+ * 在头像ImageView完成当前帧附着后启动AnimatedImageDrawable。
+ *
+ * 使用方法：
+ * 由AndroidView的附着回调和重组更新回调调用。函数把启动动作投递到下一次屏幕刷新，确保
+ * Drawable已经取得ImageView回调且View处于可见窗口；头像在执行前被替换或移出窗口时安全忽略。
+ *
+ * @param imageView 当前承载头像Drawable的原生ImageView。
+ *
+ * @return 无返回值；静态图片不执行动画，只写入一次英文调试状态。
+ */
+private fun startAvatarAnimationAfterAttach(imageView: ImageView) {
+    val expectedDrawable = imageView.drawable
+    imageView.postOnAnimation {
+        if (!imageView.isAttachedToWindow || imageView.drawable !== expectedDrawable) {
+            return@postOnAnimation
+        }
+
+        val animation = expectedDrawable as? Animatable
+        animation?.start()
+        Log.d(
+            PROFILE_UI_TAG,
+            "Avatar animation dispatched; running=${animation?.isRunning == true}"
+        )
+    }
+}
+
+/**
+ * 把头像Uri解码为可供ImageView显示的Drawable，并保留系统支持的图片动画。
+ *
+ * 使用方法：
+ * 由[ProfileAvatar]在IO线程调用。Android 9及以上使用ImageDecoder读取GIF或动态WebP，
+ * 同时按目标上限缩小尺寸；Android 8使用BitmapFactory兼容普通图片和动态图第一帧。
+ *
+ * @param context 用于读取ContentResolver和屏幕资源的Android上下文。
+ * @param avatarUri 已持久授权的系统文档Uri文本。
+ * @param maxDimensionPx 解码后宽高的最大像素，必须大于0，用于限制大图内存占用。
+ *
+ * @return 解码成功返回静态或动态Drawable；Uri失效、格式不支持或读取失败返回null。
+ */
+private fun decodeAvatarDrawable(
+    context: Context,
+    avatarUri: String,
+    maxDimensionPx: Int
+): Drawable? {
+    return runCatching {
+        val uri = avatarUri.toUri()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val source = ImageDecoder.createSource(context.contentResolver, uri)
+            val drawable = ImageDecoder.decodeDrawable(source) { decoder, imageInfo, _ ->
+                val originalWidth = imageInfo.size.width
+                val originalHeight = imageInfo.size.height
+                val originalMaxDimension = maxOf(originalWidth, originalHeight)
+                if (maxDimensionPx > 0 && originalMaxDimension > maxDimensionPx) {
+                    val scale = maxDimensionPx.toFloat() / originalMaxDimension.toFloat()
+                    decoder.setTargetSize(
+                        (originalWidth * scale).roundToInt().coerceAtLeast(1),
+                        (originalHeight * scale).roundToInt().coerceAtLeast(1)
+                    )
+                }
+            }
+            if (drawable is AnimatedImageDrawable) {
+                // 头像区域需要持续展示动态效果，不受GIF文件自身有限循环次数影响。
+                drawable.repeatCount = AnimatedImageDrawable.REPEAT_INFINITE
+            }
+            drawable
+        } else {
+            context.contentResolver.openInputStream(uri)?.use { stream ->
+                BitmapFactory.decodeStream(stream)?.let { bitmap ->
+                    BitmapDrawable(context.resources, bitmap)
+                }
+            }
+        }
+    }.onSuccess { drawable ->
+        Log.d(
+            PROFILE_UI_TAG,
+            "Avatar image decoded; animated=${drawable is Animatable}"
+        )
+    }.onFailure { error ->
+        Log.e(PROFILE_UI_TAG, "Failed to decode avatar image", error)
+    }.getOrNull()
 }
 
 /**
@@ -975,6 +1120,7 @@ private fun formatWeight(weightKg: Double): String {
 }
 
 private const val PROFILE_UI_TAG = "UserProfileHealthCard"
+private const val PROFILE_AVATAR_DECODE_SIZE_DP = 136
 private const val MAX_PROFILE_NAME_LENGTH = 30
 private const val MAX_RECOMMENDATION_NAME_LENGTH = 20
 private const val MAX_RECOMMENDATION_UNIT_LENGTH = 8

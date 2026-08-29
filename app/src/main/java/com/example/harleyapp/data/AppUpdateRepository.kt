@@ -240,16 +240,21 @@ class AppUpdateRepository(context: Context) {
      * @return 系统下载记录已移除且本地状态已清除时返回true，否则返回false。
      */
     fun cancelTrackedDownload(): Boolean {
-        val downloadId = getTrackedDownloadId()
-        if (downloadId != null) {
-            downloadManager.remove(downloadId)
-        }
+        return removeTrackedDownload(operationName = "cancel")
+    }
 
-        return preferences.edit().clear().commit().also { success ->
-            if (!success) {
-                Log.e(TAG, "Failed to clear app update download state")
-            }
-        }
+    /**
+     * 删除已经下载完成但用户不准备安装的OTA安装包。
+     *
+     * 使用方法：
+     * 仅在[getTrackedDownloadState]返回SUCCESSFUL且用户在界面确认删除后调用。函数会移除
+     * DownloadManager任务和对应文件，并清空本App保存的下载编号、版本、地址及本地路径。
+     * 删除范围严格限制为本App专属Downloads目录中的HarleyApp APK。
+     *
+     * @return 系统下载记录、本地APK和持久化状态均已清理返回true；任何一步失败返回false。
+     */
+    fun deleteTrackedDownload(): Boolean {
+        return removeTrackedDownload(operationName = "delete")
     }
 
     /**
@@ -314,6 +319,69 @@ class AppUpdateRepository(context: Context) {
     private fun getTrackedDownloadId(): Long? {
         val storedId = preferences.getLong(KEY_DOWNLOAD_ID, INVALID_DOWNLOAD_ID)
         return storedId.takeIf { downloadId -> downloadId > 0L }
+    }
+
+    /**
+     * 统一移除当前OTA下载任务、App专属APK文件和跟踪状态。
+     *
+     * @param operationName 写入英文日志的操作名称，只允许cancel或delete等固定调用方文本。
+     *
+     * @return 三部分状态均已清理返回true；系统服务、文件系统或SharedPreferences失败返回false。
+     */
+    private fun removeTrackedDownload(operationName: String): Boolean {
+        val downloadId = getTrackedDownloadId()
+        val storedFilePath = preferences.getString(KEY_LOCAL_FILE_PATH, null)
+        val downloadRecordRemoved = if (downloadId == null) {
+            true
+        } else {
+            runCatching {
+                downloadManager.remove(downloadId)
+                true
+            }.getOrElse { error ->
+                Log.e(TAG, "Failed to $operationName app update download record", error)
+                false
+            }
+        }
+        val localFileRemoved = deleteTrackedApkFile(storedFilePath)
+        val stateCleared = preferences.edit().clear().commit().also { success ->
+            if (!success) {
+                Log.e(TAG, "Failed to clear app update download state")
+            }
+        }
+
+        return downloadRecordRemoved && localFileRemoved && stateCleared
+    }
+
+    /**
+     * 在DownloadManager记录缺失或系统未清理文件时，安全删除App专属目录中的已跟踪APK。
+     *
+     * @param storedFilePath 下载开始时保存的绝对文件路径；没有路径时无需补充删除。
+     *
+     * @return 文件不存在或成功删除返回true；路径越界、名称异常或删除失败返回false。
+     */
+    private fun deleteTrackedApkFile(storedFilePath: String?): Boolean {
+        if (storedFilePath.isNullOrBlank()) {
+            return true
+        }
+
+        return runCatching {
+            val downloadDirectory = applicationContext.getExternalFilesDir(
+                Environment.DIRECTORY_DOWNLOADS
+            )?.canonicalFile ?: return@runCatching false
+            val trackedFile = File(storedFilePath).canonicalFile
+            val isExpectedFile = trackedFile.parentFile == downloadDirectory &&
+                trackedFile.name.startsWith(DOWNLOAD_FILE_PREFIX) &&
+                trackedFile.name.endsWith(APK_FILE_SUFFIX, ignoreCase = true)
+            if (!isExpectedFile) {
+                Log.e(TAG, "Rejected app update file deletion outside managed directory")
+                return@runCatching false
+            }
+
+            !trackedFile.exists() || trackedFile.delete()
+        }.getOrElse { error ->
+            Log.e(TAG, "Failed to delete tracked app update file", error)
+            false
+        }
     }
 
     /**
@@ -477,7 +545,7 @@ class AppUpdateRepository(context: Context) {
      */
     private fun buildDownloadFileName(version: String): String {
         val safeVersion = version.replace(Regex("[^0-9A-Za-z._-]"), "_")
-        return "HarleyApp-$safeVersion-${System.currentTimeMillis()}.apk"
+        return "$DOWNLOAD_FILE_PREFIX$safeVersion-${System.currentTimeMillis()}$APK_FILE_SUFFIX"
     }
 
     private companion object {
@@ -486,6 +554,8 @@ class AppUpdateRepository(context: Context) {
         const val JSON_LATEST_VERSION = "latest_version"
         const val JSON_FIRMWARE_URL = "firmware_url"
         const val APK_MIME_TYPE = "application/vnd.android.package-archive"
+        const val DOWNLOAD_FILE_PREFIX = "HarleyApp-"
+        const val APK_FILE_SUFFIX = ".apk"
         const val PREFERENCE_NAME = "harley_app_update"
         const val KEY_DOWNLOAD_ID = "download_id"
         const val KEY_TARGET_VERSION = "target_version"

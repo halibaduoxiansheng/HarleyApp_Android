@@ -325,6 +325,7 @@ private fun BackupPreviewCard(preview: BackupPreview) {
             Text("账目 ${preview.ledgerEntryCount} 条 · 提醒 ${preview.reminderCount} 条")
             Text("运动记录 ${preview.fitnessRecordCount} 天 · 网站 ${preview.websiteCount} 个")
             Text("网站卡片背景 ${preview.websiteBackgroundCount} 张")
+            Text("记事本 ${preview.notebookArticleCount} 篇 · 文章媒体 ${preview.notebookMediaCount} 个")
             Text("本地设置 ${preview.preferenceValueCount} 项 · 数据文档 ${preview.localDocumentCount} 项")
             Text(
                 text = "创建时间：${formatBackupTime(preview.createdAtMillis)}",

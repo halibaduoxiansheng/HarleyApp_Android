@@ -7,8 +7,11 @@ import android.net.Uri
 import android.util.AtomicFile
 import android.util.Base64
 import android.util.Log
+import com.example.harleyapp.data.NotebookMediaBackupEntry
+import com.example.harleyapp.data.NotebookMediaStore
 import com.example.harleyapp.data.WebsiteBackgroundBackupEntry
 import com.example.harleyapp.data.WebsiteCardBackgroundStore
+import com.example.harleyapp.data.isValidNotebookMediaFileName
 import com.example.harleyapp.data.local.LocalDocumentEntity
 import com.example.harleyapp.data.local.LocalDocumentStore
 import com.example.harleyapp.model.isValidWebsiteBackgroundFileName
@@ -40,6 +43,8 @@ import javax.crypto.spec.SecretKeySpec
  * @param fitnessRecordCount 运动历史天数。
  * @param websiteCount 网站快捷入口数量。
  * @param websiteBackgroundCount 随备份迁移的网站卡片背景图片数量。
+ * @param notebookArticleCount 记事本文章数量。
+ * @param notebookMediaCount 随备份迁移的文章图片和GIF数量。
  */
 data class BackupPreview(
     val createdAtMillis: Long,
@@ -51,7 +56,9 @@ data class BackupPreview(
     val reminderCount: Int,
     val fitnessRecordCount: Int,
     val websiteCount: Int,
-    val websiteBackgroundCount: Int
+    val websiteBackgroundCount: Int,
+    val notebookArticleCount: Int,
+    val notebookMediaCount: Int
 )
 
 /**
@@ -84,6 +91,7 @@ class AppBackupManager(context: Context) {
     private val applicationContext = context.applicationContext
     private val documentStore = LocalDocumentStore.create(applicationContext)
     private val websiteBackgroundStore = WebsiteCardBackgroundStore(applicationContext)
+    private val notebookMediaStore = NotebookMediaStore(applicationContext)
 
     /**
      * 把当前全部可迁移数据写入用户选择的文件。
@@ -242,6 +250,17 @@ class AppBackupManager(context: Context) {
                     )
             )
         }
+        val notebookMediaJson = JSONArray()
+        notebookMediaStore.snapshotForBackup().forEach { entry ->
+            notebookMediaJson.put(
+                JSONObject()
+                    .put(JSON_FILE_NAME, entry.fileName)
+                    .put(
+                        JSON_IMAGE_BASE64,
+                        Base64.encodeToString(entry.bytes, Base64.NO_WRAP)
+                    )
+            )
+        }
 
         return JSONObject()
             .put(JSON_FORMAT, PAYLOAD_FORMAT)
@@ -251,6 +270,7 @@ class AppBackupManager(context: Context) {
             .put(JSON_PREFERENCES, preferencesJson)
             .put(JSON_DOCUMENTS, documentsJson)
             .put(JSON_WEBSITE_BACKGROUNDS, websiteBackgroundsJson)
+            .put(JSON_NOTEBOOK_MEDIA, notebookMediaJson)
     }
 
     /**
@@ -377,6 +397,9 @@ class AppBackupManager(context: Context) {
         val backgrounds = payload.optJSONArray(JSON_WEBSITE_BACKGROUNDS) ?: JSONArray()
         require(backgrounds.length() <= WebsiteCardBackgroundStore.MAX_IMAGE_COUNT)
         decodeWebsiteBackgrounds(backgrounds)
+        val notebookMedia = payload.optJSONArray(JSON_NOTEBOOK_MEDIA) ?: JSONArray()
+        require(notebookMedia.length() <= NotebookMediaStore.MAX_MEDIA_COUNT)
+        decodeNotebookMedia(notebookMedia)
     }
 
     /**
@@ -419,8 +442,13 @@ class AppBackupManager(context: Context) {
                 payload.optJSONArray(JSON_WEBSITE_BACKGROUNDS) ?: JSONArray()
             )
         )
+        val notebookMediaSuccess = notebookMediaStore.replaceFromBackup(
+            decodeNotebookMedia(
+                payload.optJSONArray(JSON_NOTEBOOK_MEDIA) ?: JSONArray()
+            )
+        )
 
-        return preferencesSuccess && documentsSuccess && backgroundsSuccess
+        return preferencesSuccess && documentsSuccess && backgroundsSuccess && notebookMediaSuccess
     }
 
     /**
@@ -586,6 +614,36 @@ class AppBackupManager(context: Context) {
     }
 
     /**
+     * 解码并限制备份中的记事本图片和GIF。
+     *
+     * 使用方法：
+     * 载荷校验和正式恢复均调用本函数。每个条目必须使用记事本媒体仓库生成的安全文件名，
+     * 文件数量、单文件大小和总容量都不能超过[NotebookMediaStore]声明的边界。
+     *
+     * @param mediaJson 包含安全文件名和Base64图片内容的数组；旧版本备份传空数组。
+     * @return 可交给[NotebookMediaStore.replaceFromBackup]原子替换的媒体列表。
+     */
+    private fun decodeNotebookMedia(
+        mediaJson: JSONArray
+    ): List<NotebookMediaBackupEntry> {
+        val usedFileNames = mutableSetOf<String>()
+        var totalBytes = 0L
+        return buildList {
+            for (index in 0 until mediaJson.length()) {
+                val item = mediaJson.getJSONObject(index)
+                val fileName = item.getString(JSON_FILE_NAME)
+                val bytes = Base64.decode(item.getString(JSON_IMAGE_BASE64), Base64.DEFAULT)
+                require(isValidNotebookMediaFileName(fileName))
+                require(usedFileNames.add(fileName))
+                require(bytes.isNotEmpty() && bytes.size <= NotebookMediaStore.MAX_SINGLE_MEDIA_BYTES)
+                totalBytes += bytes.size
+                require(totalBytes <= NotebookMediaStore.MAX_TOTAL_MEDIA_BYTES)
+                add(NotebookMediaBackupEntry(fileName = fileName, bytes = bytes))
+            }
+        }
+    }
+
+    /**
      * 兼容尚未使用Room的旧备份：把结构化SharedPreferences字符串转换为Room文档。
      *
      * @param preferencesJson 旧备份设置对象。
@@ -623,6 +681,7 @@ class AppBackupManager(context: Context) {
         val preferences = payload.getJSONObject(JSON_PREFERENCES)
         val documents = payload.getJSONArray(JSON_DOCUMENTS)
         val websiteBackgrounds = payload.optJSONArray(JSON_WEBSITE_BACKGROUNDS) ?: JSONArray()
+        val notebookMedia = payload.optJSONArray(JSON_NOTEBOOK_MEDIA) ?: JSONArray()
         val roomValues = buildMap {
             for (index in 0 until documents.length()) {
                 val item = documents.getJSONObject(index)
@@ -658,7 +717,9 @@ class AppBackupManager(context: Context) {
             reminderCount = arrayCount(PREF_REMINDERS, KEY_REMINDERS),
             fitnessRecordCount = arrayCount(PREF_FITNESS, KEY_FITNESS_RECORDS),
             websiteCount = arrayCount(PREF_WEBSITES, KEY_WEBSITES),
-            websiteBackgroundCount = websiteBackgrounds.length()
+            websiteBackgroundCount = websiteBackgrounds.length(),
+            notebookArticleCount = arrayCount(PREF_NOTEBOOK, KEY_NOTEBOOK_ARTICLES),
+            notebookMediaCount = notebookMedia.length()
         )
     }
 
@@ -739,7 +800,8 @@ class AppBackupManager(context: Context) {
         const val GCM_TAG_BITS = 128
         const val GCM_IV_BYTES = 12
         const val SALT_BYTES = 16
-        const val MAX_BACKUP_BYTES = 25 * 1024 * 1024
+        // 图片经过Base64编码且加密备份会再次编码，128MB可覆盖当前全部受控媒体上限。
+        const val MAX_BACKUP_BYTES = 128 * 1024 * 1024
         const val MAX_DOCUMENT_BYTES = 5 * 1024 * 1024
         const val MAX_DOCUMENT_COUNT = 100
         const val MAX_PREFERENCE_FILES = 30
@@ -762,6 +824,7 @@ class AppBackupManager(context: Context) {
         const val JSON_PREFERENCES = "preferences"
         const val JSON_DOCUMENTS = "documents"
         const val JSON_WEBSITE_BACKGROUNDS = "website_card_backgrounds"
+        const val JSON_NOTEBOOK_MEDIA = "notebook_media"
         const val JSON_FILE_NAME = "file_name"
         const val JSON_IMAGE_BASE64 = "image_base64"
         const val JSON_NAMESPACE = "namespace"
@@ -786,6 +849,7 @@ class AppBackupManager(context: Context) {
         const val PREF_SHORTCUTS = "harley_shortcuts"
         const val PREF_WEBSITES = "harley_websites"
         const val PREF_WEBSITE_TOOLS = "harley_website_tools"
+        const val PREF_NOTEBOOK = "harley_notebook"
         const val DOCUMENT_ENGLISH_WORD_PROGRESS = "harley_english_words"
         const val PREF_WECHAT_REMINDER = "harley_wechat_message_reminder"
         const val PREF_WECHAT_LEGACY = "harley_wechat_auto_reply"
@@ -796,6 +860,7 @@ class AppBackupManager(context: Context) {
         const val KEY_REMINDERS = "reminders_json"
         const val KEY_FITNESS_RECORDS = "records"
         const val KEY_WEBSITES = "websites"
+        const val KEY_NOTEBOOK_ARTICLES = "articles_v1"
 
         val KNOWN_PREFERENCE_NAMES = listOf(
             PREF_APPEARANCE,
@@ -807,6 +872,7 @@ class AppBackupManager(context: Context) {
             PREF_SHORTCUTS,
             PREF_WEBSITES,
             PREF_WEBSITE_TOOLS,
+            PREF_NOTEBOOK,
             PREF_WECHAT_REMINDER,
             PREF_WECHAT_LEGACY,
             PREF_CLEANUP,
@@ -819,6 +885,7 @@ class AppBackupManager(context: Context) {
             PREF_REMINDERS,
             PREF_WEBSITES,
             PREF_WEBSITE_TOOLS,
+            PREF_NOTEBOOK,
             DOCUMENT_ENGLISH_WORD_PROGRESS
         )
 

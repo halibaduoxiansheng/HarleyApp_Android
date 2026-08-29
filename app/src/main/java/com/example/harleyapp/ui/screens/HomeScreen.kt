@@ -391,6 +391,14 @@ private fun homeFeatureEntries(
             symbol = "英",
             statusLabel = "离线",
             onClick = { onOpenFeature(HomeFeatureId.ENGLISH_WORDS) }
+        ),
+        HomeFeatureEntry(
+            id = HomeFeatureId.NOTEBOOK,
+            title = "记事本",
+            description = "富内容文章、查询与往期回顾",
+            symbol = "记",
+            statusLabel = "本地",
+            onClick = { onOpenFeature(HomeFeatureId.NOTEBOOK) }
         )
     )
 }

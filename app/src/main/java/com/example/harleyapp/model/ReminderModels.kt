@@ -29,6 +29,22 @@ data class ScheduledReminder(
 )
 
 /**
+ * 判断用户选择的首次提醒时间是否仍位于当前时刻之后。
+ *
+ * 使用方法：
+ * 用户完成日期和分钟选择后，把转换得到的时间戳与一次读取的当前时间传入。本函数不再额外
+ * 强制预留一分钟，因此当前8:00时选择8:01可以保存；已经到达或早于当前时刻时仍会拒绝。
+ *
+ * @param triggerAtMillis 用户选择的首次提醒Unix毫秒时间戳。
+ * @param nowMillis 执行保存校验时读取的当前Unix毫秒时间戳。
+ *
+ * @return 提醒时刻严格晚于当前时刻返回true，否则返回false。
+ */
+fun isReminderTriggerInFuture(triggerAtMillis: Long, nowMillis: Long): Boolean {
+    return triggerAtMillis > nowMillis
+}
+
+/**
  * 计算重复通知在当前时刻之后的下一次提醒时间。
  *
  * 使用方法：

@@ -1,6 +1,7 @@
 package com.example.harleyapp
 
 import com.example.harleyapp.model.calculateNextReminderAt
+import com.example.harleyapp.model.isReminderTriggerInFuture
 import java.time.LocalDateTime
 import java.time.ZoneId
 import org.junit.Assert.assertEquals
@@ -14,6 +15,33 @@ import org.junit.Test
  * 在项目根目录执行gradlew testDebugUnitTest，由JUnit自动运行本文件全部测试。
  */
 class ReminderModelsTest {
+
+    /**
+     * 验证当前分钟内选择紧邻的下一分钟时，即使不足完整60秒也允许保存。
+     *
+     * @return 无返回值；下一分钟被错误阻止时由JUnit报告失败。
+     */
+    @Test
+    fun nextMinuteReminderIsAccepted() {
+        val zoneId = ZoneId.of("Asia/Shanghai")
+        val nowMillis = timestamp(2026, 8, 29, 8, 0, zoneId) + 45_000L
+        val triggerAtMillis = timestamp(2026, 8, 29, 8, 1, zoneId)
+
+        assertEquals(true, isReminderTriggerInFuture(triggerAtMillis, nowMillis))
+    }
+
+    /**
+     * 验证等于当前时刻或已经过去的提醒仍会被拒绝。
+     *
+     * @return 无返回值；非未来时间被错误接受时由JUnit报告失败。
+     */
+    @Test
+    fun currentOrPastReminderIsRejected() {
+        val nowMillis = 1_000_000L
+
+        assertEquals(false, isReminderTriggerInFuture(nowMillis, nowMillis))
+        assertEquals(false, isReminderTriggerInFuture(nowMillis - 1L, nowMillis))
+    }
 
     /**
      * 验证重复间隔为0的一次性通知不会生成下一次时间。

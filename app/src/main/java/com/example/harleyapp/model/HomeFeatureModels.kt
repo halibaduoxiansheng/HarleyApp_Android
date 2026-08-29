@@ -18,7 +18,8 @@ enum class HomeFeatureId {
     GENERAL_REMINDER,
     BACKUP,
     LOCAL_CLEANUP,
-    ENGLISH_WORDS
+    ENGLISH_WORDS,
+    NOTEBOOK
 }
 
 /** 首次安装或旧版本升级时沿用首页原有的三个功能入口。 */

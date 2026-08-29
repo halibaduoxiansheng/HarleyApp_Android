@@ -1,6 +1,7 @@
 package com.example.harleyapp.notification
 
 import android.app.Notification
+import android.content.ComponentName
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.util.Log
@@ -62,6 +63,28 @@ class WechatNotificationListenerService : NotificationListenerService() {
         )
         Log.w(TAG, "WeChat notification listener disconnected")
         super.onListenerDisconnected()
+        requestListenerRebind()
+    }
+
+    /**
+     * 在系统断开通知监听服务后请求重新绑定当前服务。
+     *
+     * 使用方法：
+     * 仅由[onListenerDisconnected]调用。Android允许通知监听服务在已经断开的状态下调用
+     * requestRebind；该请求不会重新申请通知使用权，也不会绕过用户在系统设置中的授权选择。
+     *
+     * @return 无返回值；系统拒绝或暂时无法重绑时记录英文错误日志，等待系统后续重试。
+     */
+    private fun requestListenerRebind() {
+        runCatching {
+            NotificationListenerService.requestRebind(
+                ComponentName(applicationContext, WechatNotificationListenerService::class.java)
+            )
+        }.onSuccess {
+            Log.i(TAG, "WeChat notification listener rebind requested after disconnect")
+        }.onFailure { error ->
+            Log.e(TAG, "Failed to request notification listener rebind after disconnect", error)
+        }
     }
 
     /**
