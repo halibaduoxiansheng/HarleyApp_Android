@@ -23,7 +23,8 @@ enum class EbookFormat(
     HTML("HTML", setOf("html", "htm")),
     DOCX("Word DOCX", setOf("docx")),
     FB2("FictionBook", setOf("fb2")),
-    RTF("RTF", setOf("rtf"));
+    RTF("RTF", setOf("rtf")),
+    MOBI("MOBI/Kindle", setOf("mobi", "azw", "azw3"));
 
     companion object {
 
@@ -121,6 +122,7 @@ data class EbookChapter(
  * @param isOnShelf 是否由用户选择展示在分页书架中。
  * @param shelfOrder 书架排序值，数值小的优先显示。
  * @param spineColorArgb 用户选择的不透明ARGB书脊颜色；0表示按书籍id自动配色。
+ * @param coverFileName 用户自定义封面在App私有封面目录中的受控文件名；为空表示使用默认书脊封面。
  * @param category 书籍类别，用于全部书籍页筛选与说明。
  * @param sourceUrl 内置公版书的来源页；用户导入书籍为空。
  * @param isBundled 是否来自App内置公版书单。
@@ -146,6 +148,7 @@ data class EbookBook(
     val isOnShelf: Boolean = true,
     val shelfOrder: Long = createdAtMillis,
     val spineColorArgb: Int = 0,
+    val coverFileName: String = "",
     val category: String = "导入书籍",
     val sourceUrl: String = "",
     val isBundled: Boolean = false
@@ -228,4 +231,24 @@ data class EbookImportResult(
     val success: Boolean,
     val book: EbookBook? = null,
     val message: String
+)
+
+/**
+ * 电子书导入过程的可观察进度。
+ *
+ * 使用方法：
+ * 页面调用电子书仓库导入接口时传入进度回调，并直接使用[overallFraction]绘制定量进度条，
+ * 使用[message]显示当前正在复制、解压、清理或保存。进度值只会在0到1之间向前推进，避免
+ * 大文件切换阶段时进度条倒退。
+ *
+ * @param overallFraction 从开始导入到完成登记的总进度，范围为0到1。
+ * @param message 当前阶段的中文说明，可直接显示给用户。
+ * @param completedUnits 当前阶段已经处理的字节数、记录数或字符数。
+ * @param totalUnits 当前阶段总字节数、总记录数或总字符数；无法预先获知时为0。
+ */
+data class EbookImportProgress(
+    val overallFraction: Float,
+    val message: String,
+    val completedUnits: Long = 0L,
+    val totalUnits: Long = 0L
 )

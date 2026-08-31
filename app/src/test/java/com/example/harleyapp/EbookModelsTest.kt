@@ -20,7 +20,7 @@ import org.junit.Test
 class EbookModelsTest {
 
     /**
-     * 验证文件扩展名识别忽略大小写，并拒绝当前无法在App内可靠阅读的格式。
+     * 验证文件扩展名识别忽略大小写，并包含无DRM Kindle容器使用的常见后缀。
      *
      * @return 无返回值；映射错误时由JUnit报告失败。
      */
@@ -30,7 +30,10 @@ class EbookModelsTest {
         assertEquals(EbookFormat.EPUB, EbookFormat.fromFileName("novel.epub"))
         assertEquals(EbookFormat.DOCX, EbookFormat.fromFileName("notes.docx"))
         assertEquals(EbookFormat.MARKDOWN, EbookFormat.fromFileName("readme.markdown"))
-        assertEquals(null, EbookFormat.fromFileName("encrypted.azw3"))
+        assertEquals(EbookFormat.MOBI, EbookFormat.fromFileName("novel.MOBI"))
+        assertEquals(EbookFormat.MOBI, EbookFormat.fromFileName("kindle.azw"))
+        assertEquals(EbookFormat.MOBI, EbookFormat.fromFileName("modern.azw3"))
+        assertEquals(null, EbookFormat.fromFileName("archive.zip"))
     }
 
     /**

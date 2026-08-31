@@ -7,6 +7,7 @@ import com.example.harleyapp.model.MIN_NIGHT_OVERLAY_ALPHA
 import com.example.harleyapp.model.MIN_TEXT_ZOOM_PERCENT
 import com.example.harleyapp.model.MIN_WEBSITE_PLAYBACK_RATE
 import com.example.harleyapp.model.WebsiteToolSettings
+import com.example.harleyapp.ui.screens.calculateFullscreenBallOffset
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -78,5 +79,18 @@ class WebsiteToolModelsTest {
         assertEquals(MIN_TEXT_ZOOM_PERCENT, normalized.textZoomPercent)
         assertTrue(normalized.blockAutoplay)
         assertTrue(normalized.keepScreenOn)
+    }
+
+    /**
+     * 验证全屏脚本悬浮球只能在屏幕中部安全范围移动，不会被拖到底部遮挡播放器进度条。
+     *
+     * @return 无返回值；正常拖动、上下边界或非法负上限处理错误时由JUnit报告失败。
+     */
+    @Test
+    fun fullscreenScriptBallDragStaysInsideSafeRange() {
+        assertEquals(35f, calculateFullscreenBallOffset(20f, 15f, 120f), 0.001f)
+        assertEquals(120f, calculateFullscreenBallOffset(80f, 90f, 120f), 0.001f)
+        assertEquals(-120f, calculateFullscreenBallOffset(-80f, -90f, 120f), 0.001f)
+        assertEquals(0f, calculateFullscreenBallOffset(20f, 10f, -1f), 0.001f)
     }
 }

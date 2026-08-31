@@ -19,7 +19,11 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -27,8 +31,12 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LinearProgressIndicator
@@ -40,6 +48,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -49,8 +58,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -63,6 +74,7 @@ import com.example.harleyapp.model.WebsiteToolSettings
 import com.example.harleyapp.web.WebsiteScriptController
 import kotlinx.coroutines.delay
 import java.util.Locale
+import kotlin.math.roundToInt
 
 /**
  * 在应用内部安全加载用户当前选择的网站，并提供网页工具、增强视频全屏、刷新和外部浏览器入口。
@@ -125,7 +137,7 @@ fun WebsiteScreen(
         mutableStateOf<FullscreenWebContent?>(null)
     }
     var fullscreenControlsVisible by remember(website.id) {
-        mutableStateOf(true)
+        mutableStateOf(false)
     }
     var fullscreenControlsLocked by remember(website.id) {
         mutableStateOf(false)
@@ -135,6 +147,9 @@ fun WebsiteScreen(
     }
     var showFullscreenRatePicker by remember(website.id) {
         mutableStateOf(false)
+    }
+    var fullscreenBallOffsetY by remember(website.id) {
+        mutableFloatStateOf(0f)
     }
     val currentOnFullscreenChanged by rememberUpdatedState(onFullscreenChanged)
     val currentOnEbookDownloadRequested by rememberUpdatedState(onEbookDownloadRequested)
@@ -159,8 +174,9 @@ fun WebsiteScreen(
         val content = fullscreenContent ?: return
         fullscreenContent = null
         fullscreenControlsLocked = false
-        fullscreenControlsVisible = true
+        fullscreenControlsVisible = false
         showFullscreenRatePicker = false
+        fullscreenBallOffsetY = 0f
         content.close()
     }
 
@@ -185,8 +201,9 @@ fun WebsiteScreen(
                 fullscreenContent?.close()
                 fullscreenContent = FullscreenWebContent(view, callback)
                 fullscreenControlsLocked = false
-                fullscreenControlsVisible = true
+                fullscreenControlsVisible = false
                 showFullscreenRatePicker = false
+                fullscreenBallOffsetY = 0f
                 fullscreenControlRevision++
             },
             onHideFullscreen = {
@@ -259,7 +276,7 @@ fun WebsiteScreen(
         currentOnFullscreenChanged(fullscreenContent != null)
     }
 
-    // 全屏工具条与常见播放器进度条一致，停止操作后自动隐藏；倍速选择器打开时保持显示。
+    // 悬浮球展开的工具面板停止操作后自动收起；悬浮球本身始终保留且不覆盖底部播放器进度条。
     LaunchedEffect(
         fullscreenContent,
         fullscreenControlsVisible,
@@ -374,17 +391,13 @@ fun WebsiteScreen(
                 }
             }
 
-            // 工具条隐藏时，第一次点击只负责唤醒控件；锁屏后该层持续拦截网页播放器触摸。
-            if (fullscreenControlsLocked ||
-                !fullscreenControlsVisible ||
-                showFullscreenRatePicker
-            ) {
+            // 只有锁屏和倍速选择器这种明确的模态状态才拦截整屏；普通收起状态完全让出播放器触摸。
+            if (fullscreenControlsLocked || showFullscreenRatePicker) {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
                         .pointerInput(
                             fullscreenControlsLocked,
-                            fullscreenControlsVisible,
                             showFullscreenRatePicker
                         ) {
                             detectTapGestures {
@@ -397,127 +410,176 @@ fun WebsiteScreen(
                 )
             }
 
-            if (fullscreenControlsVisible) {
+            val maximumBallOffsetPixels = with(LocalDensity.current) {
+                FULLSCREEN_FLOATING_BALL_MAX_VERTICAL_OFFSET.toPx()
+            }
+            val ballDragState = rememberDraggableState { delta ->
+                fullscreenBallOffsetY = calculateFullscreenBallOffset(
+                    currentOffset = fullscreenBallOffsetY,
+                    dragDelta = delta,
+                    maximumOffset = maximumBallOffsetPixels
+                )
+            }
+            Row(
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .padding(end = 10.dp)
+                    .offset { IntOffset(x = 0, y = fullscreenBallOffsetY.roundToInt()) },
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (fullscreenControlsVisible) {
+                    Surface(
+                        modifier = Modifier
+                            .weight(weight = 1f, fill = false)
+                            .widthIn(max = FULLSCREEN_FLOATING_PANEL_MAX_WIDTH),
+                        color = Color.Black.copy(alpha = 0.72f),
+                        shape = MaterialTheme.shapes.extraLarge,
+                        shadowElevation = 8.dp
+                    ) {
+                        if (fullscreenControlsLocked) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "屏幕已锁定",
+                                    color = Color.White,
+                                    style = MaterialTheme.typography.bodyMedium
+                                )
+                                FullscreenToolButton(
+                                    text = "解除锁定",
+                                    active = true,
+                                    onClick = {
+                                        fullscreenControlsLocked = false
+                                        toolMessage = "屏幕锁已解除"
+                                        revealFullscreenControls()
+                                    }
+                                )
+                            }
+                        } else {
+                            Row(
+                                modifier = Modifier
+                                    .horizontalScroll(rememberScrollState())
+                                    .padding(horizontal = 8.dp, vertical = 3.dp),
+                                horizontalArrangement = Arrangement.spacedBy(1.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                FullscreenToolButton(
+                                    text = "${formatToolbarRate(toolSettings.playbackRate)} ▾",
+                                    active = toolSettings.playbackRate != 1f,
+                                    onClick = {
+                                        showFullscreenRatePicker = true
+                                        revealFullscreenControls()
+                                    }
+                                )
+                                FullscreenToolButton(
+                                    text = "播放/暂停",
+                                    onClick = {
+                                        revealFullscreenControls()
+                                        scriptController.togglePlayback(webView) { count ->
+                                            toolMessage = mediaActionMessage(count, "已切换播放状态")
+                                        }
+                                    }
+                                )
+                                FullscreenToolButton(
+                                    text = "-10秒",
+                                    onClick = {
+                                        revealFullscreenControls()
+                                        scriptController.seekBy(webView, -10) { count ->
+                                            toolMessage = mediaActionMessage(count, "已快退10秒")
+                                        }
+                                    }
+                                )
+                                FullscreenToolButton(
+                                    text = "+10秒",
+                                    onClick = {
+                                        revealFullscreenControls()
+                                        scriptController.seekBy(webView, 10) { count ->
+                                            toolMessage = mediaActionMessage(count, "已快进10秒")
+                                        }
+                                    }
+                                )
+                                FullscreenToolButton(
+                                    text = if (toolSettings.videoMuted) "静音开" else "静音",
+                                    active = toolSettings.videoMuted,
+                                    onClick = {
+                                        revealFullscreenControls()
+                                        updateToolSettings(
+                                            toolSettings.copy(videoMuted = !toolSettings.videoMuted)
+                                        )
+                                    }
+                                )
+                                FullscreenToolButton(
+                                    text = if (toolSettings.videoLoopEnabled) "循环开" else "循环",
+                                    active = toolSettings.videoLoopEnabled,
+                                    onClick = {
+                                        revealFullscreenControls()
+                                        updateToolSettings(
+                                            toolSettings.copy(
+                                                videoLoopEnabled = !toolSettings.videoLoopEnabled
+                                            )
+                                        )
+                                    }
+                                )
+                                FullscreenToolButton(
+                                    text = if (toolSettings.nightModeEnabled) "夜间开" else "夜间",
+                                    active = toolSettings.nightModeEnabled,
+                                    onClick = {
+                                        revealFullscreenControls()
+                                        updateToolSettings(
+                                            toolSettings.copy(
+                                                nightModeEnabled = !toolSettings.nightModeEnabled
+                                            )
+                                        )
+                                    }
+                                )
+                                FullscreenToolButton(
+                                    text = "锁屏",
+                                    onClick = {
+                                        fullscreenControlsLocked = true
+                                        showFullscreenRatePicker = false
+                                        toolMessage = "屏幕已锁定，点击悬浮球可管理"
+                                        revealFullscreenControls()
+                                    }
+                                )
+                                FullscreenToolButton(
+                                    text = "退出全屏",
+                                    onClick = ::exitFullscreen
+                                )
+                            }
+                        }
+                    }
+                }
+
                 Surface(
                     modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .fillMaxWidth(),
-                    color = Color.Black.copy(alpha = 0.46f),
-                    shape = MaterialTheme.shapes.large
-                ) {
-                    if (fullscreenControlsLocked) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
-                            horizontalArrangement = Arrangement.spacedBy(12.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                modifier = Modifier.weight(1f),
-                                text = "屏幕已锁定，播放器触摸已拦截",
-                                color = Color.White,
-                                style = MaterialTheme.typography.bodyMedium
-                            )
-                            FullscreenToolButton(
-                                text = "解除锁定",
-                                active = true,
-                                onClick = {
-                                    fullscreenControlsLocked = false
-                                    toolMessage = "屏幕锁已解除"
-                                    revealFullscreenControls()
-                                }
-                            )
-                        }
+                        .size(FULLSCREEN_FLOATING_BALL_SIZE)
+                        .draggable(
+                            state = ballDragState,
+                            orientation = Orientation.Vertical
+                        )
+                        .clickable {
+                            fullscreenControlsVisible = !fullscreenControlsVisible
+                            showFullscreenRatePicker = false
+                            fullscreenControlRevision++
+                        },
+                    color = if (fullscreenControlsVisible) {
+                        FULLSCREEN_ACTIVE_COLOR.copy(alpha = 0.92f)
                     } else {
-                        Row(
-                            modifier = Modifier
-                                .horizontalScroll(rememberScrollState())
-                                .padding(horizontal = 8.dp, vertical = 3.dp),
-                            horizontalArrangement = Arrangement.spacedBy(1.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            FullscreenToolButton(
-                                text = "${formatToolbarRate(toolSettings.playbackRate)} ▾",
-                                active = toolSettings.playbackRate != 1f,
-                                onClick = {
-                                    showFullscreenRatePicker = true
-                                    revealFullscreenControls()
-                                }
-                            )
-                            FullscreenToolButton(
-                                text = "播放/暂停",
-                                onClick = {
-                                    revealFullscreenControls()
-                                    scriptController.togglePlayback(webView) { count ->
-                                        toolMessage = mediaActionMessage(count, "已切换播放状态")
-                                    }
-                                }
-                            )
-                            FullscreenToolButton(
-                                text = "-10秒",
-                                onClick = {
-                                    revealFullscreenControls()
-                                    scriptController.seekBy(webView, -10) { count ->
-                                        toolMessage = mediaActionMessage(count, "已快退10秒")
-                                    }
-                                }
-                            )
-                            FullscreenToolButton(
-                                text = "+10秒",
-                                onClick = {
-                                    revealFullscreenControls()
-                                    scriptController.seekBy(webView, 10) { count ->
-                                        toolMessage = mediaActionMessage(count, "已快进10秒")
-                                    }
-                                }
-                            )
-                            FullscreenToolButton(
-                                text = if (toolSettings.videoMuted) "静音开" else "静音",
-                                active = toolSettings.videoMuted,
-                                onClick = {
-                                    revealFullscreenControls()
-                                    updateToolSettings(
-                                        toolSettings.copy(videoMuted = !toolSettings.videoMuted)
-                                    )
-                                }
-                            )
-                            FullscreenToolButton(
-                                text = if (toolSettings.videoLoopEnabled) "循环开" else "循环",
-                                active = toolSettings.videoLoopEnabled,
-                                onClick = {
-                                    revealFullscreenControls()
-                                    updateToolSettings(
-                                        toolSettings.copy(
-                                            videoLoopEnabled = !toolSettings.videoLoopEnabled
-                                        )
-                                    )
-                                }
-                            )
-                            FullscreenToolButton(
-                                text = if (toolSettings.nightModeEnabled) "夜间开" else "夜间",
-                                active = toolSettings.nightModeEnabled,
-                                onClick = {
-                                    revealFullscreenControls()
-                                    updateToolSettings(
-                                        toolSettings.copy(
-                                            nightModeEnabled = !toolSettings.nightModeEnabled
-                                        )
-                                    )
-                                }
-                            )
-                            FullscreenToolButton(
-                                text = "锁屏",
-                                onClick = {
-                                    fullscreenControlsLocked = true
-                                    showFullscreenRatePicker = false
-                                    toolMessage = "屏幕已锁定，点击屏幕后可解除"
-                                    revealFullscreenControls()
-                                }
-                            )
-                            FullscreenToolButton(
-                                text = "退出全屏",
-                                onClick = ::exitFullscreen
-                            )
-                        }
+                        Color.Black.copy(alpha = 0.68f)
+                    },
+                    shape = CircleShape,
+                    shadowElevation = 10.dp
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Text(
+                            text = if (fullscreenControlsVisible) "收起" else "脚本",
+                            color = Color.White,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold
+                        )
                     }
                 }
             }
@@ -1258,9 +1320,33 @@ private fun mediaActionMessage(mediaCount: Int, successMessage: String): String 
     }
 }
 
+/**
+ * 计算全屏脚本悬浮球拖动后的安全纵向偏移。
+ *
+ * 使用方法：
+ * [rememberDraggableState]每次收到拖动增量时传入当前偏移和增量。函数会把结果限制在屏幕中部
+ * 的安全范围，避免悬浮球被拖出屏幕，或移动到底部后再次挡住视频原生进度条。
+ *
+ * @param currentOffset 当前相对屏幕垂直中心的像素偏移。
+ * @param dragDelta 本次纵向拖动增加的像素。
+ * @param maximumOffset 允许向上或向下移动的最大绝对像素。
+ * @return 已限制在[-maximumOffset, maximumOffset]范围内的新偏移。
+ */
+internal fun calculateFullscreenBallOffset(
+    currentOffset: Float,
+    dragDelta: Float,
+    maximumOffset: Float
+): Float {
+    val safeMaximum = maximumOffset.coerceAtLeast(0f)
+    return (currentOffset + dragDelta).coerceIn(-safeMaximum, safeMaximum)
+}
+
 private const val TAG = "WebsiteScreen"
 private const val TOOL_MESSAGE_DURATION_MILLIS = 2_600L
 private const val FULLSCREEN_CONTROLS_HIDE_DELAY_MILLIS = 3_000L
+private val FULLSCREEN_FLOATING_BALL_SIZE = 52.dp
+private val FULLSCREEN_FLOATING_BALL_MAX_VERTICAL_OFFSET = 120.dp
+private val FULLSCREEN_FLOATING_PANEL_MAX_WIDTH = 520.dp
 private val FULLSCREEN_ACTIVE_COLOR = Color(0xFFFFD54F)
 private val FULLSCREEN_PLAYBACK_RATE_PRESETS = listOf(
     0.25f,

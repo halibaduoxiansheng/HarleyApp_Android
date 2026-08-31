@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
@@ -33,6 +34,7 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -73,6 +75,7 @@ import com.example.harleyapp.model.CompanionCategory
 import com.example.harleyapp.model.CompanionTask
 import com.example.harleyapp.model.AppVisualTheme
 import com.example.harleyapp.model.ENGLISH_WORD_MASTERY_COUNT
+import com.example.harleyapp.model.EbookImportResult
 import com.example.harleyapp.model.HotTopic
 import com.example.harleyapp.model.HomeFeatureId
 import com.example.harleyapp.model.LaunchableApp
@@ -394,6 +397,9 @@ fun HarleyApp(
         SnackbarHostState()
     }
     val coroutineScope = rememberCoroutineScope()
+    var websiteEbookImportResult by remember {
+        mutableStateOf<EbookImportResult?>(null)
+    }
     var englishTtsState by remember {
         mutableStateOf(OfflineEnglishTtsState.INITIALIZING)
     }
@@ -1582,18 +1588,7 @@ fun HarleyApp(
                         val result = ebookRepository.importFromWebDownload(request)
                         progressMessage.cancel()
                         snackbarHostState.currentSnackbarData?.dismiss()
-                        val snackbarResult = snackbarHostState.showSnackbar(
-                            message = result.message,
-                            actionLabel = if (result.success) "打开书库" else null,
-                            withDismissAction = true
-                        )
-                        if (
-                            result.success &&
-                            snackbarResult == androidx.compose.material3.SnackbarResult.ActionPerformed
-                        ) {
-                            featureCenterPageName = FeatureCenterPage.EBOOKS.name
-                            currentSectionName = AppSection.FEATURES.name
-                        }
+                        websiteEbookImportResult = result
                     }
                 },
                 onManageWebsites = {
@@ -1628,6 +1623,36 @@ fun HarleyApp(
             )
             }
         }
+    }
+
+    websiteEbookImportResult?.let { result ->
+        AlertDialog(
+            onDismissRequest = { websiteEbookImportResult = null },
+            title = { Text(if (result.success) "电子书导入成功" else "电子书导入失败") },
+            text = { Text(result.message) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        websiteEbookImportResult = null
+                        if (result.success) {
+                            featureCenterPageName = FeatureCenterPage.EBOOKS.name
+                            currentSectionName = AppSection.FEATURES.name
+                        }
+                    }
+                ) {
+                    Text(if (result.success) "打开书库" else "知道了")
+                }
+            },
+            dismissButton = if (result.success) {
+                {
+                    TextButton(onClick = { websiteEbookImportResult = null }) {
+                        Text("稍后查看")
+                    }
+                }
+            } else {
+                null
+            }
+        )
     }
 }
 

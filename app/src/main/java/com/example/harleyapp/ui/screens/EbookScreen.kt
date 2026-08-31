@@ -1,7 +1,9 @@
 package com.example.harleyapp.ui.screens
 
 import android.content.Intent
+import android.graphics.Bitmap
 import android.provider.Settings
+import android.util.Log
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -99,6 +101,7 @@ import com.example.harleyapp.model.EbookBook
 import com.example.harleyapp.model.EbookChapter
 import com.example.harleyapp.model.EbookFontFamily
 import com.example.harleyapp.model.EbookFormat
+import com.example.harleyapp.model.EbookImportProgress
 import com.example.harleyapp.model.EbookNote
 import com.example.harleyapp.model.EbookReadingBackground
 import com.example.harleyapp.model.EbookReadingMode
@@ -116,6 +119,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Locale
 import kotlin.math.absoluteValue
+import kotlin.math.roundToInt
 
 /** 电子书根页面的分页书架和全部书籍两个分栏。 */
 private enum class EbookLibraryTab(val displayName: String) {
@@ -134,6 +138,17 @@ private data class PendingEbookNoteDraft(
     val excerpt: String,
     val pageIndex: Int,
     val chapterTitle: String
+)
+
+/**
+ * 电子书导入或封面操作需要显示的强提示。
+ *
+ * @param success 操作是否成功，用于决定弹窗标题。
+ * @param message 仓库返回的完整中文结果说明。
+ */
+private data class EbookFeedbackDialogState(
+    val success: Boolean,
+    val message: String
 )
 
 /**
@@ -166,7 +181,11 @@ fun EbookScreen(
     var selectedBookId by rememberSaveable { mutableStateOf("") }
     var statusMessage by rememberSaveable { mutableStateOf("") }
     var isImporting by remember { mutableStateOf(false) }
+    var importProgress by remember { mutableStateOf<EbookImportProgress?>(null) }
+    var isUpdatingCover by remember { mutableStateOf(false) }
     var isPreparingLibrary by remember { mutableStateOf(true) }
+    var pendingCoverBookId by rememberSaveable { mutableStateOf("") }
+    var feedbackDialogState by remember { mutableStateOf<EbookFeedbackDialogState?>(null) }
     val coroutineScope = rememberCoroutineScope()
 
     val importLauncher = rememberLauncherForActivityResult(
@@ -174,11 +193,54 @@ fun EbookScreen(
     ) { uri ->
         if (uri != null) {
             isImporting = true
+            importProgress = EbookImportProgress(0f, "正在准备导入…")
             coroutineScope.launch {
-                val result = repository.importFromUri(uri)
+                try {
+                    val result = repository.importFromUri(uri) { progress ->
+                        // 仓库在IO线程解析大文件；切回页面协程更新Compose状态，避免阻塞文件解析线程。
+                        coroutineScope.launch {
+                            if (isImporting) importProgress = progress
+                        }
+                    }
+                    books = repository.getBooks()
+                    statusMessage = result.message
+                    feedbackDialogState = EbookFeedbackDialogState(
+                        success = result.success,
+                        message = result.message
+                    )
+                } catch (error: Throwable) {
+                    Log.e(EBOOK_SCREEN_TAG, "Unexpected ebook import failure", error)
+                    val message = "书籍导入意外中断，请重新选择文件后再试"
+                    statusMessage = message
+                    feedbackDialogState = EbookFeedbackDialogState(
+                        success = false,
+                        message = message
+                    )
+                } finally {
+                    // 无论文件提供者、解析器还是存储操作发生何种异常，都必须结束页面转动状态。
+                    isImporting = false
+                    importProgress = null
+                }
+            }
+        }
+    }
+
+    val coverLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        val targetBookId = pendingCoverBookId
+        pendingCoverBookId = ""
+        if (uri != null && targetBookId.isNotBlank()) {
+            isUpdatingCover = true
+            coroutineScope.launch {
+                val result = repository.updateCoverFromUri(targetBookId, uri)
                 books = repository.getBooks()
                 statusMessage = result.message
-                isImporting = false
+                isUpdatingCover = false
+                feedbackDialogState = EbookFeedbackDialogState(
+                    success = result.success,
+                    message = result.message
+                )
             }
         }
     }
@@ -215,8 +277,10 @@ fun EbookScreen(
     Box(modifier = modifier.fillMaxSize()) {
         if (selectedBook == null) {
             EbookLibrary(
+                repository = repository,
                 books = books,
-                isImporting = isImporting || isPreparingLibrary,
+                isImporting = isImporting || isUpdatingCover || isPreparingLibrary,
+                importProgress = importProgress,
                 statusMessage = statusMessage,
                 onBack = onBack,
                 onImport = { importLauncher.launch(arrayOf("*/*")) },
@@ -248,6 +312,20 @@ fun EbookScreen(
                     if (saved) books = repository.getBooks()
                     saved
                 },
+                onChooseCover = { book ->
+                    pendingCoverBookId = book.id
+                    coverLauncher.launch(arrayOf("image/*"))
+                },
+                onRemoveCover = { book ->
+                    val result = repository.removeCustomCover(book.id)
+                    books = repository.getBooks()
+                    statusMessage = result.message
+                    feedbackDialogState = EbookFeedbackDialogState(
+                        success = result.success,
+                        message = result.message
+                    )
+                    result.success
+                },
                 onDeleteBook = { book ->
                     val deleted = repository.deleteBook(book.id)
                     statusMessage = if (deleted) "《${book.title}》已删除" else "书籍删除失败"
@@ -267,13 +345,28 @@ fun EbookScreen(
             )
         }
     }
+
+    feedbackDialogState?.let { feedback ->
+        AlertDialog(
+            onDismissRequest = { feedbackDialogState = null },
+            title = { Text(if (feedback.success) "操作成功" else "操作失败") },
+            text = { Text(feedback.message) },
+            confirmButton = {
+                TextButton(onClick = { feedbackDialogState = null }) {
+                    Text("知道了")
+                }
+            }
+        )
+    }
 }
 
 /**
  * 显示可搜索并具备增删改查闭环的电子书架。
  *
+ * @param repository 书籍封面读取仓库。
  * @param books 当前全部书籍。
  * @param isImporting 是否正在复制和解析新书。
+ * @param importProgress 当前文件导入的定量进度；准备内置书或更新封面时为空。
  * @param statusMessage 最近一次操作反馈。
  * @param onBack 返回功能中心回调。
  * @param onImport 打开系统文件选择器回调。
@@ -281,14 +374,18 @@ fun EbookScreen(
  * @param onSetOnShelf 把书籍加入或移出分页书架的回调。
  * @param onReorderShelf 保存书架拖动顺序的回调。
  * @param onUpdateMetadata 保存书名、作者和书脊颜色回调。
+ * @param onChooseCover 为指定书籍打开系统图片选择器的回调。
+ * @param onRemoveCover 删除指定书籍自定义封面的回调。
  * @param onDeleteBook 删除整本书回调。
  *
  * @return 无返回值。
  */
 @Composable
 private fun EbookLibrary(
+    repository: EbookRepository,
     books: List<EbookBook>,
     isImporting: Boolean,
+    importProgress: EbookImportProgress?,
     statusMessage: String,
     onBack: () -> Unit,
     onImport: () -> Unit,
@@ -296,6 +393,8 @@ private fun EbookLibrary(
     onSetOnShelf: (EbookBook, Boolean) -> Boolean,
     onReorderShelf: (List<String>) -> Boolean,
     onUpdateMetadata: (String, String, String, Int) -> Boolean,
+    onChooseCover: (EbookBook) -> Unit,
+    onRemoveCover: (EbookBook) -> Boolean,
     onDeleteBook: (EbookBook) -> Boolean
 ) {
     var query by rememberSaveable { mutableStateOf("") }
@@ -323,6 +422,12 @@ private fun EbookLibrary(
         books.filter(EbookBook::isOnShelf).sortedBy(EbookBook::shelfOrder)
     }
 
+    // 封面或其他信息保存后，保持编辑弹窗指向目录中的最新模型，立即刷新预览和按钮状态。
+    LaunchedEffect(books, editingBook?.id) {
+        val editingBookId = editingBook?.id ?: return@LaunchedEffect
+        editingBook = books.firstOrNull { book -> book.id == editingBookId }
+    }
+
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -344,16 +449,33 @@ private fun EbookLibrary(
                 fontWeight = FontWeight.Bold
             )
             Text(
-                text = "14本公版书与本机导入统一管理；支持PDF、EPUB、TXT、Markdown、HTML、DOCX、FB2与RTF。",
+                text = "14本公版书与本机导入统一管理；支持PDF、EPUB、MOBI、AZW、AZW3、TXT、Markdown、HTML、DOCX、FB2与RTF。",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             if (isImporting) {
-                LinearProgressIndicator(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 10.dp)
-                )
+                val currentProgress = importProgress
+                if (currentProgress != null) {
+                    LinearProgressIndicator(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 10.dp),
+                        progress = { currentProgress.overallFraction.coerceIn(0f, 1f) }
+                    )
+                    Text(
+                        modifier = Modifier.padding(top = 7.dp),
+                        text = "${currentProgress.message}  " +
+                            "${(currentProgress.overallFraction * 100f).roundToInt()}%",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    LinearProgressIndicator(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 10.dp)
+                    )
+                }
             }
             if (statusMessage.isNotBlank()) {
                 Text(
@@ -435,6 +557,7 @@ private fun EbookLibrary(
             } else {
                 items(visibleBooks, key = EbookBook::id) { book ->
                     EbookBookCard(
+                        repository = repository,
                         book = book,
                         onOpen = { onOpenBook(book) },
                         onSetOnShelf = { isOnShelf -> onSetOnShelf(book, isOnShelf) },
@@ -450,8 +573,11 @@ private fun EbookLibrary(
 
     editingBook?.let { book ->
         EbookMetadataDialog(
+            repository = repository,
             book = book,
             onDismiss = { editingBook = null },
+            onChooseCover = { onChooseCover(book) },
+            onRemoveCover = { onRemoveCover(book) },
             onSave = { title, author, spineColorArgb ->
                 if (onUpdateMetadata(book.id, title, author, spineColorArgb)) editingBook = null
             }
@@ -840,31 +966,50 @@ private fun EbookShelfBook(
                     .fillMaxHeight()
                     .background(Color.White.copy(alpha = 0.18f))
             )
-            Box(
+            Column(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxHeight()
-                    .padding(horizontal = 2.dp, vertical = 5.dp)
+                    .padding(top = 5.dp)
             ) {
-                Text(
-                    modifier = Modifier.align(Alignment.TopCenter),
-                    text = verticalTitle,
-                    color = Color(0xFFFFF5DF),
-                    fontSize = 10.sp,
-                    lineHeight = 11.sp,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = MAX_SPINE_TITLE_CHARACTERS,
-                    overflow = TextOverflow.Clip
-                )
-                CircularProgressIndicator(
+                // 书名与进度区使用独立高度约束。长书名只能在上方区域内排版，不能延伸到圆环内部。
+                Box(
                     modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .size(18.dp),
-                    progress = { readingProgress },
-                    color = Color(0xFFFFD88A),
-                    trackColor = Color.White.copy(alpha = 0.16f),
-                    strokeWidth = 1.5.dp
-                )
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .padding(horizontal = 2.dp),
+                    contentAlignment = Alignment.TopCenter
+                ) {
+                    Text(
+                        text = verticalTitle,
+                        color = Color(0xFFFFF5DF),
+                        fontSize = 10.sp,
+                        lineHeight = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = MAX_SPINE_TITLE_CHARACTERS,
+                        overflow = TextOverflow.Clip
+                    )
+                }
+
+                // 进度圆环区域使用书脊实色遮住上方溢出的文字，并提高绘制层级，保证圆环始终清晰。
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(SHELF_PROGRESS_AREA_HEIGHT)
+                        .background(spineColor)
+                        .zIndex(3f),
+                    contentAlignment = Alignment.Center
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier
+                            .size(18.dp)
+                            .zIndex(4f),
+                        progress = { readingProgress },
+                        color = Color(0xFFFFD88A),
+                        trackColor = Color.White.copy(alpha = 0.16f),
+                        strokeWidth = 1.5.dp
+                    )
+                }
             }
         }
     }
@@ -902,9 +1047,20 @@ internal fun moveEbookShelfBook(
     }
 }
 
-/** @return 一张书籍信息、阅读进度和管理操作卡片。 */
+/**
+ * 显示一张带自定义封面、书籍信息、阅读进度和管理操作的卡片。
+ *
+ * @param repository 用于安全加载已持久化封面的仓库。
+ * @param book 当前书籍。
+ * @param onOpen 打开阅读器回调。
+ * @param onSetOnShelf 加入或移出书架回调。
+ * @param onEdit 打开书籍信息、封面和书脊编辑器回调。
+ * @param onDelete 打开删除确认回调。
+ * @return 无返回值，直接显示书籍管理卡片。
+ */
 @Composable
 private fun EbookBookCard(
+    repository: EbookRepository,
     book: EbookBook,
     onOpen: () -> Unit,
     onSetOnShelf: (Boolean) -> Unit,
@@ -922,19 +1078,11 @@ private fun EbookBookCard(
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Surface(
-                    modifier = Modifier.size(width = 56.dp, height = 72.dp),
-                    color = resolveEbookSpineColor(book),
-                    shape = MaterialTheme.shapes.medium
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Text(
-                            text = book.format.displayName.take(4),
-                            style = MaterialTheme.typography.labelMedium,
-                            color = Color(0xFFFFF5DF)
-                        )
-                    }
-                }
+                EbookCoverThumbnail(
+                    repository = repository,
+                    book = book,
+                    modifier = Modifier.size(width = 56.dp, height = 78.dp)
+                )
                 Column(
                     modifier = Modifier
                         .weight(1f)
@@ -973,7 +1121,7 @@ private fun EbookBookCard(
                 OutlinedButton(onClick = { onSetOnShelf(!book.isOnShelf) }) {
                     Text(if (book.isOnShelf) "移出书架" else "加入书架")
                 }
-                OutlinedButton(onClick = onEdit) { Text("信息与书脊颜色") }
+                OutlinedButton(onClick = onEdit) { Text("信息、封面与书脊") }
                 TextButton(onClick = onDelete) {
                     Text("删除", color = MaterialTheme.colorScheme.error)
                 }
@@ -983,21 +1131,81 @@ private fun EbookBookCard(
 }
 
 /**
- * 修改书名、作者，并通过预设或RGB滑杆自定义书架书脊颜色。
+ * 显示书籍自定义图片封面；未设置图片时使用书名生成简洁默认封面。
  *
  * 使用方法：
- * 从“全部书籍”点击“信息与书脊颜色”打开。选择“自动”会恢复按书籍id配色；选择预设或拖动
- * 任一RGB滑杆会生成不透明自定义颜色。点击保存后由仓库与其他元数据一次原子写入。
+ * 全部书籍卡片和编辑弹窗共同调用。图片只在[book.coverFileName]变化时重新采样解码，避免普通
+ * 重组反复读取磁盘；解码失败时自动回退默认封面，不影响书籍打开和管理。
  *
- * @param book 当前书籍及已保存颜色。
+ * @param repository 负责校验文件名并缩小图片的书籍仓库。
+ * @param book 当前书籍。
+ * @param modifier 封面尺寸和外部布局修饰器。
+ * @return 无返回值，直接绘制图片或默认封面。
+ */
+@Composable
+private fun EbookCoverThumbnail(
+    repository: EbookRepository,
+    book: EbookBook,
+    modifier: Modifier = Modifier
+) {
+    val coverBitmap: Bitmap? = remember(book.id, book.coverFileName, repository) {
+        repository.loadCoverBitmap(book)
+    }
+    Surface(
+        modifier = modifier,
+        color = resolveEbookSpineColor(book),
+        shape = MaterialTheme.shapes.medium,
+        shadowElevation = 2.dp
+    ) {
+        if (coverBitmap != null) {
+            Image(
+                modifier = Modifier.fillMaxSize(),
+                bitmap = coverBitmap.asImageBitmap(),
+                contentDescription = "${book.title}自定义封面",
+                contentScale = ContentScale.Crop
+            )
+        } else {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(6.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = book.title.trim().take(2).ifBlank { "书籍" },
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFFFFF5DF),
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 修改书名、作者、自定义图片封面，并通过预设或RGB滑杆自定义书架书脊颜色。
+ *
+ * 使用方法：
+ * 从“全部书籍”点击“信息、封面与书脊”打开。用户可选择、更换或删除图片封面；选择“自动”会
+ * 恢复按书籍id配色，选择预设或拖动任一RGB滑杆会生成不透明自定义颜色。
+ *
+ * @param repository 用于加载当前封面预览的书籍仓库。
+ * @param book 当前书籍、封面及已保存颜色。
  * @param onDismiss 放弃修改的回调。
+ * @param onChooseCover 打开系统图片选择器以设置或更换封面的回调。
+ * @param onRemoveCover 删除自定义封面并恢复默认封面的回调。
  * @param onSave 返回新书名、作者和ARGB颜色的保存回调；颜色0表示自动。
  * @return 无返回值，直接显示可滚动编辑对话框。
  */
 @Composable
 private fun EbookMetadataDialog(
+    repository: EbookRepository,
     book: EbookBook,
     onDismiss: () -> Unit,
+    onChooseCover: () -> Unit,
+    onRemoveCover: () -> Boolean,
     onSave: (String, String, Int) -> Unit
 ) {
     var title by rememberSaveable(book.id) { mutableStateOf(book.title) }
@@ -1037,7 +1245,7 @@ private fun EbookMetadataDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("书籍信息与书脊") },
+        title = { Text("书籍信息、封面与书脊") },
         text = {
             Column(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
@@ -1054,6 +1262,38 @@ private fun EbookMetadataDialog(
                     onValueChange = { value -> author = value.take(80) },
                     label = { Text("作者（可不填）") },
                     singleLine = true
+                )
+
+                Text("图片封面", fontWeight = FontWeight.SemiBold)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    EbookCoverThumbnail(
+                        repository = repository,
+                        book = book,
+                        modifier = Modifier.size(width = 82.dp, height = 112.dp)
+                    )
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(onClick = onChooseCover) {
+                            Text(if (book.coverFileName.isBlank()) "选择封面图片" else "更换封面图片")
+                        }
+                        OutlinedButton(
+                            enabled = book.coverFileName.isNotBlank(),
+                            onClick = { onRemoveCover() }
+                        ) {
+                            Text("恢复默认封面")
+                        }
+                    }
+                }
+                Text(
+                    "支持系统能够识别的常见图片，图片会复制到App本地，原相册图片移动或删除后仍可显示。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
 
                 Text("书脊主题色", fontWeight = FontWeight.SemiBold)
@@ -3029,10 +3269,12 @@ private fun formatEbookSize(bytes: Long): String {
 }
 
 private const val MAX_BOOK_QUERY_LENGTH = 80
+private const val EBOOK_SCREEN_TAG = "EbookScreen"
 private const val BOOKS_PER_SHELF_ROW = 10
 private const val SHELF_ROWS_PER_PAGE = 3
 private const val BOOKS_PER_SHELF_PAGE = BOOKS_PER_SHELF_ROW * SHELF_ROWS_PER_PAGE
 private const val MAX_SPINE_TITLE_CHARACTERS = 8
+private val SHELF_PROGRESS_AREA_HEIGHT = 24.dp
 private const val TEXT_PAGE_CHARACTER_LIMIT = 1_050
 private const val MIN_TEXT_PAGE_REMAINDER = 80
 private const val PROGRESS_SAVE_DEBOUNCE_MILLIS = 350L
