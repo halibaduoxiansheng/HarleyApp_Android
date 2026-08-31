@@ -1,8 +1,6 @@
 package com.example.harleyapp.ui.screens
 
 import android.content.Context
-import android.content.Intent
-import android.net.Uri
 import android.os.Build
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
@@ -93,6 +91,7 @@ import java.util.Locale
  * @param selectedPackages 当前已选包名集合。
  * @param isLoading 是否仍在后台读取应用列表。
  * @param onSelectionChanged 用户选择变化后的完整集合回调。
+ * @param onOpenProjectSource 在App内置网站页打开GitHub源码仓库的回调。
  *
  * @return 无返回值，直接输出“我的”页面。
  */
@@ -107,6 +106,7 @@ fun ProfileScreen(
     selectedPackages: Set<String>,
     isLoading: Boolean,
     onSelectionChanged: (Set<String>) -> Unit,
+    onOpenProjectSource: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -283,7 +283,7 @@ fun ProfileScreen(
 
         item {
             ProjectSourceCodeCard(
-                onOpenSource = { openProjectSourcePage(context) }
+                onOpenSource = onOpenProjectSource
             )
         }
     }
@@ -293,25 +293,18 @@ fun ProfileScreen(
  * 在“我的”页面最底部显示项目源码入口。
  *
  * 使用方法：
- * 由[ProfileScreen]作为最后一个列表项调用。用户点击卡片或按钮时触发[onOpenSource]，Android
- * 会优先交给已安装的GitHub客户端，否则使用系统浏览器；打开失败时在卡片内保留明确提示。
+ * 由[ProfileScreen]作为最后一个列表项调用。用户点击卡片或按钮时触发[onOpenSource]，外层
+ * HarleyApp会切换到底部“网站”页面，并把GitHub仓库地址交给App自带WebView加载。
  *
- * @param onOpenSource 打开项目GitHub页面的回调，成功提交系统Intent返回true。
+ * @param onOpenSource 在App内打开项目GitHub页面的回调。
  * @return 无返回值，直接输出源码说明、仓库地址和操作按钮。
  */
 @Composable
-private fun ProjectSourceCodeCard(onOpenSource: () -> Boolean) {
-    var openFailed by rememberSaveable { mutableStateOf(false) }
-
-    /** 尝试打开项目页并同步刷新失败提示。 */
-    fun openSource() {
-        openFailed = !onOpenSource()
-    }
-
+private fun ProjectSourceCodeCard(onOpenSource: () -> Unit) {
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { openSource() },
+            .clickable(onClick = onOpenSource),
         shape = RoundedCornerShape(22.dp),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceVariant
@@ -346,35 +339,11 @@ private fun ProjectSourceCodeCard(onOpenSource: () -> Boolean) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
 
-            OutlinedButton(onClick = { openSource() }) {
+            OutlinedButton(onClick = onOpenSource) {
                 Text("查看项目源码")
-            }
-
-            if (openFailed) {
-                Text(
-                    text = "没有找到可打开网页的应用，请安装浏览器后重试。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error
-                )
             }
         }
     }
-}
-
-/**
- * 使用Android标准ACTION_VIEW打开当前项目的GitHub仓库。
- *
- * @param context 当前页面上下文，用于交给系统选择GitHub客户端或浏览器。
- * @return Intent成功交给系统返回true；设备没有可处理应用或系统拒绝启动时返回false。
- */
-private fun openProjectSourcePage(context: Context): Boolean {
-    return runCatching {
-        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(PROJECT_SOURCE_URL)).apply {
-            addCategory(Intent.CATEGORY_BROWSABLE)
-        }
-        context.startActivity(intent)
-        true
-    }.getOrDefault(false)
 }
 
 /**
@@ -1475,7 +1444,3 @@ private const val UPDATE_DOWNLOAD_REFRESH_INTERVAL_MILLIS = 800L
 
 /** “我的”页面容量信息刷新间隔；内存和存储变化较慢，无需沿用首页网络速率的一秒采样。 */
 private const val DEVICE_STATUS_REFRESH_INTERVAL_MILLIS = 5_000L
-
-/** “我的”页面源码入口使用的公开GitHub仓库地址。 */
-private const val PROJECT_SOURCE_URL =
-    "https://github.com/halibaduoxiansheng/HarleyApp_Android"

@@ -81,6 +81,7 @@ import com.example.harleyapp.model.LocalCleanupStatus
 import com.example.harleyapp.model.LocalSearchType
 import com.example.harleyapp.model.ScheduledReminder
 import com.example.harleyapp.model.WebsiteLibrary
+import com.example.harleyapp.model.WebsitePalette
 import com.example.harleyapp.model.WebsiteShortcut
 import com.example.harleyapp.model.WechatCapture
 import com.example.harleyapp.model.WechatReminderSettings
@@ -515,9 +516,13 @@ fun HarleyApp(
     val featureCenterPage = FeatureCenterPage.entries.firstOrNull { page ->
         page.name == featureCenterPageName
     } ?: FeatureCenterPage.OVERVIEW
-    val activeWebsite = websites.firstOrNull { website ->
-        website.id == activeWebsiteId
-    } ?: websites.firstOrNull()
+    val activeWebsite = if (activeWebsiteId == PROJECT_SOURCE_WEBSITE.id) {
+        PROJECT_SOURCE_WEBSITE
+    } else {
+        websites.firstOrNull { website ->
+            website.id == activeWebsiteId
+        } ?: websites.firstOrNull()
+    }
     val defaultWebsite = websites.firstOrNull { website ->
         website.id == defaultWebsiteId
     } ?: websites.firstOrNull()
@@ -1615,6 +1620,10 @@ fun HarleyApp(
                             snackbarHostState.showSnackbar("快捷应用保存失败，请重试")
                         }
                     }
+                },
+                onOpenProjectSource = {
+                    activeWebsiteId = PROJECT_SOURCE_WEBSITE.id
+                    currentSectionName = AppSection.WEBSITE.name
                 }
             )
             }
@@ -1647,3 +1656,18 @@ private const val NOTIFICATION_REBIND_RETRY_COUNT = 3
 
 /** 两次通知监听服务重绑检查之间的等待时间，避免短时间高频调用系统服务。 */
 private const val NOTIFICATION_REBIND_RETRY_DELAY_MILLIS = 1_000L
+
+/**
+ * “我的→项目源码”专用的运行时网站入口。
+ *
+ * 该入口只用于把GitHub仓库交给App自带WebsiteScreen，不写入用户收藏、不参与首页轮播，
+ * 因此用户的网站增删改查和默认网站设置不会被源码入口污染。
+ */
+private val PROJECT_SOURCE_WEBSITE = WebsiteShortcut(
+    id = "runtime_project_source",
+    title = "HarleyApp 项目源码",
+    url = "https://github.com/halibaduoxiansheng/HarleyApp_Android",
+    palette = WebsitePalette.VIOLET,
+    showOnHome = false,
+    sortOrder = Int.MAX_VALUE
+)
