@@ -94,6 +94,7 @@ import com.example.harleyapp.model.newNotebookStableId
 import com.example.harleyapp.model.queryNotebookArticles
 import com.example.harleyapp.ui.components.HarleyDatePickerDialog
 import com.example.harleyapp.ui.components.bouncyClickable
+import com.example.harleyapp.system.NotebookShareManager
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.net.URI
@@ -131,6 +132,8 @@ private data class NotebookDatePickerRequest(
  * 功能中心切换到NOTEBOOK页面时调用。组件内部管理文章列表、查询、推荐、详情和编辑导航，仓库
  * 只使用本机Room兼容存储和私有媒体目录。用户从根页面返回时调用[onBack]回到功能中心。
  *
+ * @param initialArticleId 从全局搜索进入时需要直接打开的文章id；普通进入时传null。
+ * @param onInitialArticleConsumed 初始文章已处理后的回调，避免以后重复打开旧目标。
  * @param onBack 返回功能中心概览的回调。
  * @param modifier 外部页面安全边距。
  *
@@ -138,6 +141,8 @@ private data class NotebookDatePickerRequest(
  */
 @Composable
 fun NotebookScreen(
+    initialArticleId: String? = null,
+    onInitialArticleConsumed: () -> Unit = {},
     onBack: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -178,6 +183,15 @@ fun NotebookScreen(
         refreshArticles()
         selectedArticleId = article.id
         page = NotebookInternalPage.DETAIL
+    }
+
+    // 全局搜索文章只消费一次；文章已删除时回到根页面，不让旧id持续影响后续进入。
+    LaunchedEffect(initialArticleId) {
+        if (!initialArticleId.isNullOrBlank()) {
+            articles.firstOrNull { article -> article.id == initialArticleId }
+                ?.let(openArticle)
+            onInitialArticleConsumed()
+        }
     }
 
     /** 打开已有文章或新草稿编辑器。 */
@@ -963,6 +977,10 @@ private fun NotebookArticleDetailScreen(
     onDuplicate: () -> Unit
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
+    val shareManager = remember(context, mediaStore) {
+        NotebookShareManager(context, mediaStore)
+    }
+    var showShareDialog by rememberSaveable { mutableStateOf(false) }
     val palette = notebookThemePalette(article.cardTheme)
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -1027,8 +1045,8 @@ private fun NotebookArticleDetailScreen(
             ) {
                 OutlinedButton(onClick = onEdit) { Text(text = "继续编辑") }
                 OutlinedButton(onClick = onDuplicate) { Text(text = "复制为草稿") }
-                OutlinedButton(onClick = { shareNotebookArticle(context, article) }) {
-                    Text(text = "系统分享")
+                OutlinedButton(onClick = { showShareDialog = true }) {
+                    Text(text = "分享与导出")
                 }
                 OutlinedButton(onClick = onDelete) {
                     Text(text = "删除", color = MaterialTheme.colorScheme.error)
@@ -1036,6 +1054,81 @@ private fun NotebookArticleDetailScreen(
             }
         }
     }
+
+    if (showShareDialog) {
+        NotebookShareChoiceDialog(
+            hasMedia = article.hasImage(),
+            onDismiss = { showShareDialog = false },
+            onSharePlainText = {
+                showShareDialog = false
+                shareManager.sharePlainText(article)
+            },
+            onShareRichContent = {
+                showShareDialog = false
+                shareManager.shareRichContent(article)
+            },
+            onExportPackage = {
+                showShareDialog = false
+                shareManager.shareArticlePackage(article)
+            }
+        )
+    }
+}
+
+/**
+ * 显示记事本文章的分享方式选择窗口。
+ *
+ * 使用方法：
+ * 用户点击详情页“分享与导出”后显示；纯文本适合即时聊天，图文分享附带原图，文章包适合完整迁移。
+ *
+ * @param hasMedia 当前文章是否声明了图片或GIF，用于提示图文分享是否会回退为纯文本。
+ * @param onDismiss 关闭窗口回调。
+ * @param onSharePlainText 选择纯文本分享的回调。
+ * @param onShareRichContent 选择图文分享的回调。
+ * @param onExportPackage 选择ZIP文章包的回调。
+ *
+ * @return 无返回值，直接输出选择对话框。
+ */
+@Composable
+private fun NotebookShareChoiceDialog(
+    hasMedia: Boolean,
+    onDismiss: () -> Unit,
+    onSharePlainText: () -> Unit,
+    onShareRichContent: () -> Unit,
+    onExportPackage: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("分享与导出") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = "纯文本适合微信聊天；图文分享会同时附带原图；文章包包含Markdown、HTML和媒体文件。",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                if (!hasMedia) {
+                    Text(
+                        text = "这篇文章没有图片，选择图文分享时会自动发送纯文本。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalAlignment = Alignment.End
+            ) {
+                TextButton(onClick = onSharePlainText) { Text("分享纯文本") }
+                TextButton(onClick = onShareRichContent) { Text("分享图文") }
+                TextButton(onClick = onExportPackage) { Text("导出文章包") }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        }
+    )
 }
 
 /**
@@ -2041,39 +2134,6 @@ private fun openNotebookLink(context: Context, rawUrl: String): Boolean {
         true
     }.onFailure { error ->
         Log.e(NOTEBOOK_UI_TAG, "Failed to open notebook link", error)
-    }.getOrDefault(false)
-}
-
-/**
- * 通过系统分享面板发送文章纯文本。
- *
- * @param context Android上下文。
- * @param article 待分享文章。
- * @return 成功打开分享面板返回true，否则返回false。
- */
-private fun shareNotebookArticle(context: Context, article: NotebookArticle): Boolean {
-    val shareText = buildString {
-        append(article.title)
-        if (article.tags.isNotEmpty()) {
-            append("\n")
-            append(article.tags.joinToString(" ") { tag -> "#$tag" })
-        }
-        val body = article.plainText()
-        if (body.isNotBlank()) {
-            append("\n\n")
-            append(body)
-        }
-    }
-    return runCatching {
-        val intent = Intent(Intent.ACTION_SEND).apply {
-            type = "text/plain"
-            putExtra(Intent.EXTRA_SUBJECT, article.title)
-            putExtra(Intent.EXTRA_TEXT, shareText)
-        }
-        context.startActivity(Intent.createChooser(intent, "分享文章"))
-        true
-    }.onFailure { error ->
-        Log.e(NOTEBOOK_UI_TAG, "Failed to share notebook article", error)
     }.getOrDefault(false)
 }
 

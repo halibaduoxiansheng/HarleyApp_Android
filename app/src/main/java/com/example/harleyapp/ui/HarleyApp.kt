@@ -17,13 +17,21 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -35,18 +43,26 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.example.harleyapp.backup.AppBackupManager
 import com.example.harleyapp.data.CompanionRepository
 import com.example.harleyapp.data.EnglishWordRepository
+import com.example.harleyapp.data.EbookRepository
 import com.example.harleyapp.data.FitnessRepository
 import com.example.harleyapp.data.FeatureCenterOrderRepository
 import com.example.harleyapp.data.GlobalSearchRepository
 import com.example.harleyapp.data.HomeFeatureRepository
 import com.example.harleyapp.data.HotTopicRepository
 import com.example.harleyapp.data.LedgerRepository
+import com.example.harleyapp.data.NotebookRepository
 import com.example.harleyapp.data.ReminderRepository
 import com.example.harleyapp.data.ShortcutRepository
 import com.example.harleyapp.data.WebsiteRepository
@@ -55,6 +71,7 @@ import com.example.harleyapp.data.WechatBillImporter
 import com.example.harleyapp.data.WechatReminderRepository
 import com.example.harleyapp.model.CompanionCategory
 import com.example.harleyapp.model.CompanionTask
+import com.example.harleyapp.model.AppVisualTheme
 import com.example.harleyapp.model.ENGLISH_WORD_MASTERY_COUNT
 import com.example.harleyapp.model.HotTopic
 import com.example.harleyapp.model.HomeFeatureId
@@ -137,6 +154,121 @@ private enum class AppSection(
 }
 
 /**
+ * 显示会随角色主题变化的底部导航图标。
+ *
+ * 使用方法：
+ * 底部四个一级页面统一调用本组件。纯色主题继续显示简洁字符；人物主题会把同一张角色图按页面
+ * 使用不同偏移和放大比例裁成头像、发饰或服装局部，并叠加小型页面符号，避免四个按钮简单重复整张人物。
+ *
+ * @param section 当前底部导航页面。
+ * @param selected 是否为当前选中页面。
+ * @param visualTheme 当前用户人物主题。
+ * @param scale 选中切换动画提供的整体缩放值。
+ * @return 无返回值，直接输出导航图标。
+ */
+@Composable
+private fun ThemedNavigationIcon(
+    section: AppSection,
+    selected: Boolean,
+    visualTheme: AppVisualTheme,
+    scale: Float
+) {
+    val context = LocalContext.current
+    val artResourceId = remember(visualTheme.artResourceName) {
+        if (visualTheme.artResourceName.isBlank()) {
+            0
+        } else {
+            context.resources.getIdentifier(
+                visualTheme.artResourceName,
+                "drawable",
+                context.packageName
+            )
+        }
+    }
+    if (artResourceId == 0) {
+        Text(
+            text = section.symbol,
+            style = MaterialTheme.typography.titleLarge,
+            modifier = Modifier.graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            }
+        )
+        return
+    }
+
+    val horizontalShift = when (section) {
+        AppSection.HOME -> -7.dp
+        AppSection.FEATURES -> 5.dp
+        AppSection.WEBSITE -> -2.dp
+        AppSection.PROFILE -> 8.dp
+        else -> 0.dp
+    }
+    val verticalShift = when (section) {
+        AppSection.HOME -> 7.dp
+        AppSection.FEATURES -> -5.dp
+        AppSection.WEBSITE -> 0.dp
+        AppSection.PROFILE -> -9.dp
+        else -> 0.dp
+    }
+    Box(
+        modifier = Modifier
+            .size(width = 48.dp, height = 38.dp)
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            },
+        contentAlignment = Alignment.Center
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .clip(RoundedCornerShape(15.dp))
+                .background(MaterialTheme.colorScheme.primaryContainer)
+        ) {
+            Image(
+                painter = painterResource(artResourceId),
+                contentDescription = "${visualTheme.displayName}主题·${section.title}局部插画",
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        scaleX = if (selected) 1.72f else 1.58f
+                        scaleY = if (selected) 1.72f else 1.58f
+                        translationX = horizontalShift.toPx()
+                        translationY = verticalShift.toPx()
+                        alpha = if (selected) 1f else 0.72f
+                    }
+            )
+        }
+        Surface(
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .size(19.dp),
+            shape = CircleShape,
+            color = if (selected) {
+                MaterialTheme.colorScheme.primary
+            } else {
+                MaterialTheme.colorScheme.surfaceContainerHighest
+            }
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Text(
+                    text = section.symbol,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = if (selected) {
+                        MaterialTheme.colorScheme.onPrimary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    }
+                )
+            }
+        }
+    }
+}
+
+/**
  * 组织整个Harley生活助手的页面状态、数据仓库和底部导航。
  *
  * 使用方法：
@@ -144,18 +276,22 @@ private enum class AppSection(
  * 本函数负责把账目、快捷应用和设备服务传递给各个独立页面。
  *
  * @param isDarkTheme 当前是否使用黑夜模式，用于“更多”页显示正确切换方向。
+ * @param visualTheme 当前整体角色风格主题。
  * @param openTodayRequest 是否收到桌面小组件发出的“打开今日总览”请求。
  * @param onOpenTodayRequestConsumed 请求完成导航后的消费回调，防止重组时重复打开。
  * @param onSetDarkTheme 保存并立即应用主题模式的回调，成功返回true。
+ * @param onSetVisualTheme 保存并立即应用角色风格主题的回调，成功返回true。
  *
  * @return 无返回值，直接输出完整应用界面。
  */
 @Composable
 fun HarleyApp(
     isDarkTheme: Boolean,
+    visualTheme: AppVisualTheme,
     openTodayRequest: Boolean,
     onOpenTodayRequestConsumed: () -> Unit,
-    onSetDarkTheme: (Boolean) -> Boolean
+    onSetDarkTheme: (Boolean) -> Boolean,
+    onSetVisualTheme: (AppVisualTheme) -> Boolean
 ) {
     val context = LocalContext.current
     val applicationContext = context.applicationContext
@@ -195,6 +331,12 @@ fun HarleyApp(
     val fitnessRepository = remember {
         FitnessRepository(applicationContext)
     }
+    val notebookRepository = remember {
+        NotebookRepository(applicationContext)
+    }
+    val ebookRepository = remember {
+        EbookRepository(applicationContext)
+    }
     val backupManager = remember {
         AppBackupManager(applicationContext)
     }
@@ -209,7 +351,9 @@ fun HarleyApp(
             ledgerRepository = ledgerRepository,
             reminderRepository = reminderRepository,
             fitnessRepository = fitnessRepository,
-            websiteRepository = websiteRepository
+            websiteRepository = websiteRepository,
+            notebookRepository = notebookRepository,
+            ebookRepository = ebookRepository
         )
     }
     val wechatBillImporter = remember {
@@ -269,6 +413,18 @@ fun HarleyApp(
     }
     var featureCenterPageName by rememberSaveable {
         mutableStateOf(FeatureCenterPage.OVERVIEW.name)
+    }
+    var searchEnglishWordTargetId by rememberSaveable {
+        mutableStateOf("")
+    }
+    var searchNotebookArticleTargetId by rememberSaveable {
+        mutableStateOf("")
+    }
+    var searchEbookTargetId by rememberSaveable {
+        mutableStateOf("")
+    }
+    var pendingGlobalSearchQuery by rememberSaveable {
+        mutableStateOf("")
     }
     var detailReturnSectionName by rememberSaveable {
         mutableStateOf(AppSection.HOME.name)
@@ -350,6 +506,9 @@ fun HarleyApp(
     var isWebsiteFullscreen by remember {
         mutableStateOf(false)
     }
+    var isEbookImmersive by remember {
+        mutableStateOf(false)
+    }
     val currentSection = AppSection.entries.firstOrNull {
         it.name == currentSectionName
     } ?: AppSection.HOME
@@ -362,6 +521,16 @@ fun HarleyApp(
     val defaultWebsite = websites.firstOrNull { website ->
         website.id == defaultWebsiteId
     } ?: websites.firstOrNull()
+
+    // 离开电子书详情时强制恢复外层导航，防止异常返回路径把沉浸状态遗留到其他页面。
+    LaunchedEffect(currentSection, featureCenterPage) {
+        if (
+            currentSection != AppSection.FEATURES ||
+            featureCenterPage != FeatureCenterPage.EBOOKS
+        ) {
+            isEbookImmersive = false
+        }
+    }
 
     // 启动后清理上次取消编辑可能遗留的临时背景图，只保留当前网站模型仍在引用的文件。
     LaunchedEffect(websiteBackgroundStore) {
@@ -593,27 +762,23 @@ fun HarleyApp(
             SnackbarHost(hostState = snackbarHostState)
         },
         bottomBar = {
-            if (currentSection.showInBottomNavigation && !isWebsiteFullscreen) {
+            if (
+                currentSection.showInBottomNavigation &&
+                !isWebsiteFullscreen &&
+                !isEbookImmersive
+            ) {
                 NavigationBar {
                     AppSection.entries
                         .filter { section -> section.showInBottomNavigation }
                         .forEach { section ->
                             val selected = currentSection == section
                             val iconScale by animateFloatAsState(
-                                targetValue = if (selected) 1.2f else 1f,
+                                targetValue = if (selected) 1.06f else 1f,
                                 animationSpec = spring(
-                                    dampingRatio = 0.5f,
-                                    stiffness = 460f
+                                    dampingRatio = 0.72f,
+                                    stiffness = 500f
                                 ),
                                 label = "nav_scale_${section.name}"
-                            )
-                            val iconRotation by animateFloatAsState(
-                                targetValue = if (selected) -5f else 0f,
-                                animationSpec = spring(
-                                    dampingRatio = 0.45f,
-                                    stiffness = 400f
-                                ),
-                                label = "nav_rotation_${section.name}"
                             )
                             NavigationBarItem(
                                 selected = selected,
@@ -628,14 +793,11 @@ fun HarleyApp(
                                     currentSectionName = section.name
                                 },
                                 icon = {
-                                    Text(
-                                        text = section.symbol,
-                                        style = MaterialTheme.typography.titleLarge,
-                                        modifier = Modifier.graphicsLayer {
-                                            scaleX = iconScale
-                                            scaleY = iconScale
-                                            rotationZ = iconRotation
-                                        }
+                                    ThemedNavigationIcon(
+                                        section = section,
+                                        selected = selected,
+                                        visualTheme = visualTheme,
+                                        scale = iconScale
                                     )
                                 },
                                 label = {
@@ -789,6 +951,11 @@ fun HarleyApp(
                             featureCenterPageName = FeatureCenterPage.NOTEBOOK.name
                             currentSectionName = AppSection.FEATURES.name
                         }
+
+                        HomeFeatureId.EBOOKS -> {
+                            featureCenterPageName = FeatureCenterPage.EBOOKS.name
+                            currentSectionName = AppSection.FEATURES.name
+                        }
                     }
                 },
                 englishWord = homeEnglishWord,
@@ -898,6 +1065,11 @@ fun HarleyApp(
                     } else {
                         false
                     }
+                },
+                onQuickSearch = { query ->
+                    pendingGlobalSearchQuery = query
+                    detailReturnSectionName = AppSection.HOME.name
+                    currentSectionName = AppSection.SEARCH.name
                 }
             )
 
@@ -921,6 +1093,12 @@ fun HarleyApp(
             AppSection.SEARCH -> GlobalSearchScreen(
                 modifier = Modifier.padding(innerPadding),
                 repository = globalSearchRepository,
+                englishWords = englishWords,
+                launchableApps = launchableApps,
+                initialQuery = pendingGlobalSearchQuery,
+                onInitialQueryConsumed = {
+                    pendingGlobalSearchQuery = ""
+                },
                 onOpenResult = { result ->
                     when (result.type) {
                         LocalSearchType.LEDGER,
@@ -942,6 +1120,61 @@ fun HarleyApp(
                         LocalSearchType.WEBSITE -> {
                             activeWebsiteId = result.targetValue
                             currentSectionName = AppSection.WEBSITE.name
+                        }
+
+                        LocalSearchType.ENGLISH_WORD -> {
+                            searchEnglishWordTargetId = result.targetValue
+                            searchNotebookArticleTargetId = ""
+                            searchEbookTargetId = ""
+                            featureCenterPageName = FeatureCenterPage.ENGLISH_WORDS.name
+                            currentSectionName = AppSection.FEATURES.name
+                        }
+
+                        LocalSearchType.NOTEBOOK -> {
+                            searchNotebookArticleTargetId = result.targetValue
+                            searchEnglishWordTargetId = ""
+                            searchEbookTargetId = ""
+                            featureCenterPageName = FeatureCenterPage.NOTEBOOK.name
+                            currentSectionName = AppSection.FEATURES.name
+                        }
+
+                        LocalSearchType.EBOOK -> {
+                            searchEbookTargetId = result.targetValue
+                            searchNotebookArticleTargetId = ""
+                            searchEnglishWordTargetId = ""
+                            featureCenterPageName = FeatureCenterPage.EBOOKS.name
+                            currentSectionName = AppSection.FEATURES.name
+                        }
+
+                        LocalSearchType.APP -> {
+                            if (!installedAppsRepository.launchApp(result.targetValue)) {
+                                coroutineScope.launch {
+                                    snackbarHostState.showSnackbar("无法打开该应用，请确认应用仍已安装")
+                                }
+                            }
+                        }
+
+                        LocalSearchType.FEATURE -> {
+                            val featurePage = FeatureCenterPage.entries.firstOrNull { page ->
+                                page.name == result.targetValue
+                            }
+                            val appSection = AppSection.entries.firstOrNull { section ->
+                                section.name == result.targetValue
+                            }
+                            when {
+                                featurePage != null -> {
+                                    searchEnglishWordTargetId = ""
+                                    searchNotebookArticleTargetId = ""
+                                    searchEbookTargetId = ""
+                                    featureCenterPageName = featurePage.name
+                                    currentSectionName = AppSection.FEATURES.name
+                                }
+
+                                appSection != null -> {
+                                    detailReturnSectionName = AppSection.SEARCH.name
+                                    currentSectionName = appSection.name
+                                }
+                            }
                         }
                     }
                 },
@@ -1085,6 +1318,18 @@ fun HarleyApp(
                 onSpeakEnglish = offlineEnglishTts::speak,
                 onMarkEnglishWordLearned = markEnglishWordLearned,
                 onResetEnglishWord = resetEnglishWord,
+                initialEnglishWordId = searchEnglishWordTargetId.ifBlank { null },
+                initialNotebookArticleId = searchNotebookArticleTargetId.ifBlank { null },
+                initialEbookId = searchEbookTargetId.ifBlank { null },
+                ebookRepository = ebookRepository,
+                onEbookImmersiveChanged = { immersive ->
+                    isEbookImmersive = immersive
+                },
+                onInitialSearchTargetConsumed = {
+                    searchEnglishWordTargetId = ""
+                    searchNotebookArticleTargetId = ""
+                    searchEbookTargetId = ""
+                },
                 wechatReminderSettings = wechatReminderSettings,
                 wechatReminderStatus = wechatReminderStatus,
                 notificationAccessGranted = notificationAccessGranted,
@@ -1324,6 +1569,28 @@ fun HarleyApp(
                 onFullscreenChanged = { isFullscreen ->
                     isWebsiteFullscreen = isFullscreen
                 },
+                onEbookDownloadRequested = { request ->
+                    coroutineScope.launch {
+                        val progressMessage = launch {
+                            snackbarHostState.showSnackbar("正在下载并导入电子书…")
+                        }
+                        val result = ebookRepository.importFromWebDownload(request)
+                        progressMessage.cancel()
+                        snackbarHostState.currentSnackbarData?.dismiss()
+                        val snackbarResult = snackbarHostState.showSnackbar(
+                            message = result.message,
+                            actionLabel = if (result.success) "打开书库" else null,
+                            withDismissAction = true
+                        )
+                        if (
+                            result.success &&
+                            snackbarResult == androidx.compose.material3.SnackbarResult.ActionPerformed
+                        ) {
+                            featureCenterPageName = FeatureCenterPage.EBOOKS.name
+                            currentSectionName = AppSection.FEATURES.name
+                        }
+                    }
+                },
                 onManageWebsites = {
                     detailReturnSectionName = AppSection.WEBSITE.name
                     currentSectionName = AppSection.BOOKMARKS.name
@@ -1333,7 +1600,9 @@ fun HarleyApp(
             AppSection.PROFILE -> ProfileScreen(
                 modifier = Modifier.padding(innerPadding),
                 isDarkTheme = isDarkTheme,
+                visualTheme = visualTheme,
                 onSetDarkTheme = onSetDarkTheme,
+                onSetVisualTheme = onSetVisualTheme,
                 deviceMonitor = deviceMonitor,
                 apps = launchableApps,
                 selectedPackages = selectedPackages,

@@ -41,6 +41,7 @@ import com.example.harleyapp.model.ENGLISH_WORD_ALL_STAGES
 import com.example.harleyapp.model.ENGLISH_WORD_MASTERY_COUNT
 import com.example.harleyapp.model.EnglishLearningStage
 import com.example.harleyapp.model.EnglishWord
+import com.example.harleyapp.model.resolveEnglishLearningExample
 import com.example.harleyapp.model.searchEnglishWords
 import com.example.harleyapp.system.OfflineEnglishTtsState
 
@@ -57,6 +58,8 @@ import com.example.harleyapp.system.OfflineEnglishTtsState
  * @param onSpeakEnglish 提交英文朗读的回调，成功返回true。
  * @param onMarkLearned 把指定单词学习次数增加一次的回调，保存成功返回true。
  * @param onResetWord 把指定单词恢复到未学会分栏的回调，保存成功返回true。
+ * @param initialWordId 从全局搜索跳入时需要直接打开的单词id；普通进入时传null。
+ * @param onInitialWordConsumed 初始单词已处理后的回调，避免下次进入时重复打开旧目标。
  * @param onBack 返回功能中心概览的回调。
  * @param modifier 外部页面安全边距修饰器。
  * @return 无返回值，直接输出英语学习列表或当前单词详情页。
@@ -68,6 +71,8 @@ fun EnglishWordLearningScreen(
     onSpeakEnglish: (String) -> Boolean,
     onMarkLearned: (String) -> Boolean,
     onResetWord: (String) -> Boolean,
+    initialWordId: String? = null,
+    onInitialWordConsumed: () -> Unit = {},
     onBack: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -82,6 +87,25 @@ fun EnglishWordLearningScreen(
     }
     val selectedWord = words.firstOrNull { word -> word.id == selectedWordId }
 
+    // 全局搜索结果只消费一次；先保存有效词条id，再通知宿主清除一次性跳转参数。
+    LaunchedEffect(initialWordId, words) {
+        if (!initialWordId.isNullOrBlank()) {
+            selectedWordId = words.firstOrNull { word -> word.id == initialWordId }?.id
+            onInitialWordConsumed()
+        }
+    }
+
+    // 仅在词库变化导致已选词条确实不存在时清理旧状态，不能把刚由全局搜索选中的有效词条清掉。
+    LaunchedEffect(selectedWordId, selectedWord, initialWordId) {
+        if (
+            selectedWordId != null &&
+            selectedWord == null &&
+            initialWordId.isNullOrBlank()
+        ) {
+            selectedWordId = null
+        }
+    }
+
     if (selectedWord != null) {
         EnglishWordDetailScreen(
             modifier = modifier,
@@ -93,13 +117,6 @@ fun EnglishWordLearningScreen(
             onBack = { selectedWordId = null }
         )
         return
-    }
-
-    LaunchedEffect(selectedWordId) {
-        // 数据升级后若已选单词不存在，清理旧页面状态，避免后续重新出现错误详情页。
-        if (selectedWordId != null) {
-            selectedWordId = null
-        }
     }
 
     val displayedWords = remember(words, selectedStageCount, searchQuery) {
@@ -456,6 +473,10 @@ private fun EnglishWordStudyCard(
     onResetWord: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val learningExample = remember(word) {
+        resolveEnglishLearningExample(word)
+    }
+
     Card(
         modifier = modifier.fillMaxWidth(),
         shape = RoundedCornerShape(22.dp),
@@ -500,15 +521,30 @@ private fun EnglishWordStudyCard(
                 WordDetailSection(title = "英文释义", content = word.definitionEn)
             }
 
-            if (word.exampleEn.isNotBlank()) {
-                WordDetailSection(title = "英文例句", content = word.exampleEn)
-                if (word.exampleZh.isNotBlank()) {
-                    Text(
-                        text = word.exampleZh,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
+            WordDetailSection(
+                title = if (learningExample.isGenerated) "通用英文例句" else "英文例句",
+                content = learningExample.english
+            )
+            if (learningExample.chinese.isNotBlank()) {
+                Text(
+                    text = learningExample.chinese,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            if (learningExample.isGenerated) {
+                Text(
+                    text = "词库暂无专属例句，已在本机补充通用学习句。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            OutlinedButton(
+                modifier = Modifier.fillMaxWidth(),
+                enabled = ttsReady,
+                onClick = { onSpeakEnglish(learningExample.english) }
+            ) {
+                Text(text = if (ttsReady) "朗读例句" else "离线语音不可用")
             }
 
             if (word.tags.isNotEmpty()) {
@@ -524,16 +560,6 @@ private fun EnglishWordStudyCard(
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                if (word.exampleEn.isNotBlank()) {
-                    OutlinedButton(
-                        modifier = Modifier.weight(1f),
-                        enabled = ttsReady,
-                        onClick = { onSpeakEnglish(word.exampleEn) }
-                    ) {
-                        Text(text = "朗读例句")
-                    }
-                }
-
                 if (word.learnedCount < ENGLISH_WORD_MASTERY_COUNT) {
                     Button(
                         modifier = Modifier.weight(1f),

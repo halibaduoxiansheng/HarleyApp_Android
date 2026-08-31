@@ -21,8 +21,8 @@ import org.json.JSONObject
  *
  * 使用方法：
  * 使用Application Context创建仓库，通过getWebsites读取有序列表，通过saveWebsites整组覆盖保存。
- * 首次安装且从未保存过配置时返回默认的halibaduo.cn；用户主动删除全部网站后会保留空列表，
- * 不会在下次启动时擅自把默认网站加回来。
+ * 首次安装且从未保存过配置时返回halibaduo.cn与鸠摩搜书；升级用户会执行一次鸠摩搜书迁移，
+ * 用户之后主动删除网站会保留删除结果，不会在每次启动时擅自加回来。
  *
  * @param context Android上下文，内部会转换为Application Context避免持有Activity。
  */
@@ -40,19 +40,64 @@ class WebsiteRepository(context: Context) {
      */
     fun getWebsites(): List<WebsiteShortcut> {
         if (!preferences.contains(KEY_WEBSITES)) {
-            return listOf(DEFAULT_WEBSITE)
+            preferences.edit()
+                .putBoolean(KEY_JIUMO_BUILTIN_MIGRATED, true)
+                .commit()
+            return DEFAULT_WEBSITES
         }
 
         val storedJson = preferences.getString(KEY_WEBSITES, null)
-            ?: return listOf(DEFAULT_WEBSITE)
+            ?: return DEFAULT_WEBSITES
 
-        val decodedWebsites = decodeWebsites(storedJson) ?: return listOf(DEFAULT_WEBSITE)
+        val decodedWebsites = decodeWebsites(storedJson) ?: return DEFAULT_WEBSITES
         val migratedWebsites = decodedWebsites.map(::migrateLegacyDefaultWebsite)
-        if (migratedWebsites != decodedWebsites && !saveWebsites(migratedWebsites)) {
+        val completedWebsites = addBuiltinJiumoOnce(migratedWebsites)
+        if (
+            completedWebsites != decodedWebsites &&
+            completedWebsites == migratedWebsites &&
+            !saveWebsites(completedWebsites)
+        ) {
             Log.e(TAG, "Failed to persist migrated default website URL")
         }
 
-        return migratedWebsites
+        return completedWebsites
+    }
+
+    /**
+     * 为升级用户一次性加入鸠摩搜书，随后尊重用户自己的删除和排序操作。
+     *
+     * 使用方法：
+     * [getWebsites]完成旧网址迁移后自动调用。迁移标记成功保存后不会再次添加；如果用户已经
+     * 自行收藏同一稳定id，只记录完成标记并保留现有配置。
+     *
+     * @param websites 当前已经解码并修复的网址列表。
+     * @return 加入鸠摩搜书并成功保存时返回新列表；保存失败或已经迁移时返回原列表。
+     */
+    private fun addBuiltinJiumoOnce(websites: List<WebsiteShortcut>): List<WebsiteShortcut> {
+        if (preferences.getBoolean(KEY_JIUMO_BUILTIN_MIGRATED, false)) {
+            return websites
+        }
+
+        val updatedWebsites = if (websites.any { website -> website.id == JIUMO_WEBSITE.id }) {
+            websites
+        } else {
+            websites + JIUMO_WEBSITE.copy(
+                sortOrder = (websites.maxOfOrNull(WebsiteShortcut::sortOrder) ?: -1) + 1
+            )
+        }
+        val websitesSaved = updatedWebsites == websites || saveWebsites(updatedWebsites)
+        if (!websitesSaved) {
+            Log.e(TAG, "Failed to add built-in Jiumo website")
+            return websites
+        }
+
+        val migrationSaved = preferences.edit()
+            .putBoolean(KEY_JIUMO_BUILTIN_MIGRATED, true)
+            .commit()
+        if (!migrationSaved) {
+            Log.e(TAG, "Failed to persist built-in Jiumo migration state")
+        }
+        return updatedWebsites
     }
 
     /**
@@ -477,6 +522,7 @@ class WebsiteRepository(context: Context) {
         const val KEY_WEBSITES = "websites"
         const val KEY_FOLDERS = "folders"
         const val KEY_DEFAULT_WEBSITE_ID = "default_website_id"
+        const val KEY_JIUMO_BUILTIN_MIGRATED = "jiumo_builtin_migrated_v1"
         const val JSON_ID = "id"
         const val JSON_TITLE = "title"
         const val JSON_URL = "url"
@@ -496,5 +542,16 @@ class WebsiteRepository(context: Context) {
             url = "http://www.halibaduo.cn",
             palette = WebsitePalette.OCEAN
         )
+
+        val JIUMO_WEBSITE = WebsiteShortcut(
+            id = "builtin_jiumo_diary",
+            title = "鸠摩搜书",
+            url = "https://www.jiumodiary.com/",
+            palette = WebsitePalette.AMBER,
+            showOnHome = true,
+            sortOrder = 1
+        )
+
+        val DEFAULT_WEBSITES = listOf(DEFAULT_WEBSITE, JIUMO_WEBSITE)
     }
 }

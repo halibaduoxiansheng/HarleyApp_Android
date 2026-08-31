@@ -1,0 +1,21 @@
+HarleyApp optional character theme artwork notice
+
+Artwork: Casual Avatars
+Author / attribution notice: Kitsuge Apps
+Source: https://opengameart.org/content/casual-avatars
+License: CC0 1.0 Universal (public domain dedication)
+License URL: https://creativecommons.org/publicdomain/zero/1.0/
+
+Included source files and local resource names:
+- CasualAvatar_00.png -> theme_sakura_girl.png
+- CasualAvatar_01.png -> theme_peach_artist.png
+- CasualAvatar_02.png -> theme_violet_student.png
+- CasualAvatar_03.png -> theme_aqua_dreamer.png
+- CasualAvatar_04.png -> theme_starry_traveler.png
+- CasualAvatar_05.png -> theme_orange_ribbon.png
+- CasualAvatar_06.png -> theme_lilac_friend.png
+- CasualAvatar_07.png -> theme_sky_idol.png
+- CasualAvatar_08.png -> theme_mint_cat.png
+- CasualAvatar_09.png -> theme_rose_reader.png
+
+The Classic Blue theme is intentionally image-free. The HarleyApp icon is not used as character-theme artwork.

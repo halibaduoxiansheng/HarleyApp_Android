@@ -1,0 +1,26 @@
+HarleyApp bundled starter eBooks
+
+All files in assets/starter_ebooks were downloaded in UTF-8 plain-text form from Project Gutenberg.
+Each text retains its Project Gutenberg header, credits, end marker, and license text.
+Project Gutenberg states each listed edition is public domain in the USA. Users outside the USA
+should consider the copyright laws of their own country before redistributing a file.
+
+Chinese classics:
+- eBook 24264: 紅樓夢, Cao Xueqin — https://www.gutenberg.org/ebooks/24264
+- eBook 23950: 三國志演義, Luo Guanzhong — https://www.gutenberg.org/ebooks/23950
+- eBook 23962: 西遊記, Wu Cheng'en — https://www.gutenberg.org/ebooks/23962
+- eBook 23863: 水滸傳, Shi Nai'an — https://www.gutenberg.org/ebooks/23863
+- eBook 23864: 孫子兵法, Sunzi — https://www.gutenberg.org/ebooks/23864
+- eBook 23839: 論語, Confucius — https://www.gutenberg.org/ebooks/23839
+- eBook 7337: 道德經, Laozi — https://www.gutenberg.org/ebooks/7337
+- eBook 52323: 唐诗三百首, Hengtangtuishi (compiler) — https://www.gutenberg.org/ebooks/52323
+- eBook 51828: 聊齋志異, Pu Songling — https://www.gutenberg.org/ebooks/51828
+
+English classics and learning:
+- eBook 11: Alice's Adventures in Wonderland, Lewis Carroll — https://www.gutenberg.org/ebooks/11
+- eBook 1661: The Adventures of Sherlock Holmes, Arthur Conan Doyle — https://www.gutenberg.org/ebooks/1661
+- eBook 1342: Pride and Prejudice, Jane Austen — https://www.gutenberg.org/ebooks/1342
+- eBook 2680: Meditations, Marcus Aurelius — https://www.gutenberg.org/ebooks/2680
+- eBook 1228: On the Origin of Species, Charles Darwin — https://www.gutenberg.org/ebooks/1228
+
+Project Gutenberg terms: https://www.gutenberg.org/policy/terms_of_use.html

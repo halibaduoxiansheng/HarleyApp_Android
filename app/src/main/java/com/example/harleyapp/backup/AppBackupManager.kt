@@ -1,9 +1,14 @@
 package com.example.harleyapp.backup
 
 import android.annotation.SuppressLint
+import android.content.ContentValues
 import android.content.Context
 import android.content.SharedPreferences
 import android.net.Uri
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
+import android.provider.OpenableColumns
 import android.util.AtomicFile
 import android.util.Base64
 import android.util.Log
@@ -80,9 +85,10 @@ data class BackupOperationResult(
  * 创建和恢复可跨手机传输的Harley本地备份文件。
  *
  * 使用方法：
- * 使用Application Context创建实例。页面通过系统文件选择器取得Uri后调用[exportTo]导出，
- * 先调用[inspect]预览用户选择的文件，再经过明确确认调用[restoreFrom]恢复。恢复前本类会在
- * 应用私有目录写入一份安全快照；任何步骤失败都会尝试回滚，不会主动上传或共享文件。
+ * 使用Application Context创建实例。页面优先调用[exportToPrimaryDownloads]直接写入系统主存储，
+ * 也可通过系统文件选择器取得Uri后调用[exportTo]另存。导入时先调用[inspect]预览用户选择的
+ * 文件，再经过明确确认调用[restoreFrom]恢复。恢复前本类会在应用私有目录写入一份安全快照；
+ * 任何步骤失败都会尝试回滚，不会主动上传或共享文件。
  *
  * @param context Android上下文，内部只保存Application Context。
  */
@@ -92,6 +98,87 @@ class AppBackupManager(context: Context) {
     private val documentStore = LocalDocumentStore.create(applicationContext)
     private val websiteBackgroundStore = WebsiteCardBackgroundStore(applicationContext)
     private val notebookMediaStore = NotebookMediaStore(applicationContext)
+
+    /**
+     * 绕过厂商文件选择器，直接把备份保存到系统主存储的Download/HarleyApp目录。
+     *
+     * 使用方法：
+     * 备份页默认导出按钮传入时间戳文件名和可选密码。Android 10及以上通过MediaStore的
+     * primary external volume创建文件，因此不会跟随小米文件选择器上次停留的XSpace目录；
+     * 写入期间文件保持pending，只有回读校验成功后才对文件管理器公开。失败时会删除本次
+     * 新建的空文件或不完整文件。Android 9及以下返回不支持结果，用户仍可使用系统另存为。
+     *
+     * @param requestedFileName 希望显示在文件管理器中的备份文件名；路径分隔符会被移除。
+     * @param password 可选备份密码；空字符串生成明文校验备份。
+     * @return 导出结果、内容摘要和可由用户直接查找的相对路径说明。
+     */
+    suspend fun exportToPrimaryDownloads(
+        requestedFileName: String,
+        password: String
+    ): BackupOperationResult {
+        return withContext(Dispatchers.IO) {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+                return@withContext BackupOperationResult(
+                    success = false,
+                    message = "当前Android版本请使用“选择其他保存位置”导出备份"
+                )
+            }
+
+            val resolver = applicationContext.contentResolver
+            val displayName = normalizeBackupFileName(requestedFileName)
+            val collection = MediaStore.Downloads.getContentUri(
+                MediaStore.VOLUME_EXTERNAL_PRIMARY
+            )
+            var createdUri: Uri? = null
+
+            runCatching {
+                val values = ContentValues().apply {
+                    put(MediaStore.Downloads.DISPLAY_NAME, displayName)
+                    put(MediaStore.Downloads.MIME_TYPE, BACKUP_MIME_TYPE)
+                    put(
+                        MediaStore.Downloads.RELATIVE_PATH,
+                        "${Environment.DIRECTORY_DOWNLOADS}/$PRIMARY_BACKUP_DIRECTORY"
+                    )
+                    put(MediaStore.Downloads.IS_PENDING, 1)
+                }
+                val targetUri = resolver.insert(collection, values)
+                    ?: error("Unable to create primary backup document")
+                createdUri = targetUri
+
+                val exportResult = exportTo(targetUri, password)
+                if (!exportResult.success) {
+                    resolver.delete(targetUri, null, null)
+                    createdUri = null
+                    return@runCatching exportResult
+                }
+
+                val publishedRows = resolver.update(
+                    targetUri,
+                    ContentValues().apply {
+                        put(MediaStore.Downloads.IS_PENDING, 0)
+                    },
+                    null,
+                    null
+                )
+                check(publishedRows > 0) { "Unable to publish primary backup document" }
+
+                val actualDisplayName = readDisplayName(targetUri).ifBlank { displayName }
+                exportResult.copy(
+                    message = "已保存到系统主存储 Download/$PRIMARY_BACKUP_DIRECTORY/" +
+                        "$actualDisplayName；${exportResult.message}"
+                )
+            }.getOrElse { error ->
+                createdUri?.let { uri ->
+                    runCatching { resolver.delete(uri, null, null) }
+                }
+                Log.e(TAG, "Failed to export backup to primary downloads", error)
+                BackupOperationResult(
+                    success = false,
+                    message = "无法保存到系统主存储，请使用“选择其他保存位置”重试"
+                )
+            }
+        }
+    }
 
     /**
      * 把当前全部可迁移数据写入用户选择的文件。
@@ -105,17 +192,22 @@ class AppBackupManager(context: Context) {
             runCatching {
                 val payload = capturePayload()
                 val envelope = createEnvelope(payload, password)
-                val output = applicationContext.contentResolver.openOutputStream(uri, "wt")
+                val backupBytes = envelope.toString().toByteArray(StandardCharsets.UTF_8)
+                val output = applicationContext.contentResolver.openOutputStream(uri, "rwt")
                     ?: error("Unable to open backup output")
                 output.buffered().use { stream ->
-                    stream.write(envelope.toString().toByteArray(StandardCharsets.UTF_8))
+                    stream.write(backupBytes)
+                    stream.flush()
+                }
+                check(verifyExportedBackup(uri, backupBytes)) {
+                    "Backup read-back verification failed"
                 }
                 BackupOperationResult(
                     success = true,
                     message = if (password.isBlank()) {
-                        "本地备份已导出，请妥善保管文件"
+                        "本地备份已导出并校验（${formatBackupByteSize(backupBytes.size)}）"
                     } else {
-                        "加密备份已导出，请牢记密码"
+                        "加密备份已导出并校验（${formatBackupByteSize(backupBytes.size)}），请牢记密码"
                     },
                     preview = buildPreview(payload, password.isNotBlank())
                 )
@@ -126,6 +218,95 @@ class AppBackupManager(context: Context) {
                     message = "备份导出失败，请确认文件位置可写后重试"
                 )
             }
+        }
+    }
+
+    /**
+     * 把外部传入的文件名规范化为Download目录内的单个备份文件名。
+     *
+     * @param requestedFileName 页面生成或调用方传入的文件名。
+     * @return 不含路径分隔符并以.harleybackup结尾的安全文件名。
+     */
+    private fun normalizeBackupFileName(requestedFileName: String): String {
+        val singleName = requestedFileName
+            .trim()
+            .substringAfterLast('/')
+            .substringAfterLast('\\')
+            .take(MAX_BACKUP_FILE_NAME_LENGTH)
+            .ifBlank { "Harley_backup.harleybackup" }
+        return if (singleName.endsWith(BACKUP_FILE_EXTENSION, ignoreCase = true)) {
+            singleName
+        } else {
+            "$singleName$BACKUP_FILE_EXTENSION"
+        }
+    }
+
+    /**
+     * 读取MediaStore实际采用的显示文件名。
+     *
+     * @param uri 已完成写入并发布的备份Uri。
+     * @return 系统处理重名后的真实文件名；查询失败时返回空字符串。
+     */
+    private fun readDisplayName(uri: Uri): String {
+        return applicationContext.contentResolver.query(
+            uri,
+            arrayOf(OpenableColumns.DISPLAY_NAME),
+            null,
+            null,
+            null
+        )?.use { cursor ->
+            if (cursor.moveToFirst()) cursor.getString(0).orEmpty() else ""
+        }.orEmpty()
+    }
+
+    /**
+     * 回读刚写入的系统文档并比较长度与SHA-256，防止内容提供者静默生成空文件。
+     *
+     * 使用方法：
+     * 仅在导出流完整关闭后调用。函数以固定缓冲区流式计算摘要，不会把第二份大型备份完整
+     * 载入内存；读取量超过备份上限时立即失败。
+     *
+     * @param uri 系统文件选择器返回且刚写入完成的目标Uri。
+     * @param expectedBytes 本次准备写入的完整备份字节。
+     *
+     * @return 回读长度和SHA-256都与原始数据一致返回true，否则返回false。
+     */
+    private fun verifyExportedBackup(uri: Uri, expectedBytes: ByteArray): Boolean {
+        val expectedDigest = MessageDigest.getInstance("SHA-256").digest(expectedBytes)
+        val actualDigest = MessageDigest.getInstance("SHA-256")
+        var totalBytes = 0L
+        val input = applicationContext.contentResolver.openInputStream(uri) ?: return false
+        input.buffered().use { stream ->
+            val buffer = ByteArray(EXPORT_VERIFY_BUFFER_BYTES)
+            while (true) {
+                val readCount = stream.read(buffer)
+                if (readCount < 0) break
+                totalBytes += readCount
+                if (totalBytes > MAX_BACKUP_BYTES) return false
+                actualDigest.update(buffer, 0, readCount)
+            }
+        }
+
+        return totalBytes == expectedBytes.size.toLong() &&
+            MessageDigest.isEqual(expectedDigest, actualDigest.digest())
+    }
+
+    /**
+     * 把备份字节数转换为简短的中文容量文本。
+     *
+     * @param byteCount 备份文件字节数。
+     *
+     * @return 小于1MB时返回KB文本，否则返回保留两位小数的MB文本。
+     */
+    private fun formatBackupByteSize(byteCount: Int): String {
+        return if (byteCount < BYTES_PER_MEGABYTE) {
+            "${(byteCount + BYTES_PER_KILOBYTE - 1) / BYTES_PER_KILOBYTE} KB"
+        } else {
+            String.format(
+                java.util.Locale.CHINA,
+                "%.2f MB",
+                byteCount.toDouble() / BYTES_PER_MEGABYTE.toDouble()
+            )
         }
     }
 
@@ -788,6 +969,10 @@ class AppBackupManager(context: Context) {
 
     private companion object {
         const val TAG = "AppBackupManager"
+        const val BACKUP_MIME_TYPE = "application/vnd.harley.backup+json"
+        const val BACKUP_FILE_EXTENSION = ".harleybackup"
+        const val PRIMARY_BACKUP_DIRECTORY = "HarleyApp"
+        const val MAX_BACKUP_FILE_NAME_LENGTH = 120
         const val BACKUP_SCHEMA_VERSION = 1
         const val ENVELOPE_FORMAT = "harley_backup_envelope"
         const val PAYLOAD_FORMAT = "harley_local_data"
@@ -802,6 +987,9 @@ class AppBackupManager(context: Context) {
         const val SALT_BYTES = 16
         // 图片经过Base64编码且加密备份会再次编码，128MB可覆盖当前全部受控媒体上限。
         const val MAX_BACKUP_BYTES = 128 * 1024 * 1024
+        const val EXPORT_VERIFY_BUFFER_BYTES = 16 * 1024
+        const val BYTES_PER_KILOBYTE = 1024
+        const val BYTES_PER_MEGABYTE = 1024 * 1024
         const val MAX_DOCUMENT_BYTES = 5 * 1024 * 1024
         const val MAX_DOCUMENT_COUNT = 100
         const val MAX_PREFERENCE_FILES = 30

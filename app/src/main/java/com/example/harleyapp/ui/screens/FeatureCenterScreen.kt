@@ -4,6 +4,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -14,6 +15,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -35,6 +37,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -42,6 +47,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import com.example.harleyapp.model.HomeFeatureId
+import com.example.harleyapp.data.EbookRepository
 import com.example.harleyapp.model.EnglishWord
 import com.example.harleyapp.model.LocalCleanupResult
 import com.example.harleyapp.model.LocalCleanupStatus
@@ -51,6 +57,7 @@ import com.example.harleyapp.model.WechatReminderStatus
 import com.example.harleyapp.model.moveFeatureCenterItem
 import com.example.harleyapp.system.OfflineEnglishTtsState
 import com.example.harleyapp.ui.components.bouncyClickable
+import com.example.harleyapp.ui.theme.LocalAppVisualTheme
 
 /**
  * 功能中心内部可以切换的概览页和工具详情页。
@@ -65,7 +72,8 @@ enum class FeatureCenterPage {
     GENERAL_REMINDER,
     LOCAL_CLEANUP,
     ENGLISH_WORDS,
-    NOTEBOOK
+    NOTEBOOK,
+    EBOOKS
 }
 
 /**
@@ -91,6 +99,12 @@ enum class FeatureCenterPage {
  * @param onSpeakEnglish 朗读英文单词或例句的回调。
  * @param onMarkEnglishWordLearned 把指定单词学习次数增加一次的回调。
  * @param onResetEnglishWord 把指定单词恢复到未学会状态的回调。
+ * @param initialEnglishWordId 全局搜索要求直接打开的英语单词id。
+ * @param initialNotebookArticleId 全局搜索要求直接打开的记事本文章id。
+ * @param initialEbookId 全局搜索要求直接打开的电子书id。
+ * @param ebookRepository 电子书原文件、离线索引和阅读进度仓库。
+ * @param onEbookImmersiveChanged 电子书沉浸阅读状态变化回调，用于隐藏或恢复App底部导航栏。
+ * @param onInitialSearchTargetConsumed 初始搜索目标完成跳转后的清理回调。
  * @param wechatReminderSettings 微信未查看消息提醒设置。
  * @param wechatReminderStatus 微信提醒监听状态。
  * @param notificationAccessGranted 是否已授予通知使用权。
@@ -131,6 +145,12 @@ fun FeatureCenterScreen(
     onSpeakEnglish: (String) -> Boolean,
     onMarkEnglishWordLearned: (String) -> Boolean,
     onResetEnglishWord: (String) -> Boolean,
+    initialEnglishWordId: String?,
+    initialNotebookArticleId: String?,
+    initialEbookId: String?,
+    ebookRepository: EbookRepository,
+    onEbookImmersiveChanged: (Boolean) -> Unit,
+    onInitialSearchTargetConsumed: () -> Unit,
     wechatReminderSettings: WechatReminderSettings,
     wechatReminderStatus: WechatReminderStatus,
     notificationAccessGranted: Boolean,
@@ -165,6 +185,9 @@ fun FeatureCenterScreen(
             onOpenBackup = onOpenBackup,
             onOpenNotebook = {
                 onPageChanged(FeatureCenterPage.NOTEBOOK)
+            },
+            onOpenEbooks = {
+                onPageChanged(FeatureCenterPage.EBOOKS)
             },
             onOpenEnglishWords = {
                 onPageChanged(FeatureCenterPage.ENGLISH_WORDS)
@@ -239,11 +262,24 @@ fun FeatureCenterScreen(
             onSpeakEnglish = onSpeakEnglish,
             onMarkLearned = onMarkEnglishWordLearned,
             onResetWord = onResetEnglishWord,
+            initialWordId = initialEnglishWordId,
+            onInitialWordConsumed = onInitialSearchTargetConsumed,
             onBack = { onPageChanged(FeatureCenterPage.OVERVIEW) }
         )
 
         FeatureCenterPage.NOTEBOOK -> NotebookScreen(
             modifier = modifier,
+            initialArticleId = initialNotebookArticleId,
+            onInitialArticleConsumed = onInitialSearchTargetConsumed,
+            onBack = { onPageChanged(FeatureCenterPage.OVERVIEW) }
+        )
+
+        FeatureCenterPage.EBOOKS -> EbookScreen(
+            modifier = modifier,
+            repository = ebookRepository,
+            initialBookId = initialEbookId,
+            onInitialBookConsumed = onInitialSearchTargetConsumed,
+            onImmersiveChanged = onEbookImmersiveChanged,
             onBack = { onPageChanged(FeatureCenterPage.OVERVIEW) }
         )
     }
@@ -266,6 +302,7 @@ fun FeatureCenterScreen(
  * @param onOpenSearch 打开全局本地搜索的回调。
  * @param onOpenBackup 打开本地备份与恢复的回调。
  * @param onOpenNotebook 打开富内容记事本的回调。
+ * @param onOpenEbooks 打开本地电子书书架的回调。
  * @param onOpenEnglishWords 打开离线英语单词学习页的回调。
  *
  * @return 无返回值，直接输出功能入口网格。
@@ -283,6 +320,7 @@ private fun FeatureCenterOverview(
     onOpenSearch: () -> Unit,
     onOpenBackup: () -> Unit,
     onOpenNotebook: () -> Unit,
+    onOpenEbooks: () -> Unit,
     onOpenEnglishWords: () -> Unit,
     onOpenWechatReminder: () -> Unit,
     onOpenGeneralReminder: () -> Unit,
@@ -308,6 +346,7 @@ private fun FeatureCenterOverview(
         onOpenSearch = onOpenSearch,
         onOpenBackup = onOpenBackup,
         onOpenNotebook = onOpenNotebook,
+        onOpenEbooks = onOpenEbooks,
         onOpenEnglishWords = onOpenEnglishWords,
         onOpenWechatReminder = onOpenWechatReminder,
         onOpenGeneralReminder = onOpenGeneralReminder,
@@ -463,6 +502,7 @@ private data class FeatureEntry(
  * @param onOpenSearch 打开全局搜索的回调。
  * @param onOpenBackup 打开本地备份的回调。
  * @param onOpenNotebook 打开富内容记事本的回调。
+ * @param onOpenEbooks 打开本地电子书书架的回调。
  * @param onOpenEnglishWords 打开离线英语单词学习页的回调。
  * @param onOpenWechatReminder 打开微信消息提醒的回调。
  * @param onOpenGeneralReminder 打开通知提醒的回调。
@@ -479,6 +519,7 @@ private fun featureCenterEntries(
     onOpenSearch: () -> Unit,
     onOpenBackup: () -> Unit,
     onOpenNotebook: () -> Unit,
+    onOpenEbooks: () -> Unit,
     onOpenEnglishWords: () -> Unit,
     onOpenWechatReminder: () -> Unit,
     onOpenGeneralReminder: () -> Unit,
@@ -496,7 +537,8 @@ private fun featureCenterEntries(
         FeatureEntry(HomeFeatureId.BACKUP, "备", "本地备份", "换手机导出与恢复", onOpenBackup),
         FeatureEntry(HomeFeatureId.LOCAL_CLEANUP, "清", "手机清理", "缓存统计与存储管理", onOpenLocalCleanup),
         FeatureEntry(HomeFeatureId.ENGLISH_WORDS, "英", "英语单词", "离线词库、例句与发音", onOpenEnglishWords),
-        FeatureEntry(HomeFeatureId.NOTEBOOK, "记", "记事本", "富内容文章、查询与往期回顾", onOpenNotebook)
+        FeatureEntry(HomeFeatureId.NOTEBOOK, "记", "记事本", "富内容文章、查询与往期回顾", onOpenNotebook),
+        FeatureEntry(HomeFeatureId.EBOOKS, "书", "电子书", "导入书籍、多种翻页与阅读进度", onOpenEbooks)
     )
 }
 
@@ -513,6 +555,15 @@ private fun FeatureEntryCard(
     entry: FeatureEntry,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
+    val visualTheme = LocalAppVisualTheme.current
+    val themeArtResourceId = remember(visualTheme.artResourceName) {
+        context.resources.getIdentifier(
+            visualTheme.artResourceName,
+            "drawable",
+            context.packageName
+        )
+    }
     Card(
         modifier = modifier
             .heightIn(min = 128.dp)
@@ -528,16 +579,27 @@ private fun FeatureEntryCard(
             verticalArrangement = Arrangement.spacedBy(7.dp)
         ) {
             Surface(
+                modifier = Modifier.size(48.dp),
                 shape = RoundedCornerShape(14.dp),
                 color = MaterialTheme.colorScheme.primaryContainer
             ) {
-                Text(
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                    text = entry.symbol,
-                    style = MaterialTheme.typography.titleLarge,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer,
-                    fontWeight = FontWeight.Bold
-                )
+                if (themeArtResourceId != 0) {
+                    Image(
+                        painter = painterResource(themeArtResourceId),
+                        contentDescription = "${visualTheme.displayName}人物",
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Crop
+                    )
+                } else {
+                    Box(contentAlignment = Alignment.Center) {
+                        Text(
+                            text = entry.symbol,
+                            style = MaterialTheme.typography.titleLarge,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
             }
             Text(
                 text = entry.title,

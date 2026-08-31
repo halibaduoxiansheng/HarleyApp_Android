@@ -8,13 +8,23 @@ package com.example.harleyapp.model
  * @property FITNESS 运动记录。
  * @property WEBSITE 网站快捷入口。
  * @property WECHAT_CAPTURE 待确认微信支付通知。
+ * @property ENGLISH_WORD 离线英语单词。
+ * @property NOTEBOOK 本地记事本文章。
+ * @property EBOOK 本地电子书。
+ * @property APP 手机中可启动的应用。
+ * @property FEATURE Harley App内部功能入口。
  */
 enum class LocalSearchType(val title: String, val symbol: String) {
     LEDGER("账目", "¥"),
     REMINDER("提醒", "铃"),
     FITNESS("运动", "动"),
     WEBSITE("网站", "网"),
-    WECHAT_CAPTURE("待确认", "微")
+    WECHAT_CAPTURE("待确认", "微"),
+    ENGLISH_WORD("单词", "英"),
+    NOTEBOOK("记事本", "记"),
+    EBOOK("电子书", "书"),
+    APP("应用", "启"),
+    FEATURE("功能", "功")
 }
 
 /**

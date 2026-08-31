@@ -1,5 +1,12 @@
 package com.example.harleyapp.ui.screens
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -18,11 +25,15 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -31,6 +42,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -41,15 +53,24 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
 import com.example.harleyapp.model.CompanionCategory
 import com.example.harleyapp.model.CompanionProgress
 import com.example.harleyapp.model.DeviceSnapshot
@@ -97,6 +118,7 @@ import java.util.Locale
  * @param onSaveWebsite 新增或编辑网站的同步保存回调，成功返回true。
  * @param onDeleteWebsite 删除网站的同步回调，成功返回true。
  * @param onSelectCompanionCategory 更换玩偶分类的同步保存回调，成功返回true。
+ * @param onQuickSearch 提交首页顶部快捷搜索词的回调；宿主收到后打开完整全局搜索页。
  *
  * @return 无返回值，直接输出首页界面。
  */
@@ -123,10 +145,60 @@ fun HomeScreen(
     onMarkEnglishWordLearned: (String) -> Boolean,
     onSaveWebsite: (WebsiteShortcut) -> Boolean,
     onDeleteWebsite: (String) -> Boolean,
-    onSelectCompanionCategory: (CompanionCategory) -> Boolean
+    onSelectCompanionCategory: (CompanionCategory) -> Boolean,
+    onQuickSearch: (String) -> Unit
 ) {
     var snapshot by remember {
         mutableStateOf(DeviceSnapshot())
+    }
+    val listState = rememberLazyListState()
+    var quickSearchVisible by rememberSaveable { mutableStateOf(true) }
+    var quickSearchQuery by rememberSaveable { mutableStateOf("") }
+    var quickSearchFocused by remember { mutableStateOf(false) }
+
+    // 用累计滚动距离而不是单个像素方向切换搜索框，避免手指轻微抖动导致显隐状态反复翻转。
+    LaunchedEffect(listState) {
+        var previousIndex = listState.firstVisibleItemIndex
+        var previousOffset = listState.firstVisibleItemScrollOffset
+        var accumulatedScroll = 0
+
+        snapshotFlow {
+            listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset
+        }.collect { (currentIndex, currentOffset) ->
+            val isAtTop = currentIndex == 0 && currentOffset == 0
+            val scrollDelta = when {
+                currentIndex > previousIndex -> QUICK_SEARCH_HIDE_DISTANCE_PX
+                currentIndex < previousIndex -> -QUICK_SEARCH_SHOW_DISTANCE_PX
+                else -> currentOffset - previousOffset
+            }
+
+            if (isAtTop) {
+                quickSearchVisible = true
+                accumulatedScroll = 0
+            } else if (scrollDelta != 0) {
+                // 滚动方向改变时重新累计，只有稳定滑动超过阈值才触发一次显隐。
+                if (
+                    accumulatedScroll != 0 &&
+                    (accumulatedScroll > 0) != (scrollDelta > 0)
+                ) {
+                    accumulatedScroll = scrollDelta
+                } else {
+                    accumulatedScroll += scrollDelta
+                }
+                when {
+                    quickSearchVisible && accumulatedScroll >= QUICK_SEARCH_HIDE_DISTANCE_PX -> {
+                        quickSearchVisible = false
+                        accumulatedScroll = 0
+                    }
+                    !quickSearchVisible && accumulatedScroll <= -QUICK_SEARCH_SHOW_DISTANCE_PX -> {
+                        quickSearchVisible = true
+                        accumulatedScroll = 0
+                    }
+                }
+            }
+            previousIndex = currentIndex
+            previousOffset = currentOffset
+        }
     }
 
     // 仅在首页可见时每秒采样，避免无意义地常驻消耗电量。
@@ -143,7 +215,7 @@ fun HomeScreen(
         }
     }
 
-    LazyColumn(
+    Box(
         modifier = modifier
             .fillMaxSize()
             .background(
@@ -153,26 +225,31 @@ fun HomeScreen(
                         MaterialTheme.colorScheme.background
                     )
                 )
-            ),
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(
-            start = 20.dp,
-            top = 20.dp,
-            end = 20.dp,
-            bottom = 28.dp
-        ),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
-    ) {
-        item {
-            WebsiteCarousel(
-                websites = websites,
-                defaultWebsiteId = defaultWebsiteId,
-                onOpenWebsite = onOpenWebsite,
-                onOpenDetails = onOpenWebsiteDetails,
-                onSetDefaultWebsite = onSetDefaultWebsite,
-                onSaveWebsite = onSaveWebsite,
-                onDeleteWebsite = onDeleteWebsite
             )
-        }
+    ) {
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize(),
+            state = listState,
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                start = 20.dp,
+                top = 88.dp,
+                end = 20.dp,
+                bottom = 28.dp
+            ),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            item {
+                WebsiteCarousel(
+                    websites = websites,
+                    defaultWebsiteId = defaultWebsiteId,
+                    onOpenWebsite = onOpenWebsite,
+                    onOpenDetails = onOpenWebsiteDetails,
+                    onSetDefaultWebsite = onSetDefaultWebsite,
+                    onSaveWebsite = onSaveWebsite,
+                    onDeleteWebsite = onDeleteWebsite
+                )
+            }
 
         item {
             HomeFeatureCarousel(
@@ -273,6 +350,154 @@ fun HomeScreen(
                             }
                         )
                     }
+                }
+            }
+            }
+        }
+
+        // 搜索条覆盖在列表上方，不参与LazyColumn高度计算；显隐时下面内容不会重新测量或突然跳位。
+        AnimatedVisibility(
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .zIndex(2f),
+            visible = quickSearchVisible || quickSearchFocused,
+            enter = slideInVertically(
+                animationSpec = tween(durationMillis = QUICK_SEARCH_ENTER_MILLIS),
+                initialOffsetY = { height -> -height / 2 }
+            ) + fadeIn(animationSpec = tween(durationMillis = QUICK_SEARCH_ENTER_MILLIS)),
+            exit = slideOutVertically(
+                animationSpec = tween(durationMillis = QUICK_SEARCH_EXIT_MILLIS),
+                targetOffsetY = { height -> -height / 2 }
+            ) + fadeOut(animationSpec = tween(durationMillis = QUICK_SEARCH_EXIT_MILLIS))
+        ) {
+            HomeQuickSearchBar(
+                query = quickSearchQuery,
+                onQueryChanged = { value -> quickSearchQuery = value.take(MAX_QUICK_SEARCH_LENGTH) },
+                onFocusChanged = { focused -> quickSearchFocused = focused },
+                onSearch = {
+                    val normalizedQuery = quickSearchQuery.trim()
+                    if (normalizedQuery.isNotEmpty()) {
+                        onQuickSearch(normalizedQuery)
+                    }
+                }
+            )
+        }
+    }
+}
+
+/**
+ * 显示首页顶部的轻量搜索入口。
+ *
+ * 使用方法：
+ * 由[HomeScreen]根据滚动方向控制可见性。用户输入关键词后点击“搜索”或键盘搜索键，
+ * 页面只提交文本，不在首页重复执行完整索引查询。
+ *
+ * @param query 当前输入文本。
+ * @param onQueryChanged 输入变化回调。
+ * @param onFocusChanged 输入框焦点变化回调，用于输入期间保持搜索条可见。
+ * @param onSearch 提交非空关键词的回调。
+ *
+ * @return 无返回值，直接输出一行搜索框和按钮。
+ */
+@Composable
+private fun HomeQuickSearchBar(
+    query: String,
+    onQueryChanged: (String) -> Unit,
+    onFocusChanged: (Boolean) -> Unit,
+    onSearch: () -> Unit
+) {
+    val searchIconColor = MaterialTheme.colorScheme.primary
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 18.dp, vertical = 10.dp),
+        shape = RoundedCornerShape(28.dp),
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.98f),
+        tonalElevation = 5.dp,
+        shadowElevation = 5.dp
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(56.dp)
+                .padding(start = 18.dp, end = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Canvas(
+                modifier = Modifier
+                    .size(22.dp)
+                    .semantics { contentDescription = "全局搜索" }
+            ) {
+                val strokeWidth = 1.8.dp.toPx()
+                drawCircle(
+                    color = searchIconColor,
+                    radius = size.minDimension * 0.29f,
+                    center = Offset(size.width * 0.42f, size.height * 0.42f),
+                    style = Stroke(width = strokeWidth)
+                )
+                drawLine(
+                    color = searchIconColor,
+                    start = Offset(size.width * 0.63f, size.height * 0.63f),
+                    end = Offset(size.width * 0.86f, size.height * 0.86f),
+                    strokeWidth = strokeWidth
+                )
+            }
+
+            BasicTextField(
+                modifier = Modifier
+                    .weight(1f)
+                    .onFocusChanged { state -> onFocusChanged(state.isFocused) },
+                value = query,
+                onValueChange = onQueryChanged,
+                singleLine = true,
+                textStyle = MaterialTheme.typography.bodyLarge.copy(
+                    color = MaterialTheme.colorScheme.onSurface
+                ),
+                cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                keyboardActions = KeyboardActions(onSearch = { onSearch() }),
+                decorationBox = { innerTextField ->
+                    Box(contentAlignment = Alignment.CenterStart) {
+                        if (query.isBlank()) {
+                            Text(
+                                text = "搜索账目、提醒、笔记、单词…",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        innerTextField()
+                    }
+                }
+            )
+
+            Surface(
+                enabled = query.isNotBlank(),
+                onClick = onSearch,
+                shape = RoundedCornerShape(20.dp),
+                color = if (query.isNotBlank()) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.surfaceContainerHighest
+                }
+            ) {
+                Box(
+                    modifier = Modifier
+                        .height(40.dp)
+                        .width(64.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "搜索",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = if (query.isNotBlank()) {
+                            MaterialTheme.colorScheme.onPrimary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        }
+                    )
                 }
             }
         }
@@ -399,6 +624,14 @@ private fun homeFeatureEntries(
             symbol = "记",
             statusLabel = "本地",
             onClick = { onOpenFeature(HomeFeatureId.NOTEBOOK) }
+        ),
+        HomeFeatureEntry(
+            id = HomeFeatureId.EBOOKS,
+            title = "电子书",
+            description = "导入书籍、多种翻页与阅读进度",
+            symbol = "书",
+            statusLabel = "离线",
+            onClick = { onOpenFeature(HomeFeatureId.EBOOKS) }
         )
     )
 }
@@ -1180,3 +1413,10 @@ private val THREE_ITEM_PAGE_MIN_WIDTH = 600.dp
 
 /** 首页功能卡片区域固定高度，保证每一页切换时纵向布局不跳动。 */
 private val HOME_FEATURE_PAGE_HEIGHT = 166.dp
+
+/** 首页快捷搜索允许的最大字符数，防止误粘贴超长内容导致页面状态异常。 */
+private const val MAX_QUICK_SEARCH_LENGTH = 80
+private const val QUICK_SEARCH_HIDE_DISTANCE_PX = 52
+private const val QUICK_SEARCH_SHOW_DISTANCE_PX = 72
+private const val QUICK_SEARCH_ENTER_MILLIS = 180
+private const val QUICK_SEARCH_EXIT_MILLIS = 140

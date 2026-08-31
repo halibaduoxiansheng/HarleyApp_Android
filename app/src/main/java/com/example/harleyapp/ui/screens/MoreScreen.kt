@@ -1,8 +1,12 @@
 package com.example.harleyapp.ui.screens
 
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -17,6 +21,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
@@ -24,6 +29,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -42,13 +48,17 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.pm.PackageInfoCompat
 import com.example.harleyapp.data.AppUpdateRepository
+import com.example.harleyapp.data.AppLockRepository
 import com.example.harleyapp.model.AppUpdateCheckResult
+import com.example.harleyapp.model.AppVisualTheme
 import com.example.harleyapp.model.AppUpdateDownloadPhase
 import com.example.harleyapp.model.AppUpdateDownloadState
 import com.example.harleyapp.model.AppUpdateInfo
@@ -75,7 +85,9 @@ import java.util.Locale
  *
  * @param modifier 外部传入的页面安全边距。
  * @param isDarkTheme 当前是否启用黑夜模式。
+ * @param visualTheme 当前整体角色风格主题。
  * @param onSetDarkTheme 保存并应用白天或黑夜模式的回调，成功返回true。
+ * @param onSetVisualTheme 保存并应用角色风格主题的回调，成功返回true。
  * @param deviceMonitor 读取Android公开内存和内部存储状态的服务。
  * @param apps 手机中当前可启动的应用列表。
  * @param selectedPackages 当前已选包名集合。
@@ -87,7 +99,9 @@ import java.util.Locale
 @Composable
 fun ProfileScreen(
     isDarkTheme: Boolean,
+    visualTheme: AppVisualTheme,
     onSetDarkTheme: (Boolean) -> Boolean,
+    onSetVisualTheme: (AppVisualTheme) -> Boolean,
     deviceMonitor: DeviceMonitor,
     apps: List<LaunchableApp>,
     selectedPackages: Set<String>,
@@ -98,6 +112,9 @@ fun ProfileScreen(
     val context = LocalContext.current
     val appInfo = remember(context) {
         readAppInfo(context)
+    }
+    val appLockRepository = remember(context) {
+        AppLockRepository(context.applicationContext)
     }
     var showAppPicker by rememberSaveable {
         mutableStateOf(false)
@@ -165,8 +182,14 @@ fun ProfileScreen(
         item {
             AppearanceCard(
                 isDarkTheme = isDarkTheme,
-                onSetDarkTheme = onSetDarkTheme
+                visualTheme = visualTheme,
+                onSetDarkTheme = onSetDarkTheme,
+                onSetVisualTheme = onSetVisualTheme
             )
+        }
+
+        item {
+            AppLockSettingsCard(repository = appLockRepository)
         }
 
         item {
@@ -257,7 +280,101 @@ fun ProfileScreen(
         item {
             PrivacyCard()
         }
+
+        item {
+            ProjectSourceCodeCard(
+                onOpenSource = { openProjectSourcePage(context) }
+            )
+        }
     }
+}
+
+/**
+ * 在“我的”页面最底部显示项目源码入口。
+ *
+ * 使用方法：
+ * 由[ProfileScreen]作为最后一个列表项调用。用户点击卡片或按钮时触发[onOpenSource]，Android
+ * 会优先交给已安装的GitHub客户端，否则使用系统浏览器；打开失败时在卡片内保留明确提示。
+ *
+ * @param onOpenSource 打开项目GitHub页面的回调，成功提交系统Intent返回true。
+ * @return 无返回值，直接输出源码说明、仓库地址和操作按钮。
+ */
+@Composable
+private fun ProjectSourceCodeCard(onOpenSource: () -> Boolean) {
+    var openFailed by rememberSaveable { mutableStateOf(false) }
+
+    /** 尝试打开项目页并同步刷新失败提示。 */
+    fun openSource() {
+        openFailed = !onOpenSource()
+    }
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { openSource() },
+        shape = RoundedCornerShape(22.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Column(
+            modifier = Modifier.padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(9.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "项目源码",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "查看完整代码、版本标签与最新发布记录",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Text(text = "GitHub ↗", color = MaterialTheme.colorScheme.primary)
+            }
+
+            Text(
+                text = "halibaduoxiansheng/HarleyApp_Android",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            OutlinedButton(onClick = { openSource() }) {
+                Text("查看项目源码")
+            }
+
+            if (openFailed) {
+                Text(
+                    text = "没有找到可打开网页的应用，请安装浏览器后重试。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 使用Android标准ACTION_VIEW打开当前项目的GitHub仓库。
+ *
+ * @param context 当前页面上下文，用于交给系统选择GitHub客户端或浏览器。
+ * @return Intent成功交给系统返回true；设备没有可处理应用或系统拒绝启动时返回false。
+ */
+private fun openProjectSourcePage(context: Context): Boolean {
+    return runCatching {
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(PROJECT_SOURCE_URL)).apply {
+            addCategory(Intent.CATEGORY_BROWSABLE)
+        }
+        context.startActivity(intent)
+        true
+    }.getOrDefault(false)
 }
 
 /**
@@ -1061,22 +1178,27 @@ private fun formatUpdateBytes(bytes: Long): String {
 }
 
 /**
- * 显示当前主题并提供一次点击即可完成的白天、黑夜模式切换。
+ * 显示日夜模式和可离线使用的原创角色风格主题选择器。
  *
  * 使用方法：
  * ProfileScreen传入当前主题状态和持久化回调。用户点击按钮后立即保存并重组整个应用界面；
  * 保存失败时保留当前主题并在卡片中显示提示。
  *
  * @param isDarkTheme 当前是否为黑夜模式。
+ * @param visualTheme 当前选中的角色风格主题。
  * @param onSetDarkTheme 保存目标主题的回调，成功返回true。
+ * @param onSetVisualTheme 保存角色风格主题的回调，成功返回true。
  *
  * @return 无返回值，直接输出外观设置卡片。
  */
 @Composable
 private fun AppearanceCard(
     isDarkTheme: Boolean,
-    onSetDarkTheme: (Boolean) -> Boolean
+    visualTheme: AppVisualTheme,
+    onSetDarkTheme: (Boolean) -> Boolean,
+    onSetVisualTheme: (AppVisualTheme) -> Boolean
 ) {
+    val context = LocalContext.current
     var saveError by rememberSaveable {
         mutableStateOf("")
     }
@@ -1088,50 +1210,152 @@ private fun AppearanceCard(
             containerColor = MaterialTheme.colorScheme.primaryContainer
         )
     ) {
-        Row(
+        Column(
             modifier = Modifier.padding(18.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(14.dp)
+            verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "外观模式",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold
-                )
-                Text(
-                    text = if (isDarkTheme) {
-                        "当前为黑夜模式，设置会在下次启动时保留"
-                    } else {
-                        "当前为白天模式，设置会在下次启动时保留"
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer
-                )
-                if (saveError.isNotBlank()) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = saveError,
+                        text = "外观模式",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = if (isDarkTheme) {
+                            "当前为黑夜模式，设置会在下次启动时保留"
+                        } else {
+                            "当前为白天模式，设置会在下次启动时保留"
+                        },
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error
+                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                    )
+                }
+
+                Button(
+                    onClick = {
+                        if (onSetDarkTheme(!isDarkTheme)) {
+                            saveError = ""
+                        } else {
+                            saveError = "主题保存失败，请重试"
+                        }
+                    }
+                ) {
+                    Text(
+                        text = if (isDarkTheme) {
+                            "切换到白天"
+                        } else {
+                            "切换到黑夜"
+                        }
                     )
                 }
             }
 
-            Button(
-                onClick = {
-                    if (onSetDarkTheme(!isDarkTheme)) {
-                        saveError = ""
-                    } else {
-                        saveError = "主题保存失败，请重试"
+            Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                Text(
+                    text = "角色风格主题",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold
+                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    AppVisualTheme.entries.forEach { theme ->
+                        val themeArtResourceId = remember(theme.artResourceName) {
+                            context.resources.getIdentifier(
+                                theme.artResourceName,
+                                "drawable",
+                                context.packageName
+                            )
+                        }
+                        FilterChip(
+                            selected = visualTheme == theme,
+                            onClick = {
+                                if (onSetVisualTheme(theme)) {
+                                    saveError = ""
+                                } else {
+                                    saveError = "主题保存失败，请重试"
+                                }
+                            },
+                            label = { Text(text = theme.displayName) },
+                            leadingIcon = {
+                                if (themeArtResourceId != 0) {
+                                    Image(
+                                        painter = painterResource(themeArtResourceId),
+                                        contentDescription = "${theme.displayName}人物预览",
+                                        modifier = Modifier
+                                            .size(26.dp)
+                                            .clip(RoundedCornerShape(9.dp)),
+                                        contentScale = ContentScale.Crop
+                                    )
+                                } else {
+                                    Text(text = theme.symbol)
+                                }
+                            }
+                        )
                     }
                 }
-            ) {
-                Text(
-                    text = if (isDarkTheme) {
-                        "切换到白天"
-                    } else {
-                        "切换到黑夜"
+                val selectedArtResourceId = remember(visualTheme.artResourceName) {
+                    context.resources.getIdentifier(
+                        visualTheme.artResourceName,
+                        "drawable",
+                        context.packageName
+                    )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (selectedArtResourceId != 0) {
+                        Image(
+                            painter = painterResource(selectedArtResourceId),
+                            contentDescription = "${visualTheme.displayName}大图预览",
+                            modifier = Modifier
+                                .size(94.dp)
+                                .clip(RoundedCornerShape(20.dp)),
+                            contentScale = ContentScale.Crop
+                        )
                     }
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(5.dp)
+                    ) {
+                        Text(
+                            text = "${visualTheme.symbol} ${visualTheme.description}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                        Text(
+                            text = if (visualTheme.artResourceName.isBlank()) {
+                                "该主题为纯色界面，不使用角色或App图标"
+                            } else {
+                                "角色素材：${visualTheme.artCredit}"
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                    }
+                }
+                Text(
+                    text = "共10个人物主题与1个无角色纯色主题；App图标不会作为角色主题素材。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                )
+            }
+
+            if (saveError.isNotBlank()) {
+                Text(
+                    text = saveError,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
                 )
             }
         }
@@ -1251,3 +1475,7 @@ private const val UPDATE_DOWNLOAD_REFRESH_INTERVAL_MILLIS = 800L
 
 /** “我的”页面容量信息刷新间隔；内存和存储变化较慢，无需沿用首页网络速率的一秒采样。 */
 private const val DEVICE_STATUS_REFRESH_INTERVAL_MILLIS = 5_000L
+
+/** “我的”页面源码入口使用的公开GitHub仓库地址。 */
+private const val PROJECT_SOURCE_URL =
+    "https://github.com/halibaduoxiansheng/HarleyApp_Android"

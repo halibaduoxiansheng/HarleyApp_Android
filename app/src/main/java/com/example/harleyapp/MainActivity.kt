@@ -14,8 +14,14 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.setValue
 import androidx.core.view.WindowCompat
 import com.example.harleyapp.data.AppearanceRepository
+import com.example.harleyapp.data.AppLockRepository
+import com.example.harleyapp.data.CompanionRepository
+import com.example.harleyapp.model.AppVisualTheme
 import com.example.harleyapp.ui.HarleyApp
+import com.example.harleyapp.ui.screens.AppUnlockScreen
+import com.example.harleyapp.ui.screens.HalibaduoStartupScreen
 import com.example.harleyapp.ui.theme.HarleyAppTheme
+import java.time.LocalDate
 
 class MainActivity : ComponentActivity() {
 
@@ -48,10 +54,33 @@ class MainActivity : ComponentActivity() {
             val appearanceRepository = remember {
                 AppearanceRepository(applicationContext)
             }
+            val appLockRepository = remember {
+                AppLockRepository(applicationContext)
+            }
+            val startupCompanionProgress = remember {
+                CompanionRepository(applicationContext).getProgress(LocalDate.now().toEpochDay())
+            }
             var darkThemeEnabled by rememberSaveable {
                 mutableStateOf(
                     appearanceRepository.isDarkTheme(systemDarkTheme)
                 )
+            }
+            var visualThemeName by rememberSaveable {
+                mutableStateOf(appearanceRepository.getVisualTheme().name)
+            }
+            val visualTheme = AppVisualTheme.fromStoredName(visualThemeName)
+            val initialUnlockRequired = remember {
+                if (appLockRepository.completeRecoveryIfDue()) {
+                    false
+                } else {
+                    appLockRepository.getState().enabled
+                }
+            }
+            var startupFinished by rememberSaveable {
+                mutableStateOf(false)
+            }
+            var unlockedForThisSession by rememberSaveable {
+                mutableStateOf(!initialUnlockRequired)
             }
 
             // Compose主题和系统栏图标同步切换，避免白色背景使用白色图标或黑色背景使用黑色图标。
@@ -65,22 +94,48 @@ class MainActivity : ComponentActivity() {
             // 主题状态放在MaterialTheme外层，保存成功后立即重组整个页面，实现无需重启的一键切换。
             HarleyAppTheme(
                 darkTheme = darkThemeEnabled,
+                visualTheme = visualTheme,
                 dynamicColor = false
             ) {
-                HarleyApp(
-                    isDarkTheme = darkThemeEnabled,
-                    openTodayRequest = openTodayRequest,
-                    onOpenTodayRequestConsumed = {
-                        openTodayRequest = false
-                    },
-                    onSetDarkTheme = { enabled ->
-                        val saved = appearanceRepository.setDarkTheme(enabled)
-                        if (saved) {
-                            darkThemeEnabled = enabled
+                when {
+                    !startupFinished -> HalibaduoStartupScreen(
+                        companionCategory = startupCompanionProgress.category,
+                        companionLevel = startupCompanionProgress.level,
+                        onFinished = {
+                            startupFinished = true
                         }
-                        saved
-                    }
-                )
+                    )
+
+                    !unlockedForThisSession -> AppUnlockScreen(
+                        repository = appLockRepository,
+                        onUnlocked = {
+                            unlockedForThisSession = true
+                        }
+                    )
+
+                    else -> HarleyApp(
+                        isDarkTheme = darkThemeEnabled,
+                        visualTheme = visualTheme,
+                        openTodayRequest = openTodayRequest,
+                        onOpenTodayRequestConsumed = {
+                            openTodayRequest = false
+                        },
+                        onSetDarkTheme = { enabled ->
+                            val saved = appearanceRepository.setDarkTheme(enabled)
+                            if (saved) {
+                                darkThemeEnabled = enabled
+                            }
+                            saved
+                        },
+                        onSetVisualTheme = { theme ->
+                            val saved = appearanceRepository.setVisualTheme(theme)
+                            if (saved) {
+                                visualThemeName = theme.name
+                            }
+                            saved
+                        }
+                    )
+                }
             }
         }
     }

@@ -34,6 +34,47 @@ data class EnglishWord(
     val learnedCount: Int
 )
 
+/**
+ * 单词详情页最终用于展示和朗读的例句。
+ *
+ * @param english 可直接提交给离线TTS的英文例句。
+ * @param chinese 可选的中文翻译。
+ * @param isGenerated true表示原词库没有专属例句，本例句由App在本机按固定模板补齐。
+ */
+data class EnglishLearningExample(
+    val english: String,
+    val chinese: String,
+    val isGenerated: Boolean
+)
+
+/**
+ * 取得任何单词都可展示和朗读的离线学习例句。
+ *
+ * 使用方法：
+ * 单词详情页把当前[EnglishWord]传入本函数。词库已有英文例句时完整保留原例句和翻译；
+ * 没有专属例句时，使用只包含当前单词名称的通用学习句，保证“朗读例句”始终有实际文本。
+ * 本函数不访问网络、不调用生成式服务，也不会修改原始词库。
+ *
+ * @param word 当前需要显示独立学习页的单词。
+ * @return 已有例句或本机补齐的通用例句，以及是否为补齐内容的标记。
+ */
+fun resolveEnglishLearningExample(word: EnglishWord): EnglishLearningExample {
+    if (word.exampleEn.isNotBlank()) {
+        return EnglishLearningExample(
+            english = word.exampleEn.trim(),
+            chinese = word.exampleZh.trim(),
+            isGenerated = false
+        )
+    }
+
+    val normalizedWord = word.word.trim().ifBlank { "word" }
+    return EnglishLearningExample(
+        english = "I am learning how to use the word \"$normalizedWord\".",
+        chinese = "我正在学习如何使用单词“$normalizedWord”。",
+        isGenerated = true
+    )
+}
+
 /** “全部”分栏使用的特殊筛选值，不与0至3次学习进度冲突。 */
 const val ENGLISH_WORD_ALL_STAGES = -1
 
@@ -107,7 +148,7 @@ fun chooseNextEnglishWord(
  * 使用方法：
  * 英语学习列表在搜索文字或切换“全部、未学会、学会1至3次”分栏后调用本函数。英文搜索
  * 不区分大小写，并依次按完全匹配、前缀匹配和包含匹配排序；中文输入会匹配中文释义，
- * 因此输入“goo”可以优先得到“good”，输入“美好”也可以找到含该释义的单词。
+ * 因此输入“goo”可以优先得到“good”，输入“美好”也可以找到含该释义或例句翻译的单词。
  *
  * @param words 当前完整单词列表，列表原始顺序代表词库推荐顺序。
  * @param query 用户输入的英文拼写或中文释义；空白表示不限制关键词。
@@ -136,7 +177,9 @@ fun searchEnglishWords(
             spelling.contains(normalizedQuery) -> 2
             word.meaningZh.contains(normalizedQuery, ignoreCase = true) -> 3
             word.definitionEn.contains(normalizedQuery, ignoreCase = true) -> 4
-            word.tags.any { tag -> tag.contains(normalizedQuery, ignoreCase = true) } -> 5
+            word.exampleEn.contains(normalizedQuery, ignoreCase = true) -> 5
+            word.exampleZh.contains(normalizedQuery, ignoreCase = true) -> 6
+            word.tags.any { tag -> tag.contains(normalizedQuery, ignoreCase = true) } -> 7
             else -> return@mapIndexedNotNull null
         }
         RankedEnglishWord(

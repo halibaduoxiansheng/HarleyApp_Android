@@ -70,6 +70,20 @@
         </activity>
 
         <!--
+            为记事本图文和文章包签发临时只读Content Uri。
+            路径白名单仅覆盖cache/shared，接收方无法访问App数据库或其他私有文件。
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
+        <!--
             微信支付自动记账和未查看消息重复提醒共用系统通知监听服务。
             服务只能在用户主动授予“通知使用权”后由Android系统绑定，不能在后台自行提权。
         -->

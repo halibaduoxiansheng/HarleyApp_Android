@@ -19,6 +19,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -30,6 +31,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.harleyapp.data.GlobalSearchRepository
+import com.example.harleyapp.model.EnglishWord
+import com.example.harleyapp.model.LaunchableApp
 import com.example.harleyapp.model.LocalSearchResult
 import com.example.harleyapp.model.LocalSearchType
 
@@ -41,6 +44,10 @@ import com.example.harleyapp.model.LocalSearchType
  * 返回宿主导航到原账目、提醒、运动或网站页面。
  *
  * @param repository 全局本地搜索仓库。
+ * @param englishWords 已加载的5000词离线词库和学习进度。
+ * @param launchableApps 手机中已读取的可启动应用列表。
+ * @param initialQuery 首页快捷搜索传入的一次性初始关键词；空文本表示不覆盖当前输入。
+ * @param onInitialQueryConsumed 初始关键词写入本页状态后的消费回调，防止重组时重复覆盖用户修改。
  * @param onOpenResult 点击结果后的导航回调。
  * @param onBack 返回功能中心的回调。
  * @param modifier 外部安全边距和布局修饰器。
@@ -50,14 +57,31 @@ import com.example.harleyapp.model.LocalSearchType
 @Composable
 fun GlobalSearchScreen(
     repository: GlobalSearchRepository,
+    englishWords: List<EnglishWord>,
+    launchableApps: List<LaunchableApp>,
+    initialQuery: String,
+    onInitialQueryConsumed: () -> Unit,
     onOpenResult: (LocalSearchResult) -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     var query by rememberSaveable { mutableStateOf("") }
     var selectedTypeName by rememberSaveable { mutableStateOf("") }
-    val allResults = remember(query) {
-        repository.search(query)
+
+    // 首页提交的关键词只接收一次，用户进入搜索页后仍可自由增删内容。
+    LaunchedEffect(initialQuery) {
+        if (initialQuery.isNotBlank()) {
+            query = initialQuery.take(MAX_QUERY_LENGTH)
+            selectedTypeName = ""
+            onInitialQueryConsumed()
+        }
+    }
+    val allResults = remember(query, englishWords, launchableApps) {
+        repository.search(
+            rawQuery = query,
+            englishWords = englishWords,
+            launchableApps = launchableApps
+        )
     }
     val selectedType = LocalSearchType.entries.firstOrNull { type ->
         type.name == selectedTypeName
@@ -85,7 +109,7 @@ fun GlobalSearchScreen(
                 fontWeight = FontWeight.Bold
             )
             Text(
-                text = "只搜索本机账目、提醒、运动记录、网站和待确认通知，不保存搜索词。",
+                text = "覆盖账目、提醒、运动、网站、英语、记事本、电子书、手机应用和功能入口，不保存搜索词。",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -96,7 +120,7 @@ fun GlobalSearchScreen(
                 modifier = Modifier.fillMaxWidth(),
                 value = query,
                 onValueChange = { value -> query = value.take(MAX_QUERY_LENGTH) },
-                label = { Text("输入名称、备注、金额或网址") },
+                label = { Text("输入名称、备注、单词、应用或功能") },
                 singleLine = true
             )
         }
@@ -132,7 +156,7 @@ fun GlobalSearchScreen(
             query.isBlank() -> item {
                 SearchEmptyCard(
                     title = "输入关键词开始搜索",
-                    subtitle = "例如商户名称、提醒内容、运动项目或网站名称"
+                    subtitle = "例如商户、提醒、运动、单词、文章、书名、应用或功能名称"
                 )
             }
             visibleResults.isEmpty() -> item {

@@ -1,5 +1,6 @@
 package com.example.harleyapp.ui.screens
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -16,11 +17,17 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.harleyapp.ui.components.bouncyClickable
+import com.example.harleyapp.ui.theme.LocalAppVisualTheme
+import androidx.compose.runtime.remember
 
 /**
  * 显示一个只负责进入独立功能页的通用首页卡片。
@@ -48,6 +55,15 @@ fun FeatureEntryCard(
     modifier: Modifier = Modifier,
     statusLabel: String? = null
 ) {
+    val context = LocalContext.current
+    val visualTheme = LocalAppVisualTheme.current
+    val themeArtResourceId = remember(visualTheme.artResourceName) {
+        context.resources.getIdentifier(
+            visualTheme.artResourceName,
+            "drawable",
+            context.packageName
+        )
+    }
     Card(
         modifier = modifier
             .fillMaxWidth()
@@ -73,11 +89,18 @@ fun FeatureEntryCard(
                 shape = CircleShape,
                 color = MaterialTheme.colorScheme.primaryContainer
             ) {
-                Row(
-                    horizontalArrangement = Arrangement.Center,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
+                if (themeArtResourceId != 0) {
+                    Image(
+                        painter = painterResource(themeArtResourceId),
+                        contentDescription = "${visualTheme.displayName}人物",
+                        modifier = Modifier
+                            .size(52.dp)
+                            .clip(CircleShape),
+                        contentScale = ContentScale.Crop
+                    )
+                } else {
                     Text(
+                        modifier = Modifier.padding(12.dp),
                         text = symbol,
                         style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.Bold,

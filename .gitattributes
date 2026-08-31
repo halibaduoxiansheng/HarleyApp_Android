@@ -1,0 +1,2 @@
+# 公版电子书保留来源文本中的排版空格，不把其视为源码空白错误。
+app/src/main/assets/starter_ebooks/*.txt -whitespace

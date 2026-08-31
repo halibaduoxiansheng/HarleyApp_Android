@@ -19,7 +19,8 @@ enum class HomeFeatureId {
     BACKUP,
     LOCAL_CLEANUP,
     ENGLISH_WORDS,
-    NOTEBOOK
+    NOTEBOOK,
+    EBOOKS
 }
 
 /** 首次安装或旧版本升级时沿用首页原有的三个功能入口。 */

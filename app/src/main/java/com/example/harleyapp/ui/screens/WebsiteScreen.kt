@@ -19,6 +19,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -47,6 +48,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -55,15 +57,12 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.core.net.toUri
 import com.example.harleyapp.data.WebsiteToolRepository
-import com.example.harleyapp.model.MAX_WEBSITE_PLAYBACK_RATE
-import com.example.harleyapp.model.MIN_WEBSITE_PLAYBACK_RATE
-import com.example.harleyapp.model.WEBSITE_PLAYBACK_RATE_STEP
+import com.example.harleyapp.model.EbookWebDownloadRequest
 import com.example.harleyapp.model.WebsiteShortcut
 import com.example.harleyapp.model.WebsiteToolSettings
 import com.example.harleyapp.web.WebsiteScriptController
 import kotlinx.coroutines.delay
 import java.util.Locale
-import kotlin.math.roundToInt
 
 /**
  * 在应用内部安全加载用户当前选择的网站，并提供网页工具、增强视频全屏、刷新和外部浏览器入口。
@@ -75,6 +74,7 @@ import kotlin.math.roundToInt
  * @param website 当前需要加载的网站；用户删除全部网站时传null。
  * @param onManageWebsites 无网站时返回首页添加网站的回调。
  * @param onFullscreenChanged 自定义视频全屏状态回调，用于让宿主隐藏底部导航。
+ * @param onEbookDownloadRequested 网页触发下载时，把公开直链交给电子书仓库的回调。
  * @param modifier 外部传入的页面安全边距。
  *
  * @return 无返回值，直接输出网站浏览页面。
@@ -84,6 +84,7 @@ fun WebsiteScreen(
     website: WebsiteShortcut?,
     onManageWebsites: () -> Unit,
     onFullscreenChanged: (Boolean) -> Unit,
+    onEbookDownloadRequested: (EbookWebDownloadRequest) -> Unit,
     modifier: Modifier = Modifier
 ) {
     if (website == null) {
@@ -123,7 +124,20 @@ fun WebsiteScreen(
     var fullscreenContent by remember(website.id) {
         mutableStateOf<FullscreenWebContent?>(null)
     }
+    var fullscreenControlsVisible by remember(website.id) {
+        mutableStateOf(true)
+    }
+    var fullscreenControlsLocked by remember(website.id) {
+        mutableStateOf(false)
+    }
+    var fullscreenControlRevision by remember(website.id) {
+        mutableIntStateOf(0)
+    }
+    var showFullscreenRatePicker by remember(website.id) {
+        mutableStateOf(false)
+    }
     val currentOnFullscreenChanged by rememberUpdatedState(onFullscreenChanged)
+    val currentOnEbookDownloadRequested by rememberUpdatedState(onEbookDownloadRequested)
     var loadingProgress by remember {
         mutableIntStateOf(0)
     }
@@ -133,10 +147,20 @@ fun WebsiteScreen(
     var canGoBack by remember {
         mutableStateOf(false)
     }
+
+    /** 显示全屏控制层并重新开始自动隐藏倒计时。 */
+    fun revealFullscreenControls() {
+        fullscreenControlsVisible = true
+        fullscreenControlRevision++
+    }
+
     /** 关闭当前全屏View并只回调网站一次。 */
     fun exitFullscreen() {
         val content = fullscreenContent ?: return
         fullscreenContent = null
+        fullscreenControlsLocked = false
+        fullscreenControlsVisible = true
+        showFullscreenRatePicker = false
         content.close()
     }
 
@@ -160,6 +184,10 @@ fun WebsiteScreen(
             onShowFullscreen = { view, callback ->
                 fullscreenContent?.close()
                 fullscreenContent = FullscreenWebContent(view, callback)
+                fullscreenControlsLocked = false
+                fullscreenControlsVisible = true
+                showFullscreenRatePicker = false
+                fullscreenControlRevision++
             },
             onHideFullscreen = {
                 exitFullscreen()
@@ -172,6 +200,15 @@ fun WebsiteScreen(
                         "第${activeMatchOrdinal + 1}项，共${numberOfMatches}项"
                     }
                 }
+            },
+            onDownloadRequested = { url, contentDisposition, mimeType ->
+                currentOnEbookDownloadRequested(
+                    EbookWebDownloadRequest(
+                        url = url,
+                        contentDisposition = contentDisposition,
+                        mimeType = mimeType
+                    )
+                )
             }
         )
     }
@@ -206,7 +243,11 @@ fun WebsiteScreen(
 
     // 全屏优先于网页历史；用户按一次返回即可恢复工具栏和系统栏。
     BackHandler(enabled = fullscreenContent != null || canGoBack) {
-        if (fullscreenContent != null) {
+        if (fullscreenContent != null && fullscreenControlsLocked) {
+            fullscreenControlsLocked = false
+            toolMessage = "屏幕锁已解除"
+            revealFullscreenControls()
+        } else if (fullscreenContent != null) {
             exitFullscreen()
         } else {
             webView.goBack()
@@ -216,6 +257,22 @@ fun WebsiteScreen(
     // 通知外层Scaffold隐藏底部导航；页面销毁时无条件恢复，避免其他一级页面丢失导航栏。
     LaunchedEffect(fullscreenContent != null) {
         currentOnFullscreenChanged(fullscreenContent != null)
+    }
+
+    // 全屏工具条与常见播放器进度条一致，停止操作后自动隐藏；倍速选择器打开时保持显示。
+    LaunchedEffect(
+        fullscreenContent,
+        fullscreenControlsVisible,
+        fullscreenControlRevision,
+        showFullscreenRatePicker
+    ) {
+        if (fullscreenContent != null &&
+            fullscreenControlsVisible &&
+            !showFullscreenRatePicker
+        ) {
+            delay(FULLSCREEN_CONTROLS_HIDE_DELAY_MILLIS)
+            fullscreenControlsVisible = false
+        }
     }
     DisposableEffect(Unit) {
         onDispose {
@@ -317,122 +374,169 @@ fun WebsiteScreen(
                 }
             }
 
-            Surface(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth(),
-                color = Color.Black.copy(alpha = 0.38f),
-                shape = MaterialTheme.shapes.large
+            // 工具条隐藏时，第一次点击只负责唤醒控件；锁屏后该层持续拦截网页播放器触摸。
+            if (fullscreenControlsLocked ||
+                !fullscreenControlsVisible ||
+                showFullscreenRatePicker
             ) {
-                Row(
+                Box(
                     modifier = Modifier
-                        .horizontalScroll(rememberScrollState())
-                        .padding(horizontal = 8.dp, vertical = 3.dp),
-                    horizontalArrangement = Arrangement.spacedBy(1.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                        .fillMaxSize()
+                        .pointerInput(
+                            fullscreenControlsLocked,
+                            fullscreenControlsVisible,
+                            showFullscreenRatePicker
+                        ) {
+                            detectTapGestures {
+                                if (showFullscreenRatePicker) {
+                                    showFullscreenRatePicker = false
+                                }
+                                revealFullscreenControls()
+                            }
+                        }
+                )
+            }
+
+            if (fullscreenControlsVisible) {
+                Surface(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth(),
+                    color = Color.Black.copy(alpha = 0.46f),
+                    shape = MaterialTheme.shapes.large
                 ) {
-                    FullscreenToolButton(
-                        text = "倍速−",
-                        onClick = {
-                            updateToolSettings(
-                                toolSettings.copy(
-                                    playbackRate = adjustedPlaybackRate(
-                                        toolSettings.playbackRate,
-                                        -WEBSITE_PLAYBACK_RATE_STEP
+                    if (fullscreenControlsLocked) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                modifier = Modifier.weight(1f),
+                                text = "屏幕已锁定，播放器触摸已拦截",
+                                color = Color.White,
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                            FullscreenToolButton(
+                                text = "解除锁定",
+                                active = true,
+                                onClick = {
+                                    fullscreenControlsLocked = false
+                                    toolMessage = "屏幕锁已解除"
+                                    revealFullscreenControls()
+                                }
+                            )
+                        }
+                    } else {
+                        Row(
+                            modifier = Modifier
+                                .horizontalScroll(rememberScrollState())
+                                .padding(horizontal = 8.dp, vertical = 3.dp),
+                            horizontalArrangement = Arrangement.spacedBy(1.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            FullscreenToolButton(
+                                text = "${formatToolbarRate(toolSettings.playbackRate)} ▾",
+                                active = toolSettings.playbackRate != 1f,
+                                onClick = {
+                                    showFullscreenRatePicker = true
+                                    revealFullscreenControls()
+                                }
+                            )
+                            FullscreenToolButton(
+                                text = "播放/暂停",
+                                onClick = {
+                                    revealFullscreenControls()
+                                    scriptController.togglePlayback(webView) { count ->
+                                        toolMessage = mediaActionMessage(count, "已切换播放状态")
+                                    }
+                                }
+                            )
+                            FullscreenToolButton(
+                                text = "-10秒",
+                                onClick = {
+                                    revealFullscreenControls()
+                                    scriptController.seekBy(webView, -10) { count ->
+                                        toolMessage = mediaActionMessage(count, "已快退10秒")
+                                    }
+                                }
+                            )
+                            FullscreenToolButton(
+                                text = "+10秒",
+                                onClick = {
+                                    revealFullscreenControls()
+                                    scriptController.seekBy(webView, 10) { count ->
+                                        toolMessage = mediaActionMessage(count, "已快进10秒")
+                                    }
+                                }
+                            )
+                            FullscreenToolButton(
+                                text = if (toolSettings.videoMuted) "静音开" else "静音",
+                                active = toolSettings.videoMuted,
+                                onClick = {
+                                    revealFullscreenControls()
+                                    updateToolSettings(
+                                        toolSettings.copy(videoMuted = !toolSettings.videoMuted)
                                     )
-                                )
+                                }
                             )
-                        }
-                    )
-                    FullscreenToolButton(
-                        text = formatToolbarRate(toolSettings.playbackRate),
-                        active = toolSettings.playbackRate != 1f,
-                        onClick = {
-                            updateToolSettings(toolSettings.copy(playbackRate = 1f))
-                        }
-                    )
-                    FullscreenToolButton(
-                        text = "倍速+",
-                        onClick = {
-                            updateToolSettings(
-                                toolSettings.copy(
-                                    playbackRate = adjustedPlaybackRate(
-                                        toolSettings.playbackRate,
-                                        WEBSITE_PLAYBACK_RATE_STEP
+                            FullscreenToolButton(
+                                text = if (toolSettings.videoLoopEnabled) "循环开" else "循环",
+                                active = toolSettings.videoLoopEnabled,
+                                onClick = {
+                                    revealFullscreenControls()
+                                    updateToolSettings(
+                                        toolSettings.copy(
+                                            videoLoopEnabled = !toolSettings.videoLoopEnabled
+                                        )
                                     )
-                                )
+                                }
+                            )
+                            FullscreenToolButton(
+                                text = if (toolSettings.nightModeEnabled) "夜间开" else "夜间",
+                                active = toolSettings.nightModeEnabled,
+                                onClick = {
+                                    revealFullscreenControls()
+                                    updateToolSettings(
+                                        toolSettings.copy(
+                                            nightModeEnabled = !toolSettings.nightModeEnabled
+                                        )
+                                    )
+                                }
+                            )
+                            FullscreenToolButton(
+                                text = "锁屏",
+                                onClick = {
+                                    fullscreenControlsLocked = true
+                                    showFullscreenRatePicker = false
+                                    toolMessage = "屏幕已锁定，点击屏幕后可解除"
+                                    revealFullscreenControls()
+                                }
+                            )
+                            FullscreenToolButton(
+                                text = "退出全屏",
+                                onClick = ::exitFullscreen
                             )
                         }
-                    )
-                    FullscreenToolButton(
-                        text = "播放/暂停",
-                        onClick = {
-                            scriptController.togglePlayback(webView) { count ->
-                                toolMessage = mediaActionMessage(count, "已切换播放状态")
-                            }
-                        }
-                    )
-                    FullscreenToolButton(
-                        text = "-10秒",
-                        onClick = {
-                            scriptController.seekBy(webView, -10) { count ->
-                                toolMessage = mediaActionMessage(count, "已快退10秒")
-                            }
-                        }
-                    )
-                    FullscreenToolButton(
-                        text = "+10秒",
-                        onClick = {
-                            scriptController.seekBy(webView, 10) { count ->
-                                toolMessage = mediaActionMessage(count, "已快进10秒")
-                            }
-                        }
-                    )
-                    FullscreenToolButton(
-                        text = if (toolSettings.videoMuted) "静音开" else "静音",
-                        active = toolSettings.videoMuted,
-                        onClick = {
-                            updateToolSettings(
-                                toolSettings.copy(videoMuted = !toolSettings.videoMuted)
-                            )
-                        }
-                    )
-                    FullscreenToolButton(
-                        text = if (toolSettings.videoLoopEnabled) "循环开" else "循环",
-                        active = toolSettings.videoLoopEnabled,
-                        onClick = {
-                            updateToolSettings(
-                                toolSettings.copy(
-                                    videoLoopEnabled = !toolSettings.videoLoopEnabled
-                                )
-                            )
-                        }
-                    )
-                    FullscreenToolButton(
-                        text = if (toolSettings.nightModeEnabled) "夜间开" else "夜间",
-                        active = toolSettings.nightModeEnabled,
-                        onClick = {
-                            updateToolSettings(
-                                toolSettings.copy(
-                                    nightModeEnabled = !toolSettings.nightModeEnabled
-                                )
-                            )
-                        }
-                    )
-                    FullscreenToolButton(
-                        text = if (toolSettings.blockAutoplay) "防自动播开" else "防自动播",
-                        active = toolSettings.blockAutoplay,
-                        onClick = {
-                            updateToolSettings(
-                                toolSettings.copy(blockAutoplay = !toolSettings.blockAutoplay)
-                            )
-                        }
-                    )
-                    FullscreenToolButton(
-                        text = "退出全屏",
-                        onClick = ::exitFullscreen
-                    )
+                    }
                 }
+            }
+
+            if (showFullscreenRatePicker && !fullscreenControlsLocked) {
+                FullscreenPlaybackRatePicker(
+                    modifier = Modifier.align(Alignment.Center),
+                    selectedRate = toolSettings.playbackRate,
+                    onRateSelected = { selectedRate ->
+                        updateToolSettings(toolSettings.copy(playbackRate = selectedRate))
+                        showFullscreenRatePicker = false
+                        toolMessage = "播放速度已切换为 ${formatToolbarRate(selectedRate)}"
+                        revealFullscreenControls()
+                    },
+                    onDismiss = {
+                        showFullscreenRatePicker = false
+                        revealFullscreenControls()
+                    }
+                )
             }
         }
         return
@@ -704,6 +808,7 @@ private fun EmptyWebsiteScreen(
  * @param onShowFullscreen 网站请求显示自定义全屏View的回调。
  * @param onHideFullscreen 网站请求退出自定义全屏的回调。
  * @param onFindResult 页内查找位置和总数回调。
+ * @param onDownloadRequested 网页下载公开直链、文件名响应头和MIME类型回调。
  *
  * @return 已完成安全设置并开始加载网站的WebView实例。
  */
@@ -718,7 +823,8 @@ private fun createWebsiteWebView(
     onPageFinished: () -> Unit,
     onShowFullscreen: (View, WebChromeClient.CustomViewCallback) -> Unit,
     onHideFullscreen: () -> Unit,
-    onFindResult: (Int, Int, Boolean) -> Unit
+    onFindResult: (Int, Int, Boolean) -> Unit,
+    onDownloadRequested: (String, String, String) -> Unit
 ): WebView {
     return WebView(context).apply {
         settings.apply {
@@ -758,6 +864,18 @@ private fun createWebsiteWebView(
             onHideFullscreenCallback = onHideFullscreen
         )
         setFindListener(onFindResult)
+        setDownloadListener { url, _, contentDisposition, mimeType, _ ->
+            val safeUrl = url.orEmpty()
+            if (safeUrl.isBlank()) {
+                Log.e(TAG, "Website reported an empty download URL")
+            } else {
+                onDownloadRequested(
+                    safeUrl,
+                    contentDisposition.orEmpty(),
+                    mimeType.orEmpty()
+                )
+            }
+        }
         loadUrl(initialUrl)
     }
 }
@@ -1025,6 +1143,69 @@ private fun FullscreenToolButton(
 }
 
 /**
+ * 在全屏视频中央显示可直接选择的常用播放速度。
+ *
+ * 使用方法：
+ * 用户点击全屏工具条当前倍速后显示本组件，不需要再以0.05为步长反复点击。点击任一速度
+ * 立即保存并应用，点击取消或弹层外部由宿主关闭。
+ *
+ * @param selectedRate 当前已保存的播放速度。
+ * @param onRateSelected 用户选择预设速度后的回调。
+ * @param onDismiss 关闭选择器但不改变速度的回调。
+ * @param modifier 外部定位修饰器。
+ *
+ * @return 无返回值，直接输出全屏倍速选择面板。
+ */
+@Composable
+private fun FullscreenPlaybackRatePicker(
+    selectedRate: Float,
+    onRateSelected: (Float) -> Unit,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier.padding(24.dp),
+        color = Color.Black.copy(alpha = 0.78f),
+        shape = MaterialTheme.shapes.extraLarge
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text(
+                text = "直接选择播放速度",
+                color = Color.White,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold
+            )
+            FULLSCREEN_PLAYBACK_RATE_PRESETS.chunked(4).forEach { rateRow ->
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    rateRow.forEach { rate ->
+                        val selected = kotlin.math.abs(rate - selectedRate) < 0.001f
+                        if (selected) {
+                            Button(onClick = { onRateSelected(rate) }) {
+                                Text(text = formatToolbarRate(rate))
+                            }
+                        } else {
+                            TextButton(onClick = { onRateSelected(rate) }) {
+                                Text(text = formatToolbarRate(rate), color = Color.White)
+                            }
+                        }
+                    }
+                }
+            }
+            TextButton(onClick = onDismiss) {
+                Text(text = "取消", color = Color.White)
+            }
+        }
+    }
+}
+
+/**
  * 从可能经过主题包装的Compose Context中查找Activity。
  *
  * @return 当前Activity；无法解析时返回null，此时仍可展示网页但不控制系统栏和方向。
@@ -1063,19 +1244,6 @@ private fun formatToolbarRate(rate: Float): String {
 }
 
 /**
- * 按0.05步长调整并限制视频倍速。
- *
- * @param currentRate 当前播放倍速。
- * @param delta 本次增减量。
- * @return 0.25到5.00范围内且对齐0.05步长的新倍速。
- */
-private fun adjustedPlaybackRate(currentRate: Float, delta: Float): Float {
-    val changed = currentRate + delta
-    return ((changed / WEBSITE_PLAYBACK_RATE_STEP).roundToInt() * WEBSITE_PLAYBACK_RATE_STEP)
-        .coerceIn(MIN_WEBSITE_PLAYBACK_RATE, MAX_WEBSITE_PLAYBACK_RATE)
-}
-
-/**
  * 根据脚本找到的媒体数量生成操作反馈。
  *
  * @param mediaCount 脚本找到并尝试控制的媒体数量。
@@ -1092,4 +1260,18 @@ private fun mediaActionMessage(mediaCount: Int, successMessage: String): String 
 
 private const val TAG = "WebsiteScreen"
 private const val TOOL_MESSAGE_DURATION_MILLIS = 2_600L
+private const val FULLSCREEN_CONTROLS_HIDE_DELAY_MILLIS = 3_000L
 private val FULLSCREEN_ACTIVE_COLOR = Color(0xFFFFD54F)
+private val FULLSCREEN_PLAYBACK_RATE_PRESETS = listOf(
+    0.25f,
+    0.50f,
+    0.75f,
+    1.00f,
+    1.25f,
+    1.50f,
+    2.00f,
+    2.50f,
+    3.00f,
+    4.00f,
+    5.00f
+)

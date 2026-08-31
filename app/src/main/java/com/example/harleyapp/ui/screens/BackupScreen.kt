@@ -45,9 +45,10 @@ import java.util.Locale
  * 显示跨手机本地备份的导出、校验和恢复流程。
  *
  * 使用方法：
- * 从功能卡片进入本页面。用户可直接导出明文备份，也可先输入密码生成AES-GCM加密备份；
- * 导入时先选择文件并校验摘要，只有再次确认后才会替换数据。所有文件读写均通过Android
- * 系统文件选择器完成，本页面不会自动上传文件。
+ * 从功能卡片进入本页面。默认按钮会直接保存到系统主存储Download/HarleyApp，避免厂商
+ * 文件选择器错误恢复到XSpace；用户也可选择其他位置。可直接导出明文备份，也可先输入密码
+ * 生成AES-GCM加密备份；导入时先选择文件并校验摘要，只有再次确认后才会替换数据。
+ * 本页面不会自动上传文件。
  *
  * @param manager 本地备份管理器。
  * @param coroutineScope 宿主页面协程作用域，用于执行文件IO。
@@ -67,10 +68,14 @@ fun BackupScreen(
 ) {
     var password by rememberSaveable { mutableStateOf("") }
     var selectedBackupUri by remember { mutableStateOf<Uri?>(null) }
-    var preview by remember { mutableStateOf<BackupPreview?>(null) }
-    var message by rememberSaveable { mutableStateOf("尚未选择备份文件") }
-    var isBusy by remember { mutableStateOf(false) }
+    var exportPreview by remember { mutableStateOf<BackupPreview?>(null) }
+    var importPreview by remember { mutableStateOf<BackupPreview?>(null) }
+    var exportMessage by rememberSaveable { mutableStateOf("尚未导出备份") }
+    var importMessage by rememberSaveable { mutableStateOf("尚未选择备份文件") }
+    var isExporting by remember { mutableStateOf(false) }
+    var isImporting by remember { mutableStateOf(false) }
     var showRestoreConfirmation by remember { mutableStateOf(false) }
+    val isBusy = isExporting || isImporting
 
     /**
      * 校验当前选中的备份并刷新摘要。
@@ -78,13 +83,13 @@ fun BackupScreen(
      * @param uri 用户选择的备份Uri。
      */
     fun inspectBackup(uri: Uri) {
-        isBusy = true
-        preview = null
+        isImporting = true
+        importPreview = null
         coroutineScope.launch {
             val result = manager.inspect(uri, password)
-            preview = result.preview
-            message = result.message
-            isBusy = false
+            importPreview = result.preview
+            importMessage = result.message
+            isImporting = false
         }
     }
 
@@ -92,12 +97,14 @@ fun BackupScreen(
         contract = ActivityResultContracts.CreateDocument(BACKUP_MIME_TYPE)
     ) { uri ->
         if (uri != null) {
-            isBusy = true
+            isExporting = true
+            exportPreview = null
+            exportMessage = "正在写入并回读校验备份…"
             coroutineScope.launch {
                 val result = manager.exportTo(uri, password)
-                message = result.message
-                preview = result.preview
-                isBusy = false
+                exportMessage = result.message
+                exportPreview = result.preview
+                isExporting = false
             }
         }
     }
@@ -151,7 +158,13 @@ fun BackupScreen(
                     OutlinedTextField(
                         modifier = Modifier.fillMaxWidth(),
                         value = password,
-                        onValueChange = { value -> password = value.take(MAX_PASSWORD_LENGTH) },
+                        onValueChange = { value ->
+                            password = value.take(MAX_PASSWORD_LENGTH)
+                            if (selectedBackupUri != null) {
+                                importPreview = null
+                                importMessage = "密码已改变，请重新校验所选备份"
+                            }
+                        },
                         label = { Text("输入密码后文件将加密") },
                         supportingText = {
                             Text(
@@ -170,10 +183,66 @@ fun BackupScreen(
                         modifier = Modifier.fillMaxWidth(),
                         enabled = !isBusy,
                         onClick = {
+                            isExporting = true
+                            exportPreview = null
+                            exportMessage = "正在保存到系统主存储 Download/HarleyApp 并回读校验…"
+                            coroutineScope.launch {
+                                val result = manager.exportToPrimaryDownloads(
+                                    requestedFileName = defaultBackupFileName(),
+                                    password = password
+                                )
+                                exportMessage = result.message
+                                exportPreview = result.preview
+                                isExporting = false
+                            }
+                        }
+                    ) {
+                        Text(
+                            text = if (password.isBlank()) {
+                                "保存到下载目录（推荐）"
+                            } else {
+                                "保存加密备份到下载目录"
+                            }
+                        )
+                    }
+
+                    OutlinedButton(
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !isBusy,
+                        onClick = {
                             exportLauncher.launch(defaultBackupFileName())
                         }
                     ) {
-                        Text(text = if (password.isBlank()) "导出本地备份" else "导出加密备份")
+                        Text(text = "选择其他保存位置")
+                    }
+
+                    if (isExporting) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            CircularProgressIndicator()
+                            Text("正在写入并校验备份文件…")
+                        }
+                    } else {
+                        Text(
+                            text = exportMessage,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        Text(
+                            text = "推荐按钮固定写入当前App所在用户的主存储，不会跟随小米文件选择器进入XSpace。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+
+                    exportPreview?.let { backupPreview ->
+                        BackupPreviewCard(preview = backupPreview)
+                        Text(
+                            text = "文件已经完成写入和回读校验，不需要再次点击确认。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
                 }
             }
@@ -225,7 +294,7 @@ fun BackupScreen(
                         }
                     }
 
-                    if (isBusy) {
+                    if (isImporting) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -235,12 +304,12 @@ fun BackupScreen(
                         }
                     } else {
                         Text(
-                            text = message,
+                            text = importMessage,
                             style = MaterialTheme.typography.bodyMedium
                         )
                     }
 
-                    preview?.let { backupPreview ->
+                    importPreview?.let { backupPreview ->
                         BackupPreviewCard(preview = backupPreview)
                         Button(
                             modifier = Modifier.fillMaxWidth(),
@@ -276,12 +345,12 @@ fun BackupScreen(
                     onClick = {
                         showRestoreConfirmation = false
                         val uri = selectedBackupUri ?: return@TextButton
-                        isBusy = true
+                        isImporting = true
                         coroutineScope.launch {
                             val result = manager.restoreFrom(uri, password)
-                            message = result.message
-                            preview = result.preview
-                            isBusy = false
+                            importMessage = result.message
+                            importPreview = result.preview
+                            isImporting = false
                             if (result.success) {
                                 onRestoreCompleted()
                             }

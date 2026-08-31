@@ -4,6 +4,7 @@ import com.example.harleyapp.model.ENGLISH_WORD_ALL_STAGES
 import com.example.harleyapp.model.EnglishLearningStage
 import com.example.harleyapp.model.EnglishWord
 import com.example.harleyapp.model.chooseNextEnglishWord
+import com.example.harleyapp.model.resolveEnglishLearningExample
 import com.example.harleyapp.model.searchEnglishWords
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -102,6 +103,63 @@ class EnglishWordModelsTest {
         )
 
         assertEquals(listOf("excellent"), result.map { word -> word.id })
+    }
+
+    /**
+     * 英文例句和中文例句翻译也应进入模糊搜索范围。
+     *
+     * @return 无返回值；例句文字无法命中对应单词时由JUnit报告失败。
+     */
+    @Test
+    fun searchMatchesExampleSentenceText() {
+        val words = listOf(
+            testWord(id = "journey", learnedCount = 0).copy(
+                exampleEn = "She began a long journey.",
+                exampleZh = "她开始了一段漫长旅程。"
+            ),
+            testWord(id = "book", learnedCount = 0).copy(
+                exampleEn = "This is a useful book.",
+                exampleZh = "这是一本有用的书。"
+            )
+        )
+
+        val result = searchEnglishWords(
+            words = words,
+            query = "漫长旅程",
+            learnedCount = ENGLISH_WORD_ALL_STAGES
+        )
+
+        assertEquals(listOf("journey"), result.map { word -> word.id })
+    }
+
+    /** 词库没有专属例句时应补齐可朗读的本机通用例句，并包含当前单词。 */
+    @Test
+    fun missingExampleUsesOfflineLearningSentence() {
+        val example = resolveEnglishLearningExample(
+            testWord(id = "good", learnedCount = 0).copy(
+                exampleEn = "",
+                exampleZh = ""
+            )
+        )
+
+        assertEquals(true, example.isGenerated)
+        assertEquals(true, example.english.contains("good"))
+        assertEquals(true, example.chinese.contains("good"))
+    }
+
+    /** 词库已有专属例句时必须原样使用，不能被通用句覆盖。 */
+    @Test
+    fun bundledExampleIsPreserved() {
+        val example = resolveEnglishLearningExample(
+            testWord(id = "ability", learnedCount = 0).copy(
+                exampleEn = "She has the ability to learn quickly.",
+                exampleZh = "她有快速学习的能力。"
+            )
+        )
+
+        assertEquals(false, example.isGenerated)
+        assertEquals("She has the ability to learn quickly.", example.english)
+        assertEquals("她有快速学习的能力。", example.chinese)
     }
 
     /**
