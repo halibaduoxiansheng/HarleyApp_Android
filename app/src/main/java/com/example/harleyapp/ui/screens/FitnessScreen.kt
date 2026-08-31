@@ -38,6 +38,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -50,7 +51,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.health.connect.client.PermissionController
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.harleyapp.data.FitnessRepository
 import com.example.harleyapp.model.CompanionTask
 import com.example.harleyapp.model.DailyFitnessRecord
@@ -59,11 +64,14 @@ import com.example.harleyapp.model.FitnessGoalPeriod
 import com.example.harleyapp.model.FitnessRangeSummary
 import com.example.harleyapp.model.FitnessTrackingType
 import com.example.harleyapp.model.calculateFitnessRangeSummary
+import com.example.harleyapp.system.HealthConnectAvailability
+import com.example.harleyapp.system.HealthConnectStepReader
 import com.example.harleyapp.system.StepCounterMonitor
 import com.example.harleyapp.ui.components.HarleyDatePickerDialog
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import java.time.LocalDate
+import java.time.LocalTime
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 
@@ -92,6 +100,9 @@ fun FitnessScreen(
     }
     val stepCounterMonitor = remember {
         StepCounterMonitor(applicationContext)
+    }
+    val healthConnectStepReader = remember {
+        HealthConnectStepReader(applicationContext)
     }
     var todayEpochDay by remember {
         mutableLongStateOf(LocalDate.now().toEpochDay())
@@ -168,6 +179,26 @@ fun FitnessScreen(
     var sensorActive by remember {
         mutableStateOf(false)
     }
+    var healthConnectPermissionGranted by remember {
+        mutableStateOf(false)
+    }
+    var healthConnectHasDailyData by remember {
+        mutableStateOf(false)
+    }
+    var healthConnectSyncing by remember {
+        mutableStateOf(false)
+    }
+    var healthConnectMessage by rememberSaveable {
+        mutableStateOf("")
+    }
+    var healthConnectRefreshRequest by remember {
+        mutableIntStateOf(0)
+    }
+
+    val healthConnectAvailability = remember {
+        healthConnectStepReader.getAvailability()
+    }
+    val healthConnectAvailable = healthConnectAvailability == HealthConnectAvailability.AVAILABLE
 
     val stepDefinition = definitions.firstOrNull {
         it.trackingType == FitnessTrackingType.STEP_COUNTER
@@ -193,6 +224,20 @@ fun FitnessScreen(
         } else {
             "未获得身体活动权限，可继续手动校准步数"
         }
+    }
+    val healthConnectPermissionLauncher = rememberLauncherForActivityResult(
+        contract = PermissionController.createRequestPermissionResultContract()
+    ) { grantedPermissions ->
+        healthConnectPermissionGranted = grantedPermissions.contains(
+            HealthConnectStepReader.readStepsPermission
+        )
+        healthConnectMessage = if (healthConnectPermissionGranted) {
+            "健康步数权限已允许，正在同步今日步数"
+        } else {
+            "未允许读取健康步数，已继续使用本机计步传感器"
+        }
+        // 递增请求编号，确保从系统授权页返回后立即重新检查权限和当天汇总。
+        healthConnectRefreshRequest += 1
     }
 
     /**
@@ -233,6 +278,103 @@ fun FitnessScreen(
         }
     }
 
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    // 从系统健康权限页或设置页返回时重新读取权限，处理用户在系统外部授权、撤销或修改数据的情况。
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                healthConnectRefreshRequest += 1
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
+    // Health Connect是当天总步数的主来源；页面停留期间每分钟刷新，确保新同步的数据及时出现。
+    LaunchedEffect(
+        healthConnectAvailability,
+        healthConnectRefreshRequest,
+        todayEpochDay
+    ) {
+        if (!healthConnectAvailable) {
+            healthConnectPermissionGranted = false
+            healthConnectHasDailyData = false
+            healthConnectSyncing = false
+            healthConnectMessage = when (healthConnectAvailability) {
+                HealthConnectAvailability.UPDATE_REQUIRED -> {
+                    "系统健康数据共享需要更新，当前使用本机计步传感器"
+                }
+
+                else -> "本机未提供健康数据共享，当前使用计步传感器"
+            }
+            return@LaunchedEffect
+        }
+
+        while (isActive) {
+            healthConnectSyncing = true
+            val permissionResult = healthConnectStepReader.hasReadPermission()
+            if (permissionResult.isFailure) {
+                healthConnectPermissionGranted = false
+                healthConnectHasDailyData = false
+                healthConnectSyncing = false
+                healthConnectMessage = "健康数据暂时无法访问，已切换到本机计步传感器"
+                delay(HEALTH_CONNECT_REFRESH_INTERVAL_MILLIS)
+                continue
+            }
+
+            val permissionGranted = permissionResult.getOrDefault(false)
+            healthConnectPermissionGranted = permissionGranted
+            if (!permissionGranted) {
+                healthConnectHasDailyData = false
+                healthConnectSyncing = false
+                healthConnectMessage = "连接系统健康数据后，可同步小米运动健康等来源的今日步数"
+                return@LaunchedEffect
+            }
+
+            val dailyStepsResult = healthConnectStepReader.readDailySteps(
+                date = LocalDate.ofEpochDay(todayEpochDay)
+            )
+            dailyStepsResult.onSuccess { dailySteps ->
+                if (dailySteps.hasStepData) {
+                    val previousRecord = repository.getTodayRecord(todayEpochDay)
+                    val updatedRecord = if (
+                        previousRecord.countFor(stepDefinition?.id.orEmpty()) == dailySteps.steps
+                    ) {
+                        previousRecord
+                    } else {
+                        repository.setSteps(
+                            steps = dailySteps.steps,
+                            epochDay = todayEpochDay
+                        )
+                    }
+                    if (updatedRecord == null) {
+                        healthConnectHasDailyData = false
+                        healthConnectMessage = "健康步数读取成功，但保存失败，已保留传感器计步"
+                    } else {
+                        healthConnectHasDailyData = true
+                        reportNewCompanionMilestones(previousRecord, updatedRecord)
+                        refreshFitnessState()
+                        val syncTime = LocalTime.now().format(
+                            DateTimeFormatter.ofPattern("HH:mm", Locale.CHINA)
+                        )
+                        healthConnectMessage = "系统健康数据 · $syncTime 已同步"
+                    }
+                } else {
+                    healthConnectHasDailyData = false
+                    healthConnectMessage = "暂无共享步数，请在健康数据设置中允许小米运动健康写入步数"
+                }
+            }.onFailure {
+                healthConnectHasDailyData = false
+                healthConnectMessage = "健康步数同步失败，已自动使用本机计步传感器"
+            }
+            healthConnectSyncing = false
+            delay(HEALTH_CONNECT_REFRESH_INTERVAL_MILLIS)
+        }
+    }
+
     // 页面长时间保持前台时每分钟检查日期，跨过零点自动进入新一天。
     LaunchedEffect(Unit) {
         while (isActive) {
@@ -257,11 +399,13 @@ fun FitnessScreen(
         stepDefinition?.id,
         sensorSupported,
         stepPermissionGranted,
+        healthConnectHasDailyData,
         todayEpochDay
     ) {
         sensorActive = if (
             stepDefinition != null &&
             sensorSupported &&
+            !healthConnectHasDailyData &&
             stepPermissionGranted
         ) {
             stepCounterMonitor.start { sensorTotal ->
@@ -291,6 +435,7 @@ fun FitnessScreen(
         if (
             stepDefinition != null &&
             sensorSupported &&
+            !healthConnectHasDailyData &&
             stepPermissionGranted &&
             !sensorActive
         ) {
@@ -542,7 +687,25 @@ fun FitnessScreen(
                         sensorSupported = sensorSupported,
                         permissionGranted = stepPermissionGranted,
                         sensorActive = sensorActive,
+                        healthConnectAvailable = healthConnectAvailable,
+                        healthConnectPermissionGranted = healthConnectPermissionGranted,
+                        healthConnectHasDailyData = healthConnectHasDailyData,
+                        healthConnectSyncing = healthConnectSyncing,
+                        healthConnectMessage = healthConnectMessage,
                         sensorMessage = sensorMessage,
+                        onRequestHealthPermission = {
+                            healthConnectPermissionLauncher.launch(
+                                setOf(HealthConnectStepReader.readStepsPermission)
+                            )
+                        },
+                        onRefreshHealthSteps = {
+                            healthConnectRefreshRequest += 1
+                        },
+                        onOpenHealthConnectSettings = {
+                            if (!healthConnectStepReader.openSettings()) {
+                                healthConnectMessage = "无法打开健康数据设置，请从系统设置中手动进入"
+                            }
+                        },
                         onRequestPermission = {
                             if (permissionRequired) {
                                 permissionLauncher.launch(Manifest.permission.ACTIVITY_RECOGNITION)
@@ -993,7 +1156,15 @@ private fun ExerciseTaskCard(
  * @param sensorSupported 手机是否提供计步传感器。
  * @param permissionGranted 是否获得身体活动权限。
  * @param sensorActive 传感器监听是否成功启动。
+ * @param healthConnectAvailable 当前设备是否提供可用的Health Connect服务。
+ * @param healthConnectPermissionGranted 是否允许本App读取健康步数。
+ * @param healthConnectHasDailyData 本次同步是否获得可作为主来源的当天步数。
+ * @param healthConnectSyncing 是否正在读取健康数据。
+ * @param healthConnectMessage 最近一次健康数据同步说明。
  * @param sensorMessage 最近一次计步状态说明。
+ * @param onRequestHealthPermission 打开系统健康步数授权页的回调。
+ * @param onRefreshHealthSteps 立即重新读取当天健康步数的回调。
+ * @param onOpenHealthConnectSettings 打开系统健康数据共享管理页的回调。
  * @param onRequestPermission 请求权限的回调。
  * @param onCalibrate 打开手动校准的回调。
  * @param onSetGoal 直接打开当前步行项目目标设置的回调。
@@ -1007,7 +1178,15 @@ private fun StepTaskCard(
     sensorSupported: Boolean,
     permissionGranted: Boolean,
     sensorActive: Boolean,
+    healthConnectAvailable: Boolean,
+    healthConnectPermissionGranted: Boolean,
+    healthConnectHasDailyData: Boolean,
+    healthConnectSyncing: Boolean,
+    healthConnectMessage: String,
     sensorMessage: String,
+    onRequestHealthPermission: () -> Unit,
+    onRefreshHealthSteps: () -> Unit,
+    onOpenHealthConnectSettings: () -> Unit,
     onRequestPermission: () -> Unit,
     onCalibrate: () -> Unit,
     onSetGoal: () -> Unit
@@ -1016,10 +1195,12 @@ private fun StepTaskCard(
     val progress = (count.toFloat() / definition.dailyGoal.coerceAtLeast(1))
         .coerceIn(0f, 1f)
     val statusText = when {
+        healthConnectSyncing -> "正在同步系统健康步数…"
+        healthConnectMessage.isNotBlank() -> healthConnectMessage
         !sensorSupported -> "本机没有可用计步传感器，请使用手动校准"
-        !permissionGranted -> "允许身体活动权限后，可在运动页打开时自动累计"
+        !permissionGranted -> "允许身体活动权限后，将使用本机计步传感器兜底"
         sensorActive && sensorMessage.isNotBlank() -> sensorMessage
-        sensorActive -> "自动计步中"
+        sensorActive -> "本机传感器计步中"
         else -> "计步传感器暂时不可用，请使用手动校准"
     }
 
@@ -1074,11 +1255,41 @@ private fun StepTaskCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
 
+            if (healthConnectAvailable) {
+                if (healthConnectPermissionGranted) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        OutlinedButton(
+                            modifier = Modifier.weight(1f),
+                            enabled = !healthConnectSyncing,
+                            onClick = onRefreshHealthSteps
+                        ) {
+                            Text(text = if (healthConnectSyncing) "同步中…" else "立即同步")
+                        }
+                        OutlinedButton(
+                            modifier = Modifier.weight(1f),
+                            onClick = onOpenHealthConnectSettings
+                        ) {
+                            Text(text = "健康数据设置")
+                        }
+                    }
+                } else {
+                    Button(
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = onRequestHealthPermission
+                    ) {
+                        Text(text = "连接系统健康数据")
+                    }
+                }
+            }
+
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                if (sensorSupported && !permissionGranted) {
+                if (!healthConnectHasDailyData && sensorSupported && !permissionGranted) {
                     Button(
                         modifier = Modifier.weight(1f),
                         onClick = onRequestPermission
@@ -2081,3 +2292,4 @@ private const val MAX_NUMBER_INPUT_LENGTH = 7
 private const val MAX_EXERCISE_NAME_LENGTH = 20
 private const val MAX_EXERCISE_UNIT_LENGTH = 8
 private const val DATE_REFRESH_INTERVAL_MILLIS = 60_000L
+private const val HEALTH_CONNECT_REFRESH_INTERVAL_MILLIS = 60_000L

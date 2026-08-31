@@ -70,6 +70,7 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime.ktx)
     // ML Kit按需下载约30MB语言模型，模型就绪后翻译在手机本地完成，不上传书籍正文。
     implementation("com.google.mlkit:translate:17.0.3")
+    implementation(libs.androidx.health.connect.client)
     implementation(libs.androidx.room.runtime)
     implementation(libs.androidx.room.ktx)
     ksp(libs.androidx.room.compiler)

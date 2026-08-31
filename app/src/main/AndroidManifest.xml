@@ -21,6 +21,8 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- Android 10及以上读取系统计步传感器需要用户主动授予身体活动权限。 -->
     <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
+    <!-- 只读取健康数据共享中的步数汇总，不申请写入、心率、位置或其他健康数据权限。 -->
+    <uses-permission android:name="android.permission.health.READ_STEPS" />
     <!-- 天气只在用户打开今日页面时申请前台粗略位置，不申请后台或精确位置。 -->
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
@@ -30,6 +32,8 @@
     -->
     <queries>
         <package android:name="com.tencent.mm" />
+        <!-- Android 13及以下通过独立健康数据共享应用提供兼容接口。 -->
+        <package android:name="com.google.android.apps.healthdata" />
         <!-- 热点原平台App仅用于用户主动点击后的优先HTTPS跳转，不读取其任何应用数据。 -->
         <package android:name="com.sina.weibo" />
         <package android:name="com.baidu.searchbox" />
@@ -70,6 +74,31 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!--
+            用户从健康数据共享授权页点击隐私政策时，显示本App读取步数的用途和本地处理方式。
+            Android 13及以下由Jetpack动作进入，Android 14及以上由受系统权限保护的别名进入。
+        -->
+        <activity
+            android:name=".health.HealthConnectPermissionsRationaleActivity"
+            android:exported="true"
+            android:theme="@style/Theme.HarleyApp">
+            <intent-filter>
+                <action android:name="androidx.health.ACTION_SHOW_PERMISSIONS_RATIONALE" />
+            </intent-filter>
+        </activity>
+
+        <activity-alias
+            android:name=".health.ViewHealthPermissionUsageActivity"
+            android:exported="true"
+            android:permission="android.permission.START_VIEW_PERMISSION_USAGE"
+            android:targetActivity=".health.HealthConnectPermissionsRationaleActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW_PERMISSION_USAGE" />
+
+                <category android:name="android.intent.category.HEALTH_PERMISSIONS" />
+            </intent-filter>
+        </activity-alias>
 
         <!--
             为记事本图文和文章包签发临时只读Content Uri。
