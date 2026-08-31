@@ -3,62 +3,98 @@ package com.example.harleyapp.notification
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
-import android.media.AudioAttributes
-import android.provider.Settings
 
 /**
- * 统一创建本应用需要提示音和振动的高重要性通知渠道。
+ * 统一创建本应用需要横幅和振动的高重要性静音通知渠道。
  *
  * 使用方法：
  * 在发布定时提醒或微信未查看提醒前，分别调用[createScheduledReminderChannel]或
- * [createWechatReminderChannel]。Android 8.0及以上会以渠道为单位保存声音、振动和重要性；
- * 同一渠道再次创建时不会覆盖用户在系统设置中的选择。
+ * [createWechatReminderChannel]。渠道本身不绑定手机来电或系统通知铃声，HarleyApp由
+ * [ReminderAlertPlaybackService]播放用户在App内选择的独立提示音；渠道仍负责横幅、锁屏、角标
+ * 和系统振动权限。[createAll]可在App启动时提前创建全部渠道。
  */
 object NotificationAlertChannels {
 
-    /** 通用定时提醒使用的有声渠道ID；v2用于避开旧渠道已经固化的静音配置。 */
-    const val SCHEDULED_REMINDER_CHANNEL_ID = "scheduled_local_reminders_alert_v2"
+    /** 通用定时提醒使用的静音强提醒渠道ID；v5由App独立合成提示音。 */
+    const val SCHEDULED_REMINDER_CHANNEL_ID = "scheduled_local_reminders_alert_v5"
 
-    /** 微信未查看消息提醒使用的有声渠道ID；v2用于避开旧渠道已经固化的静音配置。 */
-    const val WECHAT_REMINDER_CHANNEL_ID = "wechat_unread_reminder_alert_v2"
+    /** 微信未查看消息提醒使用的静音强提醒渠道ID；v5由App独立合成提示音。 */
+    const val WECHAT_REMINDER_CHANNEL_ID = "wechat_unread_reminder_alert_v5"
 
     /**
-     * 创建通用定时提醒渠道，默认使用系统通知提示音，并在系统允许时振动。
+     * 提前创建通用提醒和微信等待提醒的全部通知渠道。
+     *
+     * 使用方法：
+     * MainActivity创建时调用一次；各广播接收器在发布通知前仍会再次调用对应创建函数，以兼容
+     * 系统清理渠道或进程直接从后台启动的情况。重复调用由Android安全去重。
      *
      * @param notificationManager Android系统通知管理器。
      *
-     * @return 无返回值；渠道已存在时保留用户在系统设置中修改过的声音与振动选项。
+     * @return 无返回值；创建结果由Android系统持久化。
+     */
+    fun createAll(notificationManager: NotificationManager) {
+        createScheduledReminderChannel(notificationManager)
+        createWechatReminderChannel(notificationManager)
+    }
+
+    /**
+     * 判断指定提醒渠道是否仍允许展示通知。
+     *
+     * 使用方法：
+     * 发布通知前先确保渠道已创建，再调用本函数。Android返回null或重要性为IMPORTANCE_NONE时表示
+     * 渠道不可用，接收器应保留提醒状态并稍后重试，而不能静默标记为已提醒。
+     *
+     * @param notificationManager Android系统通知管理器。
+     * @param channelId 需要检查的提醒渠道ID。
+     *
+     * @return 渠道存在且未被用户关闭返回true，否则返回false。
+     */
+    fun isChannelEnabled(
+        notificationManager: NotificationManager,
+        channelId: String
+    ): Boolean {
+        val channel = notificationManager.getNotificationChannel(channelId) ?: return false
+        return channel.importance != NotificationManager.IMPORTANCE_NONE
+    }
+
+    /**
+     * 创建通用定时提醒渠道，由App播放独立提示音并在系统允许时振动。
+     *
+     * @param notificationManager Android系统通知管理器。
+     *
+     * @return 无返回值；渠道已存在时保留用户在系统设置中修改过的通知展示和振动选项。
      */
     fun createScheduledReminderChannel(notificationManager: NotificationManager) {
         createAlertChannel(
             notificationManager = notificationManager,
             channelId = SCHEDULED_REMINDER_CHANNEL_ID,
-            channelName = "定时提醒（声音和振动）",
-            channelDescription = "按自定义日期、时间和重复间隔展示本地提醒"
+            channelName = "定时强提醒（HarleyApp提示音）",
+            channelDescription = "按自定义日期和时间在后台展示通知，由App播放独立提示音"
         )
     }
 
     /**
-     * 创建微信未查看消息提醒渠道，默认使用系统通知提示音，并在系统允许时振动。
+     * 创建微信未查看消息提醒渠道，由App播放独立提示音并在系统允许时振动。
      *
      * @param notificationManager Android系统通知管理器。
      *
-     * @return 无返回值；渠道已存在时保留用户在系统设置中修改过的声音与振动选项。
+     * @return 无返回值；渠道已存在时保留用户在系统设置中修改过的通知展示和振动选项。
      */
     fun createWechatReminderChannel(notificationManager: NotificationManager) {
         createAlertChannel(
             notificationManager = notificationManager,
             channelId = WECHAT_REMINDER_CHANNEL_ID,
-            channelName = "微信未查看提醒（声音和振动）",
-            channelDescription = "按自定义间隔提醒仍保留在通知栏中的普通微信消息"
+            channelName = "微信未查看强提醒（HarleyApp提示音）",
+            channelDescription = "按自定义间隔在后台展示通知，由App播放独立提示音"
         )
     }
 
     /**
      * 按统一规则创建一个高重要性提醒渠道。
      *
-     * 提示音使用用户当前选择的系统默认通知音；振动仅声明本渠道允许振动，手机静音、勿扰、
-     * 系统关闭振动或用户手动关闭本渠道振动时，Android仍会优先尊重系统和用户设置。
+     * 渠道声音固定为null，防止系统来电铃声或通知铃声与HarleyApp内置提示音重叠。振动仅声明
+     * 本渠道允许振动，手机勿扰、系统关闭振动或用户手动关闭本渠道振动时，Android仍会优先
+     * 尊重系统和用户设置。
      *
      * @param notificationManager Android系统通知管理器。
      * @param channelId 不可变的通知渠道ID。
@@ -73,10 +109,6 @@ object NotificationAlertChannels {
         channelName: String,
         channelDescription: String
     ) {
-        val audioAttributes = AudioAttributes.Builder()
-            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-            .setUsage(AudioAttributes.USAGE_NOTIFICATION)
-            .build()
         val channel = NotificationChannel(
             channelId,
             channelName,
@@ -85,7 +117,8 @@ object NotificationAlertChannels {
             description = channelDescription
             lockscreenVisibility = Notification.VISIBILITY_PRIVATE
             setShowBadge(true)
-            setSound(Settings.System.DEFAULT_NOTIFICATION_URI, audioAttributes)
+            // 声音由短时前台服务实时合成，渠道必须静音以避免与手机来电铃声重复播放。
+            setSound(null, null)
             enableVibration(true)
             vibrationPattern = ALERT_VIBRATION_PATTERN
         }

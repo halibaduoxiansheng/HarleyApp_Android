@@ -5,8 +5,11 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import android.os.SystemClock
 import android.util.Log
+import com.example.harleyapp.MainActivity
 import com.example.harleyapp.model.ScheduledReminder
+import com.example.harleyapp.model.wallClockTriggerToElapsedRealtime
 import com.example.harleyapp.system.ExactAlarmAccessController
 
 /**
@@ -15,7 +18,8 @@ import com.example.harleyapp.system.ExactAlarmAccessController
  * 使用方法：
  * 使用Application Context创建实例。计划持久化成功后调用[schedule]；删除或修改旧计划前调用
  * [cancel]；手机重启完成后由ReminderBootReceiver调用[reschedule]恢复计划。获得“闹钟和提醒”
- * 特殊权限时使用精确Alarm；尚未授权时保留非精确Alarm兜底，并由页面提示用户完成授权。
+ * 特殊权限时使用系统闹钟级Alarm，确保用户明确创建的提醒不被电池策略长期推迟；尚未授权时
+ * 保留非精确Alarm兜底，并由页面提示用户完成授权。
  *
  * @param context Android上下文，内部自动转换为Application Context。
  */
@@ -87,7 +91,7 @@ class ReminderScheduler(context: Context) {
         val nowMillis = System.currentTimeMillis()
         return reminders.count { reminder ->
             when {
-                reminder.repeatIntervalDays == 0 && reminder.lastTriggeredAtMillis > 0L -> false
+                !reminder.isRecurring && reminder.lastTriggeredAtMillis > 0L -> false
                 reminder.nextTriggerAtMillis > nowMillis -> schedule(reminder)
                 else -> scheduleAt(reminder.id, nowMillis + MISSED_REMINDER_DELAY_MILLIS)
             }
@@ -95,15 +99,25 @@ class ReminderScheduler(context: Context) {
     }
 
     /**
-     * 在指定绝对时间提交一个显式广播Alarm。
+     * 按权限状态把指定绝对时间提交为系统闹钟级Alarm或开机时钟兜底Alarm。
+     *
+     * 使用方法：
+     * 调度、恢复和短时重试都通过本函数进入。获得精确闹钟权限时使用系统不会调整的
+     * AlarmClock；尚未授权时根据当前时刻计算剩余延迟并提交开机时钟兜底Alarm。仓库始终保存
+     * Unix时间戳供页面显示和系统时间变化后重新安排。
      *
      * @param reminderId 通知计划唯一编号。
-     * @param triggerAtMillis 实际交给AlarmManager的Unix毫秒时间戳。
+     * @param triggerAtMillis 用户计划触发的Unix毫秒时间戳。
      *
      * @return Alarm提交成功返回true；时间无效或系统拒绝时返回false。
      */
     private fun scheduleAt(reminderId: Long, triggerAtMillis: Long): Boolean {
-        if (reminderId <= 0L || triggerAtMillis <= System.currentTimeMillis()) {
+        val elapsedTriggerAtMillis = wallClockTriggerToElapsedRealtime(
+            triggerAtMillis = triggerAtMillis,
+            currentTimeMillis = System.currentTimeMillis(),
+            elapsedRealtimeMillis = SystemClock.elapsedRealtime()
+        )
+        if (reminderId <= 0L || elapsedTriggerAtMillis == null) {
             return false
         }
 
@@ -112,16 +126,18 @@ class ReminderScheduler(context: Context) {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
                 exactAlarmAccessController.isGranted()
             ) {
-                alarmManager.setExactAndAllowWhileIdle(
-                    AlarmManager.RTC_WAKEUP,
-                    triggerAtMillis,
+                alarmManager.setAlarmClock(
+                    AlarmManager.AlarmClockInfo(
+                        triggerAtMillis,
+                        createAlarmClockInfoPendingIntent(reminderId)
+                    ),
                     pendingIntent
                 )
-                Log.i(TAG, "Scheduled exact local reminder")
+                Log.i(TAG, "Scheduled alarm-clock local reminder")
             } else {
                 alarmManager.setAndAllowWhileIdle(
-                    AlarmManager.RTC_WAKEUP,
-                    triggerAtMillis,
+                    AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                    elapsedTriggerAtMillis,
                     pendingIntent
                 )
                 Log.w(TAG, "Scheduled inexact local reminder because exact access is missing")
@@ -154,6 +170,29 @@ class ReminderScheduler(context: Context) {
     }
 
     /**
+     * 创建系统闹钟标记被用户点击时打开HarleyApp的页面Intent。
+     *
+     * 使用方法：
+     * 仅作为[AlarmManager.AlarmClockInfo]的展示入口，不负责触发提醒；真正的到点广播仍由
+     * [createAlarmPendingIntent]提供，避免用户点击系统闹钟标记时提前发出通知。
+     *
+     * @param reminderId 通知计划唯一编号，用于稳定区分多个系统闹钟展示入口。
+     *
+     * @return 指向[MainActivity]的不可变PendingIntent。
+     */
+    private fun createAlarmClockInfoPendingIntent(reminderId: Long): PendingIntent {
+        val intent = Intent(applicationContext, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        return PendingIntent.getActivity(
+            applicationContext,
+            reminderId.toRequestCode() xor ALARM_CLOCK_INFO_REQUEST_CODE_SALT,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+    }
+
+    /**
      * 将64位计划编号稳定折叠为带模块盐值的32位请求码。
      *
      * @return 同一通用通知计划固定一致、并与微信定时提醒区分的请求码。
@@ -166,6 +205,7 @@ class ReminderScheduler(context: Context) {
         const val ACTION_SHOW_REMINDER = "com.example.harleyapp.action.SHOW_LOCAL_REMINDER"
         const val EXTRA_REMINDER_ID = "scheduled_reminder_id"
         const val REQUEST_CODE_SALT = 0x524D0000
+        private const val ALARM_CLOCK_INFO_REQUEST_CODE_SALT = 0x00100000
         private const val TAG = "ReminderScheduler"
         private const val MISSED_REMINDER_DELAY_MILLIS = 2_000L
     }

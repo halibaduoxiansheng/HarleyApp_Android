@@ -1,8 +1,25 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.google.ksp)
 }
+
+val localProperties = Properties().apply {
+    val localPropertiesFile = rootProject.file("local.properties")
+    if (localPropertiesFile.isFile) {
+        localPropertiesFile.inputStream().use(::load)
+    }
+}
+val configuredDeveloperKeySha256 = (
+    providers.environmentVariable("HARLEY_DEVELOPER_KEY_SHA256").orNull
+        ?: localProperties.getProperty("HARLEY_DEVELOPER_KEY_SHA256")
+    )
+    ?.trim()
+    ?.lowercase()
+    ?.takeIf { hash -> hash.matches(Regex("[0-9a-f]{64}")) }
+    .orEmpty()
 
 android {
     namespace = "com.example.harleyapp"
@@ -18,6 +35,11 @@ android {
         versionName = "1.0.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        buildConfigField(
+            type = "String",
+            name = "DEVELOPER_KEY_SHA256",
+            value = "\"$configuredDeveloperKeySha256\""
+        )
     }
 
     buildTypes {
@@ -33,6 +55,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 

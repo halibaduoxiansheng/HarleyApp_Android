@@ -158,6 +158,7 @@ data class BillImportResult(
  * @param availableStorageBytes 主内部存储可用量，单位为字节。
  * @param totalSwapBytes 系统交换或内存扩展空间总量，单位为字节。
  * @param availableSwapBytes 系统交换或内存扩展空间可用量，单位为字节。
+ * @param cpuTemperatureCelsius 当前可读取CPU或SOC热区中的最高温度，单位为摄氏度；系统未开放时为null。
  */
 data class DeviceSnapshot(
     val uploadBytesPerSecond: Long = 0,
@@ -167,7 +168,8 @@ data class DeviceSnapshot(
     val totalStorageBytes: Long = 0,
     val availableStorageBytes: Long = 0,
     val totalSwapBytes: Long = 0,
-    val availableSwapBytes: Long = 0
+    val availableSwapBytes: Long = 0,
+    val cpuTemperatureCelsius: Float? = null
 )
 
 /**

@@ -61,6 +61,7 @@ import com.example.harleyapp.model.AppUpdateDownloadPhase
 import com.example.harleyapp.model.AppUpdateDownloadState
 import com.example.harleyapp.model.AppUpdateInfo
 import com.example.harleyapp.model.AppUpdateInstallResult
+import com.example.harleyapp.model.CompanionProgress
 import com.example.harleyapp.model.DeviceSnapshot
 import com.example.harleyapp.model.LaunchableApp
 import com.example.harleyapp.system.DeviceMonitor
@@ -84,14 +85,23 @@ import java.util.Locale
  * @param modifier 外部传入的页面安全边距。
  * @param isDarkTheme 当前是否启用黑夜模式。
  * @param visualTheme 当前整体角色风格主题。
+ * @param startupAnimationEnabled 下次进入App时是否播放启动动画。
  * @param onSetDarkTheme 保存并应用白天或黑夜模式的回调，成功返回true。
  * @param onSetVisualTheme 保存并应用角色风格主题的回调，成功返回true。
+ * @param onSetStartupAnimationEnabled 保存启动动画开关的回调，成功返回true。
  * @param deviceMonitor 读取Android公开内存和内部存储状态的服务。
  * @param apps 手机中当前可启动的应用列表。
  * @param selectedPackages 当前已选包名集合。
  * @param isLoading 是否仍在后台读取应用列表。
  * @param onSelectionChanged 用户选择变化后的完整集合回调。
  * @param onOpenProjectSource 在App内置网站页打开GitHub源码仓库的回调。
+ * @param developerModeConfigured 当前安装包是否配置了有效开发者密钥摘要。
+ * @param developerModeEnabled 当前设备是否已通过开发者密钥验证。
+ * @param companionProgress 当前伙伴等级和金币状态。
+ * @param onVerifyDeveloperKey 校验并启用开发者模式的回调。
+ * @param onDisableDeveloperMode 退出开发者模式的回调。
+ * @param onAddDeveloperLevels 增加伙伴等级的开发者回调。
+ * @param onAddDeveloperCoins 增加伙伴金币的开发者回调。
  *
  * @return 无返回值，直接输出“我的”页面。
  */
@@ -99,14 +109,23 @@ import java.util.Locale
 fun ProfileScreen(
     isDarkTheme: Boolean,
     visualTheme: AppVisualTheme,
+    startupAnimationEnabled: Boolean,
     onSetDarkTheme: (Boolean) -> Boolean,
     onSetVisualTheme: (AppVisualTheme) -> Boolean,
+    onSetStartupAnimationEnabled: (Boolean) -> Boolean,
     deviceMonitor: DeviceMonitor,
     apps: List<LaunchableApp>,
     selectedPackages: Set<String>,
     isLoading: Boolean,
     onSelectionChanged: (Set<String>) -> Unit,
     onOpenProjectSource: () -> Unit,
+    developerModeConfigured: Boolean,
+    developerModeEnabled: Boolean,
+    companionProgress: CompanionProgress,
+    onVerifyDeveloperKey: (String) -> Boolean,
+    onDisableDeveloperMode: () -> Boolean,
+    onAddDeveloperLevels: (Int) -> Boolean,
+    onAddDeveloperCoins: (Int) -> Boolean,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -189,7 +208,26 @@ fun ProfileScreen(
         }
 
         item {
+            StartupAnimationSettingsCard(
+                enabled = startupAnimationEnabled,
+                onEnabledChanged = onSetStartupAnimationEnabled
+            )
+        }
+
+        item {
             AppLockSettingsCard(repository = appLockRepository)
+        }
+
+        item {
+            DeveloperModeCard(
+                configured = developerModeConfigured,
+                enabled = developerModeEnabled,
+                progress = companionProgress,
+                onVerifyKey = onVerifyDeveloperKey,
+                onDisable = onDisableDeveloperMode,
+                onAddLevels = onAddDeveloperLevels,
+                onAddCoins = onAddDeveloperCoins
+            )
         }
 
         item {
@@ -347,13 +385,13 @@ private fun ProjectSourceCodeCard(onOpenSource: () -> Unit) {
 }
 
 /**
- * 用一张紧凑卡片集中展示物理内存、交换空间和内部存储，避免三个大卡片占据首页。
+ * 用一张紧凑卡片集中展示CPU温度、物理内存、交换空间和内部存储，避免多个大卡片占据页面。
  *
  * 使用方法：
  * ProfileScreen把DeviceMonitor最新快照传入本函数。每个指标只显示已用量、总量和一条细进度条；
  * 系统没有启用交换空间时明确显示“未启用”，不会生成无意义的百分比。
  *
- * @param snapshot Android系统当前公开的物理内存、交换空间和内部存储快照。
+ * @param snapshot Android系统当前公开的CPU温度、物理内存、交换空间和内部存储快照。
  *
  * @return 无返回值，直接输出“我的”页面中的紧凑设备状态卡片。
  */
@@ -377,7 +415,7 @@ private fun CompactDeviceStatusCard(snapshot: DeviceSnapshot) {
             ) {
                 Text(
                     modifier = Modifier.weight(1f),
-                    text = "设备空间",
+                    text = "设备状态",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold
                 )
@@ -387,6 +425,10 @@ private fun CompactDeviceStatusCard(snapshot: DeviceSnapshot) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
+
+            CompactTemperatureRow(
+                temperatureCelsius = snapshot.cpuTemperatureCelsius
+            )
 
             CompactUsageRow(
                 title = "物理运行内存",
@@ -405,6 +447,51 @@ private fun CompactDeviceStatusCard(snapshot: DeviceSnapshot) {
                 availableBytes = snapshot.availableStorageBytes
             )
         }
+    }
+}
+
+/**
+ * 显示设备状态中的当前CPU温度。
+ *
+ * 使用方法：
+ * [CompactDeviceStatusCard]把DeviceMonitor读取到的摄氏温度传入。Android未向普通应用开放CPU热区时
+ * 显示“系统未开放”，不会退而显示电池温度或虚构估算值。
+ *
+ * @param temperatureCelsius 当前可读CPU/SOC热区中的最高摄氏温度，无法读取时为null。
+ *
+ * @return 无返回值，直接输出温度名称、数值和数据来源说明。
+ */
+@Composable
+private fun CompactTemperatureRow(temperatureCelsius: Float?) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = "CPU 当前温度",
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                text = "读取CPU / SOC可访问热区，不使用电池温度代替",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        Text(
+            text = temperatureCelsius?.let { value ->
+                String.format(Locale.CHINA, "%.1f°C", value)
+            } ?: "系统未开放",
+            style = MaterialTheme.typography.labelLarge,
+            color = if (temperatureCelsius == null) {
+                MaterialTheme.colorScheme.onSurfaceVariant
+            } else {
+                MaterialTheme.colorScheme.primary
+            },
+            fontWeight = FontWeight.Bold
+        )
     }
 }
 
@@ -1319,6 +1406,95 @@ private fun AppearanceCard(
                     color = MaterialTheme.colorScheme.onPrimaryContainer
                 )
             }
+
+            if (saveError.isNotBlank()) {
+                Text(
+                    text = saveError,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 显示进入App时是否播放启动动画的持久化开关。
+ *
+ * 使用方法：
+ * ProfileScreen传入当前保存值和仓库回调。用户点击整行或选择框后立即保存，但只影响下一次重新
+ * 启动App，当前会话不会突然补播或中断动画；首次安装和旧版本升级默认开启。
+ *
+ * @param enabled true表示下次启动播放动画，false表示直接进入密码锁或首页。
+ * @param onEnabledChanged 保存新状态的回调，成功返回true。
+ *
+ * @return 无返回值，直接输出启动体验设置卡片。
+ */
+@Composable
+private fun StartupAnimationSettingsCard(
+    enabled: Boolean,
+    onEnabledChanged: (Boolean) -> Boolean
+) {
+    var saveError by rememberSaveable {
+        mutableStateOf("")
+    }
+
+    /** 保存目标状态并在当前卡片中反馈失败结果。 */
+    fun saveEnabled(targetEnabled: Boolean) {
+        saveError = if (onEnabledChanged(targetEnabled)) {
+            ""
+        } else {
+            "启动动画设置保存失败，请重试"
+        }
+    }
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable {
+                saveEnabled(!enabled)
+            },
+        shape = RoundedCornerShape(22.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Column(
+            modifier = Modifier.padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(7.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "启动动画",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = if (enabled) {
+                            "已开启，下次进入App仍会播放逐字动画"
+                        } else {
+                            "已关闭，下次将直接进入密码锁或首页"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Checkbox(
+                    checked = enabled,
+                    onCheckedChange = ::saveEnabled
+                )
+            }
+
+            Text(
+                text = "设置从下一次重新启动生效，默认开启。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
 
             if (saveError.isNotBlank()) {
                 Text(

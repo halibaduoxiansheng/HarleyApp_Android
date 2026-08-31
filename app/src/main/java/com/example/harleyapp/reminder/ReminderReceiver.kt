@@ -15,6 +15,7 @@ import com.example.harleyapp.MainActivity
 import com.example.harleyapp.R
 import com.example.harleyapp.data.ReminderRepository
 import com.example.harleyapp.notification.NotificationAlertChannels
+import com.example.harleyapp.notification.ReminderAlertPlaybackService
 
 /**
  * 接收系统到点Alarm，推进重复计划并展示用户自定义内容的本地通知。
@@ -63,6 +64,15 @@ class ReminderReceiver : BroadcastReceiver() {
             scheduler.scheduleRetry(reminder.id, NOTIFICATION_RETRY_DELAY_MILLIS)
             return
         }
+        if (!NotificationAlertChannels.isChannelEnabled(
+                notificationManager,
+                NotificationAlertChannels.SCHEDULED_REMINDER_CHANNEL_ID
+            )
+        ) {
+            Log.w(TAG, "Scheduled reminder channel is disabled")
+            scheduler.scheduleRetry(reminder.id, NOTIFICATION_RETRY_DELAY_MILLIS)
+            return
+        }
 
         val openAppIntent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -83,7 +93,8 @@ class ReminderReceiver : BroadcastReceiver() {
             .setStyle(Notification.BigTextStyle().bigText(reminder.content))
             .setContentIntent(contentIntent)
             .setAutoCancel(true)
-            .setCategory(Notification.CATEGORY_REMINDER)
+            .setCategory(Notification.CATEGORY_ALARM)
+            .setOnlyAlertOnce(false)
             .setVisibility(Notification.VISIBILITY_PRIVATE)
             .build()
 
@@ -99,6 +110,13 @@ class ReminderReceiver : BroadcastReceiver() {
             scheduler.scheduleRetry(reminder.id, NOTIFICATION_RETRY_DELAY_MILLIS)
             return
         }
+        if (!ReminderAlertPlaybackService.start(
+                context = applicationContext,
+                alertChannelId = NotificationAlertChannels.SCHEDULED_REMINDER_CHANNEL_ID
+            )
+        ) {
+            Log.e(TAG, "Failed to start scheduled reminder alert playback")
+        }
 
         // 只有系统通知成功发布后才更新“已提醒”状态，避免权限或渠道问题让计划静默丢失。
         val updatedReminder = repository.recordTriggered(
@@ -107,7 +125,7 @@ class ReminderReceiver : BroadcastReceiver() {
             triggeredAtMillis = nowMillis
         ) ?: return
 
-        if (updatedReminder.repeatIntervalDays > 0 && !scheduler.schedule(updatedReminder)) {
+        if (updatedReminder.isRecurring && !scheduler.schedule(updatedReminder)) {
             Log.e(TAG, "Failed to schedule next recurring reminder")
         }
     }

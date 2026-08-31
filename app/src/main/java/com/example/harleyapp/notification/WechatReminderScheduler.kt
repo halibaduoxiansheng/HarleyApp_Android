@@ -6,10 +6,13 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import android.os.SystemClock
 import android.util.Log
+import com.example.harleyapp.MainActivity
 import com.example.harleyapp.data.WechatReminderRepository
 import com.example.harleyapp.model.MAX_WECHAT_REMINDER_INTERVAL_MINUTES
 import com.example.harleyapp.model.MIN_WECHAT_REMINDER_INTERVAL_MINUTES
+import com.example.harleyapp.model.wallClockTriggerToElapsedRealtime
 import com.example.harleyapp.system.ExactAlarmAccessController
 
 /**
@@ -80,14 +83,24 @@ class WechatReminderScheduler(context: Context) {
     }
 
     /**
-     * 在指定绝对时间提交微信等待提醒，并把该时间同步写入仓库。
+     * 将指定绝对时间换算为开机时钟后提交微信等待提醒，并把原始绝对时间同步写入仓库。
+     *
+     * 使用方法：
+     * 新建倒计时和恢复已有倒计时都会进入本函数。无精确权限时使用开机时钟兜底；有权限时
+     * 使用系统闹钟级Alarm，避免定制系统的后台待机
+     * 策略把用户明确设置的提醒长期推迟。仓库仍保存Unix时间戳供倒计时页面显示和恢复。
      *
      * @param triggerAtMillis 下一次提醒的Unix毫秒时间戳。
      *
      * @return Alarm提交和状态保存都成功返回true，否则返回false。
      */
     private fun scheduleAt(triggerAtMillis: Long): Boolean {
-        if (triggerAtMillis <= System.currentTimeMillis()) {
+        val elapsedTriggerAtMillis = wallClockTriggerToElapsedRealtime(
+            triggerAtMillis = triggerAtMillis,
+            currentTimeMillis = System.currentTimeMillis(),
+            elapsedRealtimeMillis = SystemClock.elapsedRealtime()
+        )
+        if (elapsedTriggerAtMillis == null) {
             return false
         }
 
@@ -96,16 +109,18 @@ class WechatReminderScheduler(context: Context) {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
                 exactAlarmAccessController.isGranted()
             ) {
-                alarmManager.setExactAndAllowWhileIdle(
-                    AlarmManager.RTC_WAKEUP,
-                    triggerAtMillis,
+                alarmManager.setAlarmClock(
+                    AlarmManager.AlarmClockInfo(
+                        triggerAtMillis,
+                        createAlarmClockInfoPendingIntent()
+                    ),
                     pendingIntent
                 )
-                Log.i(TAG, "Exact WeChat reminder scheduled")
+                Log.i(TAG, "Alarm-clock WeChat reminder scheduled")
             } else {
                 alarmManager.setAndAllowWhileIdle(
-                    AlarmManager.RTC_WAKEUP,
-                    triggerAtMillis,
+                    AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                    elapsedTriggerAtMillis,
                     pendingIntent
                 )
                 Log.w(TAG, "Inexact WeChat reminder scheduled because exact access is missing")
@@ -165,6 +180,23 @@ class WechatReminderScheduler(context: Context) {
         )
     }
 
+    /**
+     * 创建系统闹钟标记被点击时打开HarleyApp的展示入口。
+     *
+     * @return 指向[MainActivity]的不可变PendingIntent；不会提前触发微信提醒广播。
+     */
+    private fun createAlarmClockInfoPendingIntent(): PendingIntent {
+        val intent = Intent(applicationContext, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        return PendingIntent.getActivity(
+            applicationContext,
+            ALARM_CLOCK_INFO_REQUEST_CODE,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+    }
+
     companion object {
         const val ACTION_SHOW_WECHAT_REMINDER =
             "com.example.harleyapp.action.SHOW_WECHAT_UNREAD_REMINDER"
@@ -172,6 +204,7 @@ class WechatReminderScheduler(context: Context) {
         const val NOTIFICATION_ID = 41_082
         private const val TAG = "WechatReminder"
         private const val REMINDER_REQUEST_CODE = 41_081
+        private const val ALARM_CLOCK_INFO_REQUEST_CODE = 41_083
         private const val MILLIS_PER_MINUTE = 60_000L
         private const val MISSED_REMINDER_DELAY_MILLIS = 2_000L
     }

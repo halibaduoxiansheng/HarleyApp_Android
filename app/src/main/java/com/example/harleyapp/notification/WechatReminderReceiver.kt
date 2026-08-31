@@ -76,6 +76,15 @@ class WechatReminderReceiver : BroadcastReceiver() {
             scheduler.schedule(settings.intervalMinutes)
             return
         }
+        if (!NotificationAlertChannels.isChannelEnabled(
+                notificationManager,
+                WechatReminderScheduler.CHANNEL_ID
+            )
+        ) {
+            Log.w(TAG, "WeChat reminder channel is disabled")
+            scheduler.schedule(settings.intervalMinutes)
+            return
+        }
 
         val pendingCount = status.pendingNotificationCount
         val currentNotificationNumber = status.notificationsShownInCycle + 1
@@ -98,7 +107,8 @@ class WechatReminderReceiver : BroadcastReceiver() {
             )
             .setContentIntent(createOpenWechatPendingIntent(applicationContext))
             .setAutoCancel(true)
-            .setCategory(Notification.CATEGORY_REMINDER)
+            .setCategory(Notification.CATEGORY_ALARM)
+            .setOnlyAlertOnce(false)
             .setVisibility(Notification.VISIBILITY_PRIVATE)
             .setNumber(pendingCount)
             .addAction(
@@ -111,8 +121,24 @@ class WechatReminderReceiver : BroadcastReceiver() {
             .build()
 
         // 先移除同编号旧提醒再重新发布，确保每个用户设定的间隔都能重新触发提示音或振动。
-        notificationManager.cancel(WechatReminderScheduler.NOTIFICATION_ID)
-        notificationManager.notify(WechatReminderScheduler.NOTIFICATION_ID, notification)
+        val notificationDisplayed = runCatching {
+            notificationManager.cancel(WechatReminderScheduler.NOTIFICATION_ID)
+            notificationManager.notify(WechatReminderScheduler.NOTIFICATION_ID, notification)
+            true
+        }.onFailure { error ->
+            Log.e(TAG, "Failed to display WeChat waiting reminder", error)
+        }.getOrDefault(false)
+        if (!notificationDisplayed) {
+            scheduler.schedule(settings.intervalMinutes)
+            return
+        }
+        if (!ReminderAlertPlaybackService.start(
+                context = applicationContext,
+                alertChannelId = WechatReminderScheduler.CHANNEL_ID
+            )
+        ) {
+            Log.e(TAG, "Failed to start WeChat reminder alert playback")
+        }
         val updatedStatus = repository.recordReminderShown(System.currentTimeMillis())
         if (updatedStatus.pendingNotificationCount > 0) {
             scheduler.schedule(settings.intervalMinutes)

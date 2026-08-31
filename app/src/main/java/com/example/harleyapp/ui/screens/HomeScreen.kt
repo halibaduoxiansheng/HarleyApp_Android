@@ -63,6 +63,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -72,7 +73,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import com.example.harleyapp.model.CompanionCategory
+import com.example.harleyapp.model.CompanionInteraction
+import com.example.harleyapp.model.CompanionOperationResult
 import com.example.harleyapp.model.CompanionProgress
+import com.example.harleyapp.model.CompanionShopItem
 import com.example.harleyapp.model.DeviceSnapshot
 import com.example.harleyapp.model.ENGLISH_WORD_MASTERY_COUNT
 import com.example.harleyapp.model.EnglishWord
@@ -118,6 +122,9 @@ import java.util.Locale
  * @param onSaveWebsite 新增或编辑网站的同步保存回调，成功返回true。
  * @param onDeleteWebsite 删除网站的同步回调，成功返回true。
  * @param onSelectCompanionCategory 更换玩偶分类的同步保存回调，成功返回true。
+ * @param onPurchaseCompanionItem 使用金币购买伙伴物品的回调。
+ * @param onUseCompanionItem 使用背包物品与伙伴互动的回调。
+ * @param onCompleteCompanionInteraction 完成免费互动或小游戏后的回调。
  * @param onQuickSearch 提交首页顶部快捷搜索词的回调；宿主收到后打开完整全局搜索页。
  *
  * @return 无返回值，直接输出首页界面。
@@ -146,12 +153,16 @@ fun HomeScreen(
     onSaveWebsite: (WebsiteShortcut) -> Boolean,
     onDeleteWebsite: (String) -> Boolean,
     onSelectCompanionCategory: (CompanionCategory) -> Boolean,
+    onPurchaseCompanionItem: (CompanionShopItem) -> CompanionOperationResult,
+    onUseCompanionItem: (CompanionShopItem) -> CompanionOperationResult,
+    onCompleteCompanionInteraction: (CompanionInteraction) -> CompanionOperationResult,
     onQuickSearch: (String) -> Unit
 ) {
     var snapshot by remember {
         mutableStateOf(DeviceSnapshot())
     }
     val listState = rememberLazyListState()
+    val focusManager = LocalFocusManager.current
     var quickSearchVisible by rememberSaveable { mutableStateOf(true) }
     var quickSearchQuery by rememberSaveable { mutableStateOf("") }
     var quickSearchFocused by remember { mutableStateOf(false) }
@@ -187,6 +198,9 @@ fun HomeScreen(
                 }
                 when {
                     quickSearchVisible && accumulatedScroll >= QUICK_SEARCH_HIDE_DISTANCE_PX -> {
+                        // 用户开始浏览首页内容时同步收起键盘和输入焦点，否则焦点状态会强制搜索条继续显示。
+                        focusManager.clearFocus(force = true)
+                        quickSearchFocused = false
                         quickSearchVisible = false
                         accumulatedScroll = 0
                     }
@@ -280,7 +294,10 @@ fun HomeScreen(
         item {
             CompanionCard(
                 progress = companionProgress,
-                onSelectCategory = onSelectCompanionCategory
+                onSelectCategory = onSelectCompanionCategory,
+                onPurchaseItem = onPurchaseCompanionItem,
+                onUseItem = onUseCompanionItem,
+                onCompleteInteraction = onCompleteCompanionInteraction
             )
         }
 

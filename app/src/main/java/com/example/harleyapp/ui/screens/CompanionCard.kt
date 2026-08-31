@@ -36,7 +36,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.harleyapp.model.CompanionCategory
+import com.example.harleyapp.model.CompanionInteraction
+import com.example.harleyapp.model.CompanionOperationResult
 import com.example.harleyapp.model.CompanionProgress
+import com.example.harleyapp.model.CompanionShopItem
 import com.example.harleyapp.model.CompanionTask
 
 /**
@@ -48,6 +51,9 @@ import com.example.harleyapp.model.CompanionTask
  *
  * @param progress 当前玩偶成长状态。
  * @param onSelectCategory 保存新玩偶分类的回调，成功返回true。
+ * @param onPurchaseItem 使用金币购买伙伴物品的回调。
+ * @param onUseItem 使用背包物品与伙伴互动的回调。
+ * @param onCompleteInteraction 完成免费互动或小游戏后的回调。
  * @param modifier 外部布局修饰器。
  *
  * @return 无返回值，直接输出成长卡片和相关对话框。
@@ -56,6 +62,9 @@ import com.example.harleyapp.model.CompanionTask
 fun CompanionCard(
     progress: CompanionProgress,
     onSelectCategory: (CompanionCategory) -> Boolean,
+    onPurchaseItem: (CompanionShopItem) -> CompanionOperationResult,
+    onUseItem: (CompanionShopItem) -> CompanionOperationResult,
+    onCompleteInteraction: (CompanionInteraction) -> CompanionOperationResult,
     modifier: Modifier = Modifier
 ) {
     var showCategoryDialog by remember {
@@ -64,8 +73,14 @@ fun CompanionCard(
     var showCollectionDialog by remember {
         mutableStateOf(false)
     }
+    var showInteractionDialog by remember {
+        mutableStateOf(false)
+    }
     val requiredTasks = CompanionTask.entries.filter { task ->
         task.countsTowardDailyBonus
+    }
+    val extraTasks = CompanionTask.entries.filter { task ->
+        !task.countsTowardDailyBonus && task != CompanionTask.DAILY_BONUS
     }
     val completedRequiredTasks = requiredTasks.count { task ->
         task in progress.completedTasks
@@ -93,6 +108,18 @@ fun CompanionCard(
             progress = progress,
             onDismiss = {
                 showCollectionDialog = false
+            }
+        )
+    }
+
+    if (showInteractionDialog) {
+        CompanionInteractionDialog(
+            progress = progress,
+            onPurchaseItem = onPurchaseItem,
+            onUseItem = onUseItem,
+            onCompleteInteraction = onCompleteInteraction,
+            onDismiss = {
+                showInteractionDialog = false
             }
         )
     }
@@ -184,7 +211,7 @@ fun CompanionCard(
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     Text(
-                        text = "今日任务 $completedRequiredTasks/${requiredTasks.size}",
+                        text = "基础任务 $completedRequiredTasks/${requiredTasks.size}",
                         color = Color.White,
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.Bold
@@ -206,13 +233,41 @@ fun CompanionCard(
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = if (bonusCompleted) FontWeight.Bold else FontWeight.Normal
                     )
+
+                    val completedExtraTasks = extraTasks.count { task ->
+                        task in progress.completedTasks
+                    }
+                    Text(
+                        modifier = Modifier.padding(top = 6.dp),
+                        text = "额外成长 $completedExtraTasks/${extraTasks.size}  ·  " +
+                            "阅读 ${progress.readingMillisToday / 60_000L} 分钟",
+                        color = Color.White,
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                    extraTasks.forEach { task ->
+                        CompanionTaskRow(
+                            task = task,
+                            completed = task in progress.completedTasks
+                        )
+                    }
                 }
             }
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End
+                verticalAlignment = Alignment.CenterVertically
             ) {
+                Text(
+                    modifier = Modifier.weight(1f),
+                    text = "金币 ${progress.coins}",
+                    color = Color.White,
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold
+                )
+                TextButton(onClick = { showInteractionDialog = true }) {
+                    Text(text = "伙伴互动", color = Color.White)
+                }
                 TextButton(onClick = { showCategoryDialog = true }) {
                     Text(text = "更换伙伴", color = Color.White)
                 }

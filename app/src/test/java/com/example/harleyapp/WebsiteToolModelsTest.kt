@@ -6,8 +6,11 @@ import com.example.harleyapp.model.MAX_WEBSITE_PLAYBACK_RATE
 import com.example.harleyapp.model.MIN_NIGHT_OVERLAY_ALPHA
 import com.example.harleyapp.model.MIN_TEXT_ZOOM_PERCENT
 import com.example.harleyapp.model.MIN_WEBSITE_PLAYBACK_RATE
+import com.example.harleyapp.model.WebsiteBookmarkSaveResult
 import com.example.harleyapp.model.WebsiteToolSettings
 import com.example.harleyapp.ui.screens.calculateFullscreenBallOffset
+import com.example.harleyapp.ui.screens.shouldShowInlineWebsiteScriptTools
+import com.example.harleyapp.ui.screens.websiteBookmarkSaveMessage
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -92,5 +95,58 @@ class WebsiteToolModelsTest {
         assertEquals(120f, calculateFullscreenBallOffset(80f, 90f, 120f), 0.001f)
         assertEquals(-120f, calculateFullscreenBallOffset(-80f, -90f, 120f), 0.001f)
         assertEquals(0f, calculateFullscreenBallOffset(20f, 10f, -1f), 0.001f)
+    }
+
+    /**
+     * 验证普通网页脚本栏默认隐藏、视频播放后自动显示，并允许用户在本轮播放中主动收起。
+     *
+     * @return 无返回值；任一显示优先级不符合交互约定时由JUnit报告失败。
+     */
+    @Test
+    fun inlineScriptToolsRespectPlaybackAndManualVisibility() {
+        assertFalse(
+            shouldShowInlineWebsiteScriptTools(
+                manuallyOpen = false,
+                playingVideoCount = 0,
+                suppressAutomaticOpen = false
+            )
+        )
+        assertTrue(
+            shouldShowInlineWebsiteScriptTools(
+                manuallyOpen = false,
+                playingVideoCount = 1,
+                suppressAutomaticOpen = false
+            )
+        )
+        assertFalse(
+            shouldShowInlineWebsiteScriptTools(
+                manuallyOpen = false,
+                playingVideoCount = 1,
+                suppressAutomaticOpen = true
+            )
+        )
+        assertTrue(
+            shouldShowInlineWebsiteScriptTools(
+                manuallyOpen = true,
+                playingVideoCount = 0,
+                suppressAutomaticOpen = true
+            )
+        )
+    }
+
+    /**
+     * 验证脚本收藏对成功、重复、无效网址和存储失败给出不同反馈。
+     *
+     * @return 无返回值；任一状态被混成相同提示时由JUnit报告失败。
+     */
+    @Test
+    fun bookmarkCurrentPageReportsSpecificResult() {
+        val messages = WebsiteBookmarkSaveResult.entries.map(::websiteBookmarkSaveMessage)
+
+        assertEquals(WebsiteBookmarkSaveResult.entries.size, messages.distinct().size)
+        assertTrue(messages[WebsiteBookmarkSaveResult.SAVED.ordinal].contains("已收藏"))
+        assertTrue(messages[WebsiteBookmarkSaveResult.ALREADY_SAVED.ordinal].contains("已经收藏"))
+        assertTrue(messages[WebsiteBookmarkSaveResult.INVALID_URL.ordinal].contains("HTTP或HTTPS"))
+        assertTrue(messages[WebsiteBookmarkSaveResult.SAVE_FAILED.ordinal].contains("失败"))
     }
 }

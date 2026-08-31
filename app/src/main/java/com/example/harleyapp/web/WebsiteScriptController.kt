@@ -81,6 +81,29 @@ class WebsiteScriptController {
     }
 
     /**
+     * 查询当前页面正在播放的视频数量。
+     *
+     * 使用方法：
+     * WebsiteScreen可见期间低频调用，用于只在视频真正开始播放后自动显示脚本工具栏。查询优先复用
+     * 已注入的网页工具对象，因此同源iframe中的视频也可统计；没有注入对象时安全回退到当前文档。
+     *
+     * @param webView 当前网站WebView。
+     * @param onPlayingVideoCount 返回未暂停且未播放结束的视频数量；脚本异常时返回0。
+     *
+     * @return 无返回值，结果通过回调交付。
+     */
+    fun queryPlayingVideoCount(
+        webView: WebView,
+        onPlayingVideoCount: (Int) -> Unit
+    ) {
+        evaluateMediaScript(
+            webView = webView,
+            script = PLAYING_VIDEO_COUNT_SCRIPT,
+            callback = onPlayingVideoCount
+        )
+    }
+
+    /**
      * 包装一次针对当前主要媒体的操作。
      *
      * @param actionBody 找到media变量后执行的JavaScript语句。
@@ -127,6 +150,23 @@ class WebsiteScriptController {
                 if (!media) return 0;
                 __HARLEY_ACTION__
                 return 1;
+            })();
+        """.trimIndent()
+
+        val PLAYING_VIDEO_COUNT_SCRIPT = """
+            (function() {
+                var tools = window.__harleyWebToolsV1;
+                var items = [];
+                if (tools && tools.documents) {
+                    tools.documents().forEach(function(doc) {
+                        items = items.concat(Array.prototype.slice.call(doc.querySelectorAll('video')));
+                    });
+                } else {
+                    items = Array.prototype.slice.call(document.querySelectorAll('video'));
+                }
+                return items.filter(function(video) {
+                    return !video.paused && !video.ended && video.readyState > 1;
+                }).length;
             })();
         """.trimIndent()
 

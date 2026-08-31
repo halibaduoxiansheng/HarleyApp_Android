@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
 import com.example.harleyapp.data.local.RoomBackedPreferences
+import com.example.harleyapp.model.ReminderRepeatUnit
 import com.example.harleyapp.model.ScheduledReminder
 import com.example.harleyapp.model.calculateNextReminderAt
 import org.json.JSONArray
@@ -69,7 +70,8 @@ class ReminderRepository(context: Context) {
      *
      * 使用方法：
      * 新增时传入id为0的计划；修改时传入原计划id。内容不能为空，时间戳必须为正数，
-     * 重复间隔只接受0到365天。成功保存后，调用方还需要通过ReminderScheduler更新系统Alarm。
+     * 重复间隔数值只接受0到999，单位由ReminderRepeatUnit约束。成功保存后，调用方还需要通过
+     * ReminderScheduler更新系统Alarm。
      *
      * @param reminder 待保存的通知计划。
      *
@@ -80,7 +82,7 @@ class ReminderRepository(context: Context) {
         val normalizedContent = reminder.content.trim().take(MAX_CONTENT_LENGTH)
         if (normalizedContent.isBlank() ||
             reminder.nextTriggerAtMillis <= 0L ||
-            reminder.repeatIntervalDays !in MIN_REPEAT_INTERVAL_DAYS..MAX_REPEAT_INTERVAL_DAYS
+            reminder.repeatIntervalValue !in MIN_REPEAT_INTERVAL_VALUE..MAX_REPEAT_INTERVAL_VALUE
         ) {
             return null
         }
@@ -156,14 +158,15 @@ class ReminderRepository(context: Context) {
 
         val currentReminder = reminders[index]
         if (currentReminder.nextTriggerAtMillis != expectedTriggerAtMillis ||
-            (currentReminder.repeatIntervalDays == 0 && currentReminder.lastTriggeredAtMillis > 0L)
+            (!currentReminder.isRecurring && currentReminder.lastTriggeredAtMillis > 0L)
         ) {
             return null
         }
 
         val nextTriggerAtMillis = calculateNextReminderAt(
             currentTriggerAtMillis = currentReminder.nextTriggerAtMillis,
-            repeatIntervalDays = currentReminder.repeatIntervalDays,
+            repeatIntervalValue = currentReminder.repeatIntervalValue,
+            repeatIntervalUnit = currentReminder.repeatIntervalUnit,
             nowMillis = triggeredAtMillis
         )
         val updatedReminder = currentReminder.copy(
@@ -238,14 +241,29 @@ class ReminderRepository(context: Context) {
     /**
      * 把持久化JSON恢复为通知计划模型。
      *
-     * @return 包含内容、时间、重复间隔和触发状态的ScheduledReminder。
+     * 旧版本仅保存repeatIntervalDays，本函数会把该字段迁移为数值加DAY单位，不丢失已有计划。
+     *
+     * @return 包含内容、时间、重复数值、单位和触发状态的ScheduledReminder。
      */
     private fun JSONObject.toScheduledReminder(): ScheduledReminder {
+        val hasNewRepeatValue = has(JSON_REPEAT_INTERVAL_VALUE)
+        val repeatIntervalValue = if (hasNewRepeatValue) {
+            optInt(JSON_REPEAT_INTERVAL_VALUE, 0)
+        } else {
+            optInt(JSON_LEGACY_REPEAT_INTERVAL_DAYS, 0)
+        }
+        val repeatIntervalUnit = if (hasNewRepeatValue) {
+            ReminderRepeatUnit.fromStorageValue(optString(JSON_REPEAT_INTERVAL_UNIT, null))
+        } else {
+            ReminderRepeatUnit.DAY
+        }
+
         return ScheduledReminder(
             id = getLong(JSON_ID),
             content = optString(JSON_CONTENT, ""),
             nextTriggerAtMillis = getLong(JSON_NEXT_TRIGGER_AT),
-            repeatIntervalDays = optInt(JSON_REPEAT_INTERVAL_DAYS, 0),
+            repeatIntervalValue = repeatIntervalValue,
+            repeatIntervalUnit = repeatIntervalUnit,
             createdAtMillis = optLong(JSON_CREATED_AT, 0L),
             lastTriggeredAtMillis = optLong(JSON_LAST_TRIGGERED_AT, 0L)
         )
@@ -261,7 +279,8 @@ class ReminderRepository(context: Context) {
             .put(JSON_ID, id)
             .put(JSON_CONTENT, content)
             .put(JSON_NEXT_TRIGGER_AT, nextTriggerAtMillis)
-            .put(JSON_REPEAT_INTERVAL_DAYS, repeatIntervalDays)
+            .put(JSON_REPEAT_INTERVAL_VALUE, repeatIntervalValue)
+            .put(JSON_REPEAT_INTERVAL_UNIT, repeatIntervalUnit.storageValue)
             .put(JSON_CREATED_AT, createdAtMillis)
             .put(JSON_LAST_TRIGGERED_AT, lastTriggeredAtMillis)
     }
@@ -273,11 +292,13 @@ class ReminderRepository(context: Context) {
         const val JSON_ID = "id"
         const val JSON_CONTENT = "content"
         const val JSON_NEXT_TRIGGER_AT = "nextTriggerAtMillis"
-        const val JSON_REPEAT_INTERVAL_DAYS = "repeatIntervalDays"
+        const val JSON_REPEAT_INTERVAL_VALUE = "repeatIntervalValue"
+        const val JSON_REPEAT_INTERVAL_UNIT = "repeatIntervalUnit"
+        const val JSON_LEGACY_REPEAT_INTERVAL_DAYS = "repeatIntervalDays"
         const val JSON_CREATED_AT = "createdAtMillis"
         const val JSON_LAST_TRIGGERED_AT = "lastTriggeredAtMillis"
         const val MAX_CONTENT_LENGTH = 1_000
-        const val MIN_REPEAT_INTERVAL_DAYS = 0
-        const val MAX_REPEAT_INTERVAL_DAYS = 365
+        const val MIN_REPEAT_INTERVAL_VALUE = 0
+        const val MAX_REPEAT_INTERVAL_VALUE = 999
     }
 }

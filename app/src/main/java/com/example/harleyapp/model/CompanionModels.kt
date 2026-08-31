@@ -234,6 +234,13 @@ enum class CompanionTask(
     FITNESS_ITEM("完成一项运动", 15),
     FITNESS_ALL("完成全部运动", 25),
     SHORTCUT_LAUNCH("打开快捷应用", 5),
+    ENGLISH_LEARN("学习英语单词", 10, false),
+    EBOOK_READ_5_MINUTES("阅读电子书5分钟", 5, false),
+    EBOOK_READ_15_MINUTES("阅读电子书15分钟", 10, false),
+    EBOOK_READ_30_MINUTES("阅读电子书30分钟", 15, false),
+    NOTEBOOK_PUBLISH("完成一篇笔记", 15, false),
+    HOT_TOPIC_VIEW("查看热点事件", 5, false),
+    COMPANION_INTERACTION("完成伙伴互动", 5, false),
     DAILY_BONUS("全部任务奖励", 20, false)
 }
 
@@ -248,14 +255,28 @@ enum class CompanionTask(
  * @param totalExperience 历史累计经验，跨天和切换分类都保留。
  * @param taskEpochDay completedTasks所属日期，以1970-01-01起算天数表示。
  * @param completedTasks 当天已经领取过经验的任务集合。
+ * @param coins 当前可用于伙伴商店的金币余额。
+ * @param lastDailyCoinEpochDay 最近一次领取每日登录金币的日期；日期必须严格增加才能再次领取。
+ * @param readingMillisToday 当天在前台阅读器中累计的有效阅读毫秒数。
+ * @param consumableInventory 已购买但尚未使用的消耗品数量。
+ * @param ownedPermanentItems 已永久购买的玩具和道具。
+ * @param rewardedPermanentItemsToday 当天已经领取过首次互动经验的永久道具。
+ * @param interactionCountsToday 每一种免费互动在当天已经完成的次数。
  */
 data class CompanionProgress(
     val category: CompanionCategory = CompanionCategory.FOREST,
     val totalExperience: Int = 0,
     val taskEpochDay: Long = 0L,
-    val completedTasks: Set<CompanionTask> = emptySet()
+    val completedTasks: Set<CompanionTask> = emptySet(),
+    val coins: Int = 0,
+    val lastDailyCoinEpochDay: Long = Long.MIN_VALUE,
+    val readingMillisToday: Long = 0L,
+    val consumableInventory: Map<CompanionShopItem, Int> = emptyMap(),
+    val ownedPermanentItems: Set<CompanionShopItem> = emptySet(),
+    val rewardedPermanentItemsToday: Set<CompanionShopItem> = emptySet(),
+    val interactionCountsToday: Map<CompanionInteraction, Int> = emptyMap()
 ) {
-    /** 当前等级，从Lv.1开始，每累计100经验提升一级，达到Lv.20后封顶。 */
+    /** 当前等级，从Lv.1开始，每累计100经验提升一级，达到Lv.100后封顶。 */
     val level: Int
         get() = (totalExperience.coerceAtLeast(0) / EXPERIENCE_PER_LEVEL + 1)
             .coerceAtMost(MAX_LEVEL)
@@ -272,6 +293,12 @@ data class CompanionProgress(
     val unlockedSkills: List<CompanionSkill>
         get() = category.skills.filter { skill -> level >= skill.unlockLevel }
 
+    /** 当前等级已经开放的全部免费互动。 */
+    val unlockedInteractions: List<CompanionInteraction>
+        get() = CompanionInteraction.entries.filter { interaction ->
+            level >= interaction.unlockLevel
+        }
+
     /**
      * 计算下一个尚未解锁的形态或技能提示。
      *
@@ -284,6 +311,9 @@ data class CompanionProgress(
             }
             category.skills.forEach { skill ->
                 add(skill.unlockLevel to "技能·${skill.name}")
+            }
+            CompanionInteraction.entries.forEach { interaction ->
+                add(interaction.unlockLevel to "互动·${interaction.displayName}")
             }
         }
         val nextUnlock = candidates
@@ -299,7 +329,9 @@ data class CompanionProgress(
 
     companion object {
         const val EXPERIENCE_PER_LEVEL = 100
-        const val MAX_LEVEL = 20
+        const val MAX_LEVEL = 100
+        const val MAX_TOTAL_EXPERIENCE = (MAX_LEVEL - 1) * EXPERIENCE_PER_LEVEL
+        const val MAX_COINS = 999_999
     }
 }
 
@@ -319,15 +351,8 @@ fun CompanionProgress.afterClaimingTask(
     task: CompanionTask,
     currentEpochDay: Long
 ): CompanionProgress {
-    val currentDayTasks = if (taskEpochDay == currentEpochDay) {
-        completedTasks
-    } else {
-        emptySet()
-    }
-    val currentDayProgress = copy(
-        taskEpochDay = currentEpochDay,
-        completedTasks = currentDayTasks
-    )
+    val currentDayProgress = normalizedForDay(currentEpochDay)
+    val currentDayTasks = currentDayProgress.completedTasks
     if (task == CompanionTask.DAILY_BONUS || task in currentDayTasks) {
         return currentDayProgress
     }
@@ -343,15 +368,37 @@ fun CompanionProgress.afterClaimingTask(
         updatedTasks.add(CompanionTask.DAILY_BONUS)
         gainedExperience += CompanionTask.DAILY_BONUS.experience
     }
-    val updatedExperience = totalExperience
+    val updatedExperience = currentDayProgress.totalExperience
         .coerceAtLeast(0)
         .toLong()
         .plus(gainedExperience.toLong())
-        .coerceAtMost(Int.MAX_VALUE.toLong())
+        .coerceAtMost(CompanionProgress.MAX_TOTAL_EXPERIENCE.toLong())
         .toInt()
 
     return currentDayProgress.copy(
         totalExperience = updatedExperience,
         completedTasks = updatedTasks
+    )
+}
+
+/**
+ * 把伙伴状态切换到指定本地日期，并只清空真正按天统计的数据。
+ *
+ * 使用方法：
+ * 仓库读取状态、发放任务、记录阅读或使用永久道具前统一调用。金币、累计经验、背包和永久道具
+ * 会跨天保留；任务、阅读时长和永久道具每日首次经验会在日期变化时清空。
+ *
+ * @param currentEpochDay 当前本地日期对应的Epoch Day。
+ * @return 已与当前日期对齐的伙伴状态；同一天调用时返回当前对象。
+ */
+fun CompanionProgress.normalizedForDay(currentEpochDay: Long): CompanionProgress {
+    if (taskEpochDay == currentEpochDay) return this
+
+    return copy(
+        taskEpochDay = currentEpochDay,
+        completedTasks = emptySet(),
+        readingMillisToday = 0L,
+        rewardedPermanentItemsToday = emptySet(),
+        interactionCountsToday = emptyMap()
     )
 }

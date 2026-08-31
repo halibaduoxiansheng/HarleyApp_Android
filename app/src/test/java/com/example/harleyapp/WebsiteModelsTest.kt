@@ -1,5 +1,7 @@
 package com.example.harleyapp
 
+import com.example.harleyapp.data.initialWebsiteShortcuts
+import com.example.harleyapp.data.removeObsoleteBuiltInWebsites
 import com.example.harleyapp.model.normalizeWebsiteUrl
 import com.example.harleyapp.model.nextWebsiteCarouselPage
 import com.example.harleyapp.model.resolveDefaultWebsiteId
@@ -29,6 +31,34 @@ import org.junit.Test
 class WebsiteModelsTest {
 
     /**
+     * 验证新安装不再自动写入开发者网站、搜书网站或其他代码内置收藏。
+     *
+     * @return 无返回值；初始列表出现任何网站时由JUnit报告失败。
+     */
+    @Test
+    fun freshInstallStartsWithEmptyWebsiteCollection() {
+        assertTrue(initialWebsiteShortcuts().isEmpty())
+    }
+
+    /**
+     * 验证升级清理只删除旧内置稳定id，不会按网址误删用户自己收藏的相同网站。
+     *
+     * @return 无返回值；旧内置项残留或用户收藏被误删时由JUnit报告失败。
+     */
+    @Test
+    fun upgradeRemovesOnlyObsoleteBuiltInWebsiteIds() {
+        val migrated = removeObsoleteBuiltInWebsites(
+            listOf(
+                WebsiteShortcut("default_halibaduo", "旧内置首页", "http://www.halibaduo.cn"),
+                WebsiteShortcut("builtin_jiumo_diary", "旧内置搜书", "https://www.jiumodiary.com/"),
+                WebsiteShortcut("user-copy", "用户自己的首页", "http://www.halibaduo.cn")
+            )
+        )
+
+        assertEquals(listOf("user-copy"), migrated.map(WebsiteShortcut::id))
+    }
+
+    /**
      * 验证省略协议时自动补充HTTPS，并保留用户填写的路径。
      *
      * @return 无返回值；结果不符时由JUnit报告失败。
@@ -51,6 +81,19 @@ class WebsiteModelsTest {
         assertEquals(
             "http://example.com/news",
             normalizeWebsiteUrl("http://example.com/news")
+        )
+    }
+
+    /**
+     * 验证任意合法域名的HTTPS地址与HTTP地址使用相同入口校验，不依赖域名白名单。
+     *
+     * @return 无返回值；合法HTTPS地址被拒绝或被替换协议时由JUnit报告失败。
+     */
+    @Test
+    fun explicitHttpsIsAcceptedWithoutDomainAllowlist() {
+        assertEquals(
+            "https://another-domain.example/path",
+            normalizeWebsiteUrl("https://another-domain.example/path")
         )
     }
 

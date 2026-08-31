@@ -134,6 +134,7 @@ private data class NotebookDatePickerRequest(
  *
  * @param initialArticleId 从全局搜索进入时需要直接打开的文章id；普通进入时传null。
  * @param onInitialArticleConsumed 初始文章已处理后的回调，避免以后重复打开旧目标。
+ * @param onArticlePublished 新草稿第一次正式发布成功后的回调；编辑已发布文章不会调用。
  * @param onBack 返回功能中心概览的回调。
  * @param modifier 外部页面安全边距。
  *
@@ -143,6 +144,7 @@ private data class NotebookDatePickerRequest(
 fun NotebookScreen(
     initialArticleId: String? = null,
     onInitialArticleConsumed: () -> Unit = {},
+    onArticlePublished: () -> Unit = {},
     onBack: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -340,6 +342,9 @@ fun NotebookScreen(
                             pageMessage = if (savedDraft) "草稿已自动保存" else "未保存空白草稿"
                         },
                         onCompleted = { savedArticle ->
+                            if (article.isDraft) {
+                                onArticlePublished()
+                            }
                             editorArticle = null
                             refreshArticles()
                             selectedArticleId = savedArticle.id

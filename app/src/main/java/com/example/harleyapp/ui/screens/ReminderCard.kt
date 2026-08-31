@@ -5,11 +5,14 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -29,8 +32,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.harleyapp.model.ReminderRepeatUnit
 import com.example.harleyapp.model.ScheduledReminder
-import com.example.harleyapp.model.isReminderTriggerInFuture
+import com.example.harleyapp.model.resolveInitialReminderTriggerAt
 import com.example.harleyapp.ui.components.HarleyDatePickerDialog
 import com.example.harleyapp.ui.components.HarleyTimePickerDialog
 import java.time.Instant
@@ -50,8 +54,13 @@ import java.time.format.DateTimeFormatter
  * @param reminders 当前本机保存的全部通用通知计划。
  * @param notificationPermissionGranted 是否允许本应用发布通知。
  * @param exactAlarmPermissionGranted 是否允许本应用使用精确Alarm准时唤醒。
+ * @param notificationBackgroundUnrestricted 是否已允许App忽略系统电池优化。
  * @param onRequestNotificationPermission 请求Android通知权限的回调。
  * @param onRequestExactAlarmPermission 打开Android“闹钟和提醒”特殊权限页面的回调。
+ * @param onChooseReminderSound 打开HarleyApp普通提醒独立提示音选择器的回调。
+ * @param onRequestNotificationBackgroundAccess 请求解除电池后台限制的回调。
+ * @param onTestNotificationNow 立即发布声音和振动测试并返回结果文本的回调。
+ * @param onScheduleBackgroundNotificationTest 安排10秒后台测试并返回结果文本的回调。
  * @param onSaveReminder 新增或修改通知计划的回调；数据与Alarm均成功时返回true。
  * @param onDeleteReminder 删除通知计划并取消Alarm的回调；成功时返回true。
  * @param modifier 外部传入的布局修饰器。
@@ -63,8 +72,13 @@ fun ReminderCard(
     reminders: List<ScheduledReminder>,
     notificationPermissionGranted: Boolean,
     exactAlarmPermissionGranted: Boolean,
+    notificationBackgroundUnrestricted: Boolean,
     onRequestNotificationPermission: () -> Unit,
     onRequestExactAlarmPermission: () -> Unit,
+    onChooseReminderSound: () -> Unit,
+    onRequestNotificationBackgroundAccess: () -> Unit,
+    onTestNotificationNow: () -> String,
+    onScheduleBackgroundNotificationTest: () -> String,
     onSaveReminder: (ScheduledReminder) -> Boolean,
     onDeleteReminder: (Long) -> Boolean,
     modifier: Modifier = Modifier
@@ -87,6 +101,9 @@ fun ReminderCard(
     }
     var repeatIntervalText by rememberSaveable {
         mutableStateOf("0")
+    }
+    var repeatIntervalUnitValue by rememberSaveable {
+        mutableStateOf(ReminderRepeatUnit.DAY.storageValue)
     }
     var feedbackText by rememberSaveable {
         mutableStateOf("")
@@ -130,6 +147,7 @@ fun ReminderCard(
                                     selectedMinute = dateTime.minute
                                     contentText = ""
                                     repeatIntervalText = "0"
+                                    repeatIntervalUnitValue = ReminderRepeatUnit.DAY.storageValue
                                 }
                             }
                             "通知计划已删除"
@@ -169,7 +187,7 @@ fun ReminderCard(
                 fontWeight = FontWeight.Bold
             )
             Text(
-                text = "自定义日期、时间和内容；间隔天数设为0时只提醒一次。",
+                text = "自定义日期、时间和内容；重复间隔支持秒、分钟、小时、天和星期，数值为0时只提醒一次。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -219,6 +237,76 @@ fun ReminderCard(
                             Text(text = "允许准时提醒")
                         }
                     }
+                }
+            }
+
+            if (!notificationBackgroundUnrestricted) {
+                Card(
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.tertiaryContainer
+                    )
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            modifier = Modifier.weight(1f),
+                            text = "建议解除电池优化，并在小米应用详情中允许自启动，避免离开App后被限制。",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        TextButton(onClick = onRequestNotificationBackgroundAccess) {
+                            Text(text = "后台设置")
+                        }
+                    }
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                OutlinedButton(
+                    modifier = Modifier.weight(1f),
+                    onClick = onChooseReminderSound
+                ) {
+                    Text(text = "选择App提示音")
+                }
+                OutlinedButton(
+                    modifier = Modifier.weight(1f),
+                    onClick = onRequestNotificationBackgroundAccess
+                ) {
+                    Text(
+                        text = if (notificationBackgroundUnrestricted) {
+                            "后台已放行"
+                        } else {
+                            "后台运行设置"
+                        }
+                    )
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                OutlinedButton(
+                    modifier = Modifier.weight(1f),
+                    onClick = {
+                        feedbackText = onTestNotificationNow()
+                    }
+                ) {
+                    Text(text = "立即测试提示音")
+                }
+                OutlinedButton(
+                    modifier = Modifier.weight(1f),
+                    onClick = {
+                        feedbackText = onScheduleBackgroundNotificationTest()
+                    }
+                ) {
+                    Text(text = "10秒后台测试")
                 }
             }
 
@@ -272,31 +360,65 @@ fun ReminderCard(
                     }
                 },
                 label = {
-                    Text(text = "重复间隔（天）")
+                    Text(text = "重复间隔")
                 },
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 supportingText = {
-                    Text(text = "0表示不重复；例如3表示每隔3天、同一时间提醒")
+                    Text(
+                        text = if (repeatIntervalText == "0") {
+                            "0表示只提醒一次"
+                        } else {
+                            "每隔$repeatIntervalText${repeatUnitLabel(ReminderRepeatUnit.fromStorageValue(repeatIntervalUnitValue))}提醒；秒和分钟可能受系统省电策略延迟"
+                        }
+                    )
                 }
             )
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                ReminderRepeatUnit.entries.forEach { unit ->
+                    FilterChip(
+                        selected = repeatIntervalUnitValue == unit.storageValue,
+                        onClick = {
+                            repeatIntervalUnitValue = unit.storageValue
+                            feedbackText = ""
+                        },
+                        label = {
+                            Text(text = repeatUnitLabel(unit))
+                        }
+                    )
+                }
+            }
 
             Button(
                 modifier = Modifier.fillMaxWidth(),
                 onClick = {
-                    val repeatIntervalDays = repeatIntervalText.toIntOrNull()
-                    val triggerAtMillis = selectedDate
+                    val repeatIntervalValue = repeatIntervalText.toIntOrNull()
+                    val repeatIntervalUnit = ReminderRepeatUnit.fromStorageValue(
+                        repeatIntervalUnitValue
+                    )
+                    val selectedTriggerAtMillis = selectedDate
                         .atTime(selectedHour, selectedMinute)
                         .atZone(ZoneId.systemDefault())
                         .toInstant()
                         .toEpochMilli()
                     val currentTimeMillis = System.currentTimeMillis()
+                    val triggerAtMillis = resolveInitialReminderTriggerAt(
+                        selectedTriggerAtMillis = selectedTriggerAtMillis,
+                        nowMillis = currentTimeMillis
+                    )
                     feedbackText = when {
                         contentText.trim().isBlank() -> "请填写通知内容"
-                        repeatIntervalDays == null || repeatIntervalDays !in 0..MAX_REPEAT_DAYS ->
-                            "重复间隔请输入0到${MAX_REPEAT_DAYS}天"
-                        !isReminderTriggerInFuture(triggerAtMillis, currentTimeMillis) ->
-                            "首次提醒时间必须晚于当前时间"
+                        repeatIntervalValue == null ||
+                            repeatIntervalValue !in 0..MAX_REPEAT_INTERVAL_VALUE ->
+                            "重复间隔请输入0到$MAX_REPEAT_INTERVAL_VALUE"
+                        triggerAtMillis == null ->
+                            "首次提醒时间不能早于当前分钟"
                         else -> {
                             val oldReminder = editingReminder
                             val success = onSaveReminder(
@@ -304,7 +426,8 @@ fun ReminderCard(
                                     id = oldReminder?.id ?: NEW_REMINDER_ID,
                                     content = contentText,
                                     nextTriggerAtMillis = triggerAtMillis,
-                                    repeatIntervalDays = repeatIntervalDays,
+                                    repeatIntervalValue = repeatIntervalValue,
+                                    repeatIntervalUnit = repeatIntervalUnit,
                                     createdAtMillis = oldReminder?.createdAtMillis
                                         ?: System.currentTimeMillis(),
                                     lastTriggeredAtMillis = 0L
@@ -318,6 +441,7 @@ fun ReminderCard(
                                     selectedMinute = dateTime.minute
                                     contentText = ""
                                     repeatIntervalText = "0"
+                                    repeatIntervalUnitValue = ReminderRepeatUnit.DAY.storageValue
                                 }
                                 if (notificationPermissionGranted) {
                                     if (exactAlarmPermissionGranted) {
@@ -349,6 +473,7 @@ fun ReminderCard(
                             selectedMinute = dateTime.minute
                             contentText = ""
                             repeatIntervalText = "0"
+                            repeatIntervalUnitValue = ReminderRepeatUnit.DAY.storageValue
                         }
                         feedbackText = "已取消编辑"
                     }
@@ -392,7 +517,8 @@ fun ReminderCard(
                             selectedHour = triggerDateTime.hour
                             selectedMinute = triggerDateTime.minute
                             contentText = reminder.content
-                            repeatIntervalText = reminder.repeatIntervalDays.toString()
+                            repeatIntervalText = reminder.repeatIntervalValue.toString()
+                            repeatIntervalUnitValue = reminder.repeatIntervalUnit.storageValue
                             feedbackText = "正在编辑该通知计划"
                         },
                         onDelete = {
@@ -452,12 +578,12 @@ private fun ReminderRow(
     val nextDateTime = Instant.ofEpochMilli(reminder.nextTriggerAtMillis)
         .atZone(ZoneId.systemDefault())
         .toLocalDateTime()
-    val isCompletedOneTime = reminder.repeatIntervalDays == 0 &&
+    val isCompletedOneTime = !reminder.isRecurring &&
         reminder.lastTriggeredAtMillis > 0L
-    val repeatText = if (reminder.repeatIntervalDays == 0) {
+    val repeatText = if (!reminder.isRecurring) {
         "仅一次"
     } else {
-        "每隔${reminder.repeatIntervalDays}天"
+        "每隔${reminder.repeatIntervalValue}${repeatUnitLabel(reminder.repeatIntervalUnit)}"
     }
 
     Card(
@@ -516,15 +642,31 @@ private fun ReminderRow(
 }
 
 /**
- * 生成表单默认时间，取当前时间一小时后并清除秒和纳秒。
+ * 生成表单默认时间，直接使用当前日期和当前时分，不再默认增加一小时。
  *
  * @return 适合作为首次提醒默认值的本地日期时间。
  */
 private fun defaultReminderDateTime(): LocalDateTime {
     return LocalDateTime.now()
-        .plusHours(1)
         .withSecond(0)
         .withNano(0)
+}
+
+/**
+ * 把重复单位转换为界面使用的简体中文名称。
+ *
+ * @param unit 需要显示的秒、分钟、小时、天或星期枚举。
+ *
+ * @return 可直接拼接在重复数值之后的中文单位。
+ */
+private fun repeatUnitLabel(unit: ReminderRepeatUnit): String {
+    return when (unit) {
+        ReminderRepeatUnit.SECOND -> "秒"
+        ReminderRepeatUnit.MINUTE -> "分钟"
+        ReminderRepeatUnit.HOUR -> "小时"
+        ReminderRepeatUnit.DAY -> "天"
+        ReminderRepeatUnit.WEEK -> "星期"
+    }
 }
 
 /**
@@ -556,4 +698,4 @@ private val DATE_TIME_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"
 private const val NEW_REMINDER_ID = 0L
 private const val MAX_CONTENT_LENGTH = 1_000
 private const val MAX_REPEAT_TEXT_LENGTH = 3
-private const val MAX_REPEAT_DAYS = 365
+private const val MAX_REPEAT_INTERVAL_VALUE = 999

@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.SystemClock
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -21,6 +22,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
@@ -30,20 +32,28 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Snackbar
+import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.SwipeToDismissBox
+import androidx.compose.material3.SwipeToDismissBoxValue
+import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.draw.clip
@@ -56,6 +66,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.example.harleyapp.backup.AppBackupManager
 import com.example.harleyapp.data.CompanionRepository
+import com.example.harleyapp.data.DeveloperModeRepository
 import com.example.harleyapp.data.EnglishWordRepository
 import com.example.harleyapp.data.EbookRepository
 import com.example.harleyapp.data.FitnessRepository
@@ -72,6 +83,7 @@ import com.example.harleyapp.data.WebsiteCardBackgroundStore
 import com.example.harleyapp.data.WechatBillImporter
 import com.example.harleyapp.data.WechatReminderRepository
 import com.example.harleyapp.model.CompanionCategory
+import com.example.harleyapp.model.CompanionInteraction
 import com.example.harleyapp.model.CompanionTask
 import com.example.harleyapp.model.AppVisualTheme
 import com.example.harleyapp.model.ENGLISH_WORD_MASTERY_COUNT
@@ -83,6 +95,7 @@ import com.example.harleyapp.model.LedgerEntry
 import com.example.harleyapp.model.LocalCleanupStatus
 import com.example.harleyapp.model.LocalSearchType
 import com.example.harleyapp.model.ScheduledReminder
+import com.example.harleyapp.model.WebsiteBookmarkSaveResult
 import com.example.harleyapp.model.WebsiteLibrary
 import com.example.harleyapp.model.WebsitePalette
 import com.example.harleyapp.model.WebsiteShortcut
@@ -91,7 +104,12 @@ import com.example.harleyapp.model.WechatReminderSettings
 import com.example.harleyapp.model.WechatReminderStatus
 import com.example.harleyapp.model.homeCarouselWebsites
 import com.example.harleyapp.model.normalizeWebsiteUrl
+import com.example.harleyapp.notification.NotificationAlertChannels
 import com.example.harleyapp.notification.WechatReminderScheduler
+import com.example.harleyapp.notification.NotificationTestController
+import com.example.harleyapp.notification.NotificationTestResult
+import com.example.harleyapp.notification.ReminderSoundRepository
+import com.example.harleyapp.notification.ReminderSoundTarget
 import com.example.harleyapp.reminder.ReminderScheduler
 import com.example.harleyapp.system.DeviceMonitor
 import com.example.harleyapp.system.ExactAlarmAccessController
@@ -100,6 +118,7 @@ import com.example.harleyapp.system.InstalledAppsRepository
 import com.example.harleyapp.system.LocalCleanupManager
 import com.example.harleyapp.system.MobileDataUsageController
 import com.example.harleyapp.system.NotificationAccessController
+import com.example.harleyapp.system.NotificationSystemSettingsController
 import com.example.harleyapp.system.OfflineEnglishTts
 import com.example.harleyapp.system.OfflineEnglishTtsState
 import com.example.harleyapp.system.SystemStorageController
@@ -114,6 +133,7 @@ import com.example.harleyapp.ui.screens.HotTopicsScreen
 import com.example.harleyapp.ui.screens.LedgerScreen
 import com.example.harleyapp.ui.screens.MobileDataUsageScreen
 import com.example.harleyapp.ui.screens.ProfileScreen
+import com.example.harleyapp.ui.screens.ReminderSoundPickerDialog
 import com.example.harleyapp.ui.screens.TodayOverviewScreen
 import com.example.harleyapp.ui.screens.WebsiteBookmarkManagerScreen
 import com.example.harleyapp.ui.screens.WebsiteScreen
@@ -125,7 +145,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.first
+import java.net.URI
 import java.time.LocalDate
+import java.util.UUID
 
 /**
  * 应用一级页面和卡片详情页的统一导航目标。
@@ -155,6 +178,104 @@ private enum class AppSection(
     BOOKMARKS("网站收藏", "夹", showInBottomNavigation = false),
     WEBSITE("网站", "◎"),
     PROFILE("我的", "我")
+}
+
+/** 首页两次返回确认的有效间隔；超过该时间后再次返回会重新提示。 */
+internal const val HOME_EXIT_CONFIRM_WINDOW_MILLIS = 1_600L
+
+/** 首页退出提示自动消失时间，略短于二次返回确认窗口。 */
+private const val HOME_EXIT_HINT_DURATION_MILLIS = 1_500L
+
+/** 首页第一次返回时显示的固定提示，用于安全识别并自动关闭当前Snackbar。 */
+private const val HOME_EXIT_HINT_MESSAGE = "再按一次返回退出应用"
+
+/**
+ * 计算应用最外层返回操作应该进入的页面。
+ *
+ * 使用方法：
+ * 仅在页面自身没有消费返回事件时调用。底部一级页面统一返回首页；从首页或功能中心进入的详情页
+ * 先返回已记录的来源页，来源无效或指向自己时安全回退首页，从而保证连续返回最终一定到达首页。
+ *
+ * @param currentSectionName 当前页面的枚举名称。
+ * @param detailReturnSectionName 进入详情页前记录的来源页面名称。
+ *
+ * @return 下一步目标页面的枚举名称；输入无效时返回首页。
+ */
+internal fun resolveAppBackDestinationName(
+    currentSectionName: String,
+    detailReturnSectionName: String
+): String {
+    val currentSection = AppSection.entries.firstOrNull { section ->
+        section.name == currentSectionName
+    } ?: return AppSection.HOME.name
+
+    if (currentSection == AppSection.HOME || currentSection.showInBottomNavigation) {
+        return AppSection.HOME.name
+    }
+
+    val detailReturnSection = AppSection.entries.firstOrNull { section ->
+        section.name == detailReturnSectionName
+    } ?: AppSection.HOME
+    return if (detailReturnSection == currentSection) {
+        AppSection.HOME.name
+    } else {
+        detailReturnSection.name
+    }
+}
+
+/**
+ * 判断首页本次返回是否处于第二次确认窗口内。
+ *
+ * 使用方法：
+ * 第一次返回时记录[SystemClock.elapsedRealtime]；后续返回把上次与当前时间传入。本函数只做纯计算，
+ * 页面负责显示提示或结束Activity，因此系统返回键和侧滑返回手势能够复用同一规则。
+ *
+ * @param previousBackAtMillis 上一次首页返回的单调时钟毫秒数，尚未返回过时传0。
+ * @param currentBackAtMillis 本次返回的单调时钟毫秒数。
+ * @param confirmWindowMillis 两次返回允许的最大间隔毫秒数。
+ *
+ * @return 本次应退出App返回true；应只提示“再按一次”返回false。
+ */
+internal fun isHomeExitConfirmed(
+    previousBackAtMillis: Long,
+    currentBackAtMillis: Long,
+    confirmWindowMillis: Long = HOME_EXIT_CONFIRM_WINDOW_MILLIS
+): Boolean {
+    return previousBackAtMillis > 0L &&
+        currentBackAtMillis >= previousBackAtMillis &&
+        currentBackAtMillis - previousBackAtMillis <= confirmWindowMillis
+}
+
+/**
+ * 显示支持左右滑动关闭的全局Snackbar。
+ *
+ * 使用方法：
+ * 作为Scaffold的snackbarHost传入。用户把提示向任意水平方向滑离时调用SnackbarData.dismiss；
+ * 原有操作按钮和由调用方控制的自动消失逻辑继续保留，因此不仅首页退出提示，其他短消息也能手动划掉。
+ *
+ * @param hostState 全局Snackbar队列状态。
+ *
+ * @return 无返回值，直接输出可滑动的SnackbarHost。
+ */
+@Composable
+private fun SwipeDismissibleSnackbarHost(hostState: SnackbarHostState) {
+    SnackbarHost(hostState = hostState) { snackbarData ->
+        key(snackbarData) {
+            val dismissState = rememberSwipeToDismissBoxState()
+            LaunchedEffect(dismissState, snackbarData) {
+                snapshotFlow { dismissState.currentValue }
+                    .first { value -> value != SwipeToDismissBoxValue.Settled }
+                snackbarData.dismiss()
+            }
+            SwipeToDismissBox(
+                modifier = Modifier.fillMaxWidth(),
+                state = dismissState,
+                backgroundContent = {}
+            ) {
+                Snackbar(snackbarData = snackbarData)
+            }
+        }
+    }
 }
 
 /**
@@ -281,10 +402,13 @@ private fun ThemedNavigationIcon(
  *
  * @param isDarkTheme 当前是否使用黑夜模式，用于“更多”页显示正确切换方向。
  * @param visualTheme 当前整体角色风格主题。
+ * @param startupAnimationEnabled 下次启动是否播放逐字启动动画。
  * @param openTodayRequest 是否收到桌面小组件发出的“打开今日总览”请求。
  * @param onOpenTodayRequestConsumed 请求完成导航后的消费回调，防止重组时重复打开。
  * @param onSetDarkTheme 保存并立即应用主题模式的回调，成功返回true。
  * @param onSetVisualTheme 保存并立即应用角色风格主题的回调，成功返回true。
+ * @param onSetStartupAnimationEnabled 保存下次启动动画开关的回调，成功返回true。
+ * @param onExitApp 首页第二次返回确认后的Activity退出回调。
  *
  * @return 无返回值，直接输出完整应用界面。
  */
@@ -292,10 +416,13 @@ private fun ThemedNavigationIcon(
 fun HarleyApp(
     isDarkTheme: Boolean,
     visualTheme: AppVisualTheme,
+    startupAnimationEnabled: Boolean,
     openTodayRequest: Boolean,
     onOpenTodayRequestConsumed: () -> Unit,
     onSetDarkTheme: (Boolean) -> Boolean,
-    onSetVisualTheme: (AppVisualTheme) -> Boolean
+    onSetVisualTheme: (AppVisualTheme) -> Boolean,
+    onSetStartupAnimationEnabled: (Boolean) -> Boolean,
+    onExitApp: () -> Unit
 ) {
     val context = LocalContext.current
     val applicationContext = context.applicationContext
@@ -325,6 +452,9 @@ fun HarleyApp(
     }
     val companionRepository = remember {
         CompanionRepository(applicationContext)
+    }
+    val developerModeRepository = remember {
+        DeveloperModeRepository(applicationContext)
     }
     val wechatReminderRepository = remember {
         WechatReminderRepository(applicationContext)
@@ -381,6 +511,15 @@ fun HarleyApp(
     val notificationAccessController = remember {
         NotificationAccessController(applicationContext)
     }
+    val notificationSystemSettingsController = remember {
+        NotificationSystemSettingsController(applicationContext)
+    }
+    val notificationTestController = remember {
+        NotificationTestController(applicationContext)
+    }
+    val reminderSoundRepository = remember {
+        ReminderSoundRepository(applicationContext)
+    }
     val wechatReminderScheduler = remember {
         WechatReminderScheduler(applicationContext)
     }
@@ -399,6 +538,9 @@ fun HarleyApp(
     val coroutineScope = rememberCoroutineScope()
     var websiteEbookImportResult by remember {
         mutableStateOf<EbookImportResult?>(null)
+    }
+    var reminderSoundPickerTargetName by rememberSaveable {
+        mutableStateOf("")
     }
     var englishTtsState by remember {
         mutableStateOf(OfflineEnglishTtsState.INITIALIZING)
@@ -480,6 +622,9 @@ fun HarleyApp(
             companionRepository.getProgress(LocalDate.now().toEpochDay())
         )
     }
+    var developerModeEnabled by remember {
+        mutableStateOf(developerModeRepository.isEnabled())
+    }
     var wechatReminderSettings by remember {
         mutableStateOf(wechatReminderRepository.getSettings())
     }
@@ -501,6 +646,9 @@ fun HarleyApp(
     var exactAlarmPermissionGranted by remember {
         mutableStateOf(exactAlarmAccessController.isGranted())
     }
+    var notificationBackgroundUnrestricted by remember {
+        mutableStateOf(notificationSystemSettingsController.isBatteryOptimizationIgnored())
+    }
     var cleanupStatus by remember {
         mutableStateOf<LocalCleanupStatus>(localCleanupManager.getStatus())
     }
@@ -515,6 +663,9 @@ fun HarleyApp(
     }
     var isEbookImmersive by remember {
         mutableStateOf(false)
+    }
+    var lastHomeBackAtMillis by remember {
+        mutableLongStateOf(0L)
     }
     val currentSection = AppSection.entries.firstOrNull {
         it.name == currentSectionName
@@ -568,6 +719,10 @@ fun HarleyApp(
                 words = refreshedWords,
                 previousWordId = wordId
             )?.id
+            companionProgress = companionRepository.claimTask(
+                task = CompanionTask.ENGLISH_LEARN,
+                currentEpochDay = LocalDate.now().toEpochDay()
+            )
         }
         saved
     }
@@ -624,6 +779,13 @@ fun HarleyApp(
                 )
             }
         }
+    }
+    val notificationSystemSettingsLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) {
+        notificationPermissionGranted = isNotificationPermissionGranted(applicationContext)
+        notificationBackgroundUnrestricted =
+            notificationSystemSettingsController.isBatteryOptimizationIgnored()
     }
 
     // 监听通知服务写入的待查看数量和提醒时间，让已打开的“更多”页面能够即时刷新。
@@ -693,13 +855,11 @@ fun HarleyApp(
         isLoadingApps = false
     }
 
-    // App保持前台跨过零点时也会领取新一天的首次打开经验；仓库保证同一天只发放一次。
+    // App保持前台跨过零点时同步领取新一天的打开经验与1金币，仓库保证同一天只发放一次。
     LaunchedEffect(companionRepository) {
         while (isActive) {
-            companionProgress = companionRepository.claimTask(
-                task = CompanionTask.DAILY_OPEN,
-                currentEpochDay = LocalDate.now().toEpochDay()
-            )
+            val currentEpochDay = LocalDate.now().toEpochDay()
+            companionProgress = companionRepository.claimDailyLogin(currentEpochDay)
             delay(COMPANION_DATE_REFRESH_INTERVAL_MILLIS)
         }
     }
@@ -749,28 +909,54 @@ fun HarleyApp(
             notificationPermissionGranted =
                 isNotificationPermissionGranted(applicationContext)
             exactAlarmPermissionGranted = exactAlarmAccessController.isGranted()
+            notificationBackgroundUnrestricted =
+                notificationSystemSettingsController.isBatteryOptimizationIgnored()
         }
     }
 
-    // 独立详情页不占用底部导航，并按进入详情前记录的来源页返回。
-    BackHandler(enabled = !currentSection.showInBottomNavigation) {
-        currentSectionName = when (currentSection) {
-            AppSection.LEDGER,
-            AppSection.FITNESS,
-            AppSection.TODAY,
-            AppSection.SEARCH,
-            AppSection.BACKUP,
-            AppSection.HOT_TOPICS,
-            AppSection.MOBILE_DATA,
-            AppSection.BOOKMARKS -> detailReturnSectionName
-            else -> AppSection.HOME.name
+    // 离开首页后清空上一次退出确认，避免稍后回到首页时误把一次返回识别为第二次返回。
+    LaunchedEffect(currentSection) {
+        if (currentSection != AppSection.HOME) {
+            lastHomeBackAtMillis = 0L
+        }
+    }
+
+    // 页面内部的返回处理会优先消费全屏、WebView历史和详情层级；剩余外层页面最终逐级回到首页。
+    BackHandler(enabled = currentSection != AppSection.HOME) {
+        currentSectionName = resolveAppBackDestinationName(
+            currentSectionName = currentSection.name,
+            detailReturnSectionName = detailReturnSectionName
+        )
+    }
+
+    // 首页第一次返回仅提示，确认窗口内再次返回才真正结束Activity，兼容系统按键和侧滑返回手势。
+    BackHandler(enabled = currentSection == AppSection.HOME) {
+        val currentBackAtMillis = SystemClock.elapsedRealtime()
+        if (isHomeExitConfirmed(lastHomeBackAtMillis, currentBackAtMillis)) {
+            onExitApp()
+        } else {
+            lastHomeBackAtMillis = currentBackAtMillis
+            coroutineScope.launch {
+                snackbarHostState.currentSnackbarData?.dismiss()
+                val automaticDismissJob = launch {
+                    delay(HOME_EXIT_HINT_DURATION_MILLIS)
+                    snackbarHostState.currentSnackbarData
+                        ?.takeIf { data -> data.visuals.message == HOME_EXIT_HINT_MESSAGE }
+                        ?.dismiss()
+                }
+                snackbarHostState.showSnackbar(
+                    message = HOME_EXIT_HINT_MESSAGE,
+                    duration = SnackbarDuration.Indefinite
+                )
+                automaticDismissJob.cancel()
+            }
         }
     }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         snackbarHost = {
-            SnackbarHost(hostState = snackbarHostState)
+            SwipeDismissibleSnackbarHost(hostState = snackbarHostState)
         },
         bottomBar = {
             if (
@@ -1077,6 +1263,30 @@ fun HarleyApp(
                         false
                     }
                 },
+                onPurchaseCompanionItem = { item ->
+                    val result = companionRepository.purchaseItem(
+                        item = item,
+                        currentEpochDay = LocalDate.now().toEpochDay()
+                    )
+                    companionProgress = result.progress
+                    result
+                },
+                onUseCompanionItem = { item ->
+                    val result = companionRepository.useItem(
+                        item = item,
+                        currentEpochDay = LocalDate.now().toEpochDay()
+                    )
+                    companionProgress = result.progress
+                    result
+                },
+                onCompleteCompanionInteraction = { interaction: CompanionInteraction ->
+                    val result = companionRepository.completeInteraction(
+                        interaction = interaction,
+                        currentEpochDay = LocalDate.now().toEpochDay()
+                    )
+                    companionProgress = result.progress
+                    result
+                },
                 onQuickSearch = { query ->
                     pendingGlobalSearchQuery = query
                     detailReturnSectionName = AppSection.HOME.name
@@ -1257,7 +1467,12 @@ fun HarleyApp(
                 modifier = Modifier.padding(innerPadding),
                 repository = hotTopicRepository,
                 onOpenTopic = { topic: HotTopic ->
-                    if (!hotTopicLauncher.open(topic)) {
+                    if (hotTopicLauncher.open(topic)) {
+                        companionProgress = companionRepository.claimTask(
+                            task = CompanionTask.HOT_TOPIC_VIEW,
+                            currentEpochDay = LocalDate.now().toEpochDay()
+                        )
+                    } else {
                         coroutineScope.launch {
                             snackbarHostState.showSnackbar(
                                 "无法打开原平台，请确认已安装浏览器后重试"
@@ -1336,6 +1551,18 @@ fun HarleyApp(
                 onEbookImmersiveChanged = { immersive ->
                     isEbookImmersive = immersive
                 },
+                onNotebookArticlePublished = {
+                    companionProgress = companionRepository.claimTask(
+                        task = CompanionTask.NOTEBOOK_PUBLISH,
+                        currentEpochDay = LocalDate.now().toEpochDay()
+                    )
+                },
+                onEbookReadingDuration = { elapsedMillis ->
+                    companionProgress = companionRepository.recordReading(
+                        elapsedMillis = elapsedMillis,
+                        currentEpochDay = LocalDate.now().toEpochDay()
+                    )
+                },
                 onInitialSearchTargetConsumed = {
                     searchEnglishWordTargetId = ""
                     searchNotebookArticleTargetId = ""
@@ -1345,6 +1572,7 @@ fun HarleyApp(
                 wechatReminderStatus = wechatReminderStatus,
                 notificationAccessGranted = notificationAccessGranted,
                 notificationListenerConnected = notificationListenerConnected,
+                notificationBackgroundUnrestricted = notificationBackgroundUnrestricted,
                 onSaveWechatReminderSettings = { newSettings: WechatReminderSettings ->
                     val success = wechatReminderRepository.saveSettings(newSettings)
                     if (success) {
@@ -1365,6 +1593,39 @@ fun HarleyApp(
                 onOpenNotificationAccess = {
                     notificationAccessLauncher.launch(
                         notificationAccessController.createSettingsIntent()
+                    )
+                },
+                onChooseWechatReminderSound = {
+                    reminderSoundPickerTargetName = ReminderSoundTarget.WECHAT.name
+                },
+                onChooseScheduledReminderSound = {
+                    reminderSoundPickerTargetName = ReminderSoundTarget.SCHEDULED.name
+                },
+                onRequestNotificationBackgroundAccess = {
+                    notificationSystemSettingsLauncher.launch(
+                        notificationSystemSettingsController.createBatteryOptimizationIntent()
+                    )
+                },
+                onTestScheduledNotificationNow = {
+                    notificationTestResultMessage(
+                        result = notificationTestController.publishNow(
+                            NotificationAlertChannels.SCHEDULED_REMINDER_CHANNEL_ID
+                        ),
+                        backgroundTest = false
+                    )
+                },
+                onTestWechatNotificationNow = {
+                    notificationTestResultMessage(
+                        result = notificationTestController.publishNow(
+                            NotificationAlertChannels.WECHAT_REMINDER_CHANNEL_ID
+                        ),
+                        backgroundTest = false
+                    )
+                },
+                onScheduleBackgroundNotificationTest = {
+                    notificationTestResultMessage(
+                        result = notificationTestController.scheduleBackgroundTest(),
+                        backgroundTest = true
                     )
                 },
                 reminders = reminders,
@@ -1591,6 +1852,59 @@ fun HarleyApp(
                         websiteEbookImportResult = result
                     }
                 },
+                onBookmarkCurrentPage = bookmarkCurrentPage@ { pageTitle, pageUrl ->
+                    val normalizedUrl = normalizeWebsiteUrl(pageUrl)
+                        ?: return@bookmarkCurrentPage WebsiteBookmarkSaveResult.INVALID_URL
+                    if (websites.any { savedWebsite ->
+                            normalizeWebsiteUrl(savedWebsite.url) == normalizedUrl
+                        }
+                    ) {
+                        return@bookmarkCurrentPage WebsiteBookmarkSaveResult.ALREADY_SAVED
+                    }
+
+                    val normalizedTitle = pageTitle.trim()
+                        .take(MAX_SCRIPT_BOOKMARK_TITLE_LENGTH)
+                        .ifBlank {
+                            runCatching { URI(normalizedUrl).host }
+                                .getOrNull()
+                                .orEmpty()
+                                .ifBlank { "未命名网站" }
+                        }
+                    val nextRootOrder = (
+                        websiteLibrary.folders
+                            .filter { folder -> folder.parentId == null }
+                            .map { folder -> folder.sortOrder } +
+                            websites
+                                .filter { savedWebsite -> savedWebsite.folderId == null }
+                                .map { savedWebsite -> savedWebsite.sortOrder }
+                        ).maxOrNull()?.plus(10) ?: 0
+                    val bookmarkedWebsite = WebsiteShortcut(
+                        id = UUID.randomUUID().toString(),
+                        title = normalizedTitle,
+                        url = normalizedUrl,
+                        folderId = null,
+                        showOnHome = false,
+                        sortOrder = nextRootOrder
+                    )
+                    val updatedLibrary = websiteLibrary.copy(
+                        websites = websites + bookmarkedWebsite
+                    )
+                    if (!websiteRepository.saveLibrary(updatedLibrary)) {
+                        return@bookmarkCurrentPage WebsiteBookmarkSaveResult.SAVE_FAILED
+                    }
+
+                    websiteLibrary = updatedLibrary
+                    if (defaultWebsiteId == null) {
+                        val defaultSaved = websiteRepository.setDefaultWebsiteId(
+                            websiteId = bookmarkedWebsite.id,
+                            websites = updatedLibrary.websites
+                        )
+                        if (defaultSaved) {
+                            defaultWebsiteId = bookmarkedWebsite.id
+                        }
+                    }
+                    WebsiteBookmarkSaveResult.SAVED
+                },
                 onManageWebsites = {
                     detailReturnSectionName = AppSection.WEBSITE.name
                     currentSectionName = AppSection.BOOKMARKS.name
@@ -1601,8 +1915,10 @@ fun HarleyApp(
                 modifier = Modifier.padding(innerPadding),
                 isDarkTheme = isDarkTheme,
                 visualTheme = visualTheme,
+                startupAnimationEnabled = startupAnimationEnabled,
                 onSetDarkTheme = onSetDarkTheme,
                 onSetVisualTheme = onSetVisualTheme,
+                onSetStartupAnimationEnabled = onSetStartupAnimationEnabled,
                 deviceMonitor = deviceMonitor,
                 apps = launchableApps,
                 selectedPackages = selectedPackages,
@@ -1619,6 +1935,45 @@ fun HarleyApp(
                 onOpenProjectSource = {
                     activeWebsiteId = PROJECT_SOURCE_WEBSITE.id
                     currentSectionName = AppSection.WEBSITE.name
+                },
+                developerModeConfigured = developerModeRepository.isConfigured(),
+                developerModeEnabled = developerModeEnabled,
+                companionProgress = companionProgress,
+                onVerifyDeveloperKey = { key ->
+                    val verified = developerModeRepository.verifyAndEnable(key)
+                    developerModeEnabled = verified
+                    verified
+                },
+                onDisableDeveloperMode = {
+                    val disabled = developerModeRepository.disable()
+                    if (disabled) developerModeEnabled = false
+                    disabled
+                },
+                onAddDeveloperLevels = { levels ->
+                    if (!developerModeEnabled || !developerModeRepository.isEnabled()) {
+                        false
+                    } else {
+                        val before = companionProgress
+                        val updated = companionRepository.addDeveloperLevels(
+                            levels = levels,
+                            currentEpochDay = LocalDate.now().toEpochDay()
+                        )
+                        companionProgress = updated
+                        updated != before
+                    }
+                },
+                onAddDeveloperCoins = { coins ->
+                    if (!developerModeEnabled || !developerModeRepository.isEnabled()) {
+                        false
+                    } else {
+                        val before = companionProgress
+                        val updated = companionRepository.addDeveloperCoins(
+                            coinsToAdd = coins,
+                            currentEpochDay = LocalDate.now().toEpochDay()
+                        )
+                        companionProgress = updated
+                        updated != before
+                    }
                 }
             )
             }
@@ -1654,6 +2009,21 @@ fun HarleyApp(
             }
         )
     }
+
+    ReminderSoundTarget.entries.firstOrNull { target ->
+        target.name == reminderSoundPickerTargetName
+    }?.let { target ->
+        ReminderSoundPickerDialog(
+            target = target,
+            initialSound = reminderSoundRepository.getSound(target),
+            onDismiss = {
+                reminderSoundPickerTargetName = ""
+            },
+            onConfirm = { selectedSound ->
+                reminderSoundRepository.saveSound(target, selectedSound)
+            }
+        )
+    }
 }
 
 /**
@@ -1671,6 +2041,41 @@ private fun isNotificationPermissionGranted(context: android.content.Context): B
     return Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
         ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) ==
         PackageManager.PERMISSION_GRANTED
+}
+
+/**
+ * 把通知测试结果转换为用户可直接执行下一步操作的中文反馈。
+ *
+ * 使用方法：
+ * 立即测试或10秒后台测试结束调度后调用。失败提示会区分运行时权限、App总开关、当前强提醒
+ * 渠道和系统异常，避免所有问题都只显示“测试失败”。
+ *
+ * @param result 通知测试控制器返回的结构化结果。
+ * @param backgroundTest true表示10秒后台测试，false表示立即发布测试。
+ *
+ * @return 可显示在提醒卡片中的中文结果文本。
+ */
+internal fun notificationTestResultMessage(
+    result: NotificationTestResult,
+    backgroundTest: Boolean
+): String {
+    return when (result) {
+        NotificationTestResult.SHOWN ->
+            "测试通知已发送，正在播放该提醒类型选择的HarleyApp提示音"
+        NotificationTestResult.SCHEDULED -> if (backgroundTest) {
+            "已安排10秒后台测试，请立即返回桌面或切换到其他App等待通知"
+        } else {
+            "测试提醒已安排"
+        }
+        NotificationTestResult.NOTIFICATION_PERMISSION_MISSING ->
+            "尚未允许通知，请先授予通知权限"
+        NotificationTestResult.APP_NOTIFICATIONS_DISABLED ->
+            "系统已关闭HarleyApp通知，请在系统通知设置中开启"
+        NotificationTestResult.CHANNEL_DISABLED ->
+            "强提醒渠道已关闭，请在系统通知设置中允许该渠道显示通知"
+        NotificationTestResult.FAILED ->
+            "系统未接受本次测试，请检查后台与闹钟权限后重试"
+    }
 }
 
 /** App保持前台时检查本地日期的间隔，兼顾跨天刷新及时性与低功耗。 */
@@ -1696,3 +2101,6 @@ private val PROJECT_SOURCE_WEBSITE = WebsiteShortcut(
     showOnHome = false,
     sortOrder = Int.MAX_VALUE
 )
+
+/** 脚本收藏网页标题的最大长度，避免异常网页标题撑大收藏卡片和备份文件。 */
+private const val MAX_SCRIPT_BOOKMARK_TITLE_LENGTH = 80

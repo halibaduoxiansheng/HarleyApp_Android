@@ -52,10 +52,15 @@ import java.time.format.DateTimeFormatter
  * @param notificationListenerConnected 通知监听服务是否已与Android通知管理器实际连接。
  * @param notificationPermissionGranted 是否允许本应用发布重复提醒通知。
  * @param exactAlarmPermissionGranted 是否允许本应用使用精确Alarm准时结束倒计时。
+ * @param notificationBackgroundUnrestricted 是否已允许App忽略系统电池优化。
  * @param onSaveSettings 保存完整配置的回调，成功返回true。
  * @param onOpenNotificationAccess 打开Android通知使用权设置页的回调。
  * @param onRequestNotificationPermission 请求本应用通知权限的回调。
  * @param onRequestExactAlarmPermission 打开Android“闹钟和提醒”特殊权限页的回调。
+ * @param onChooseReminderSound 打开HarleyApp微信提醒独立提示音选择器的回调。
+ * @param onRequestNotificationBackgroundAccess 请求解除电池后台限制的回调。
+ * @param onTestNotificationNow 立即发布声音和振动测试并返回结果文本的回调。
+ * @param onScheduleBackgroundNotificationTest 安排10秒后台测试并返回结果文本的回调。
  * @param modifier 外部传入的布局修饰器。
  *
  * @return 无返回值，直接输出Compose卡片。
@@ -68,10 +73,15 @@ fun WechatReminderSettingsCard(
     notificationListenerConnected: Boolean,
     notificationPermissionGranted: Boolean,
     exactAlarmPermissionGranted: Boolean,
+    notificationBackgroundUnrestricted: Boolean,
     onSaveSettings: (WechatReminderSettings) -> Boolean,
     onOpenNotificationAccess: () -> Unit,
     onRequestNotificationPermission: () -> Unit,
     onRequestExactAlarmPermission: () -> Unit,
+    onChooseReminderSound: () -> Unit,
+    onRequestNotificationBackgroundAccess: () -> Unit,
+    onTestNotificationNow: () -> String,
+    onScheduleBackgroundNotificationTest: () -> String,
     modifier: Modifier = Modifier
 ) {
     var enabled by remember(settings.enabled) {
@@ -217,6 +227,29 @@ fun WechatReminderSettingsCard(
                 }
             }
 
+            if (!notificationBackgroundUnrestricted) {
+                Surface(
+                    color = MaterialTheme.colorScheme.tertiaryContainer,
+                    shape = MaterialTheme.shapes.medium
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            modifier = Modifier.weight(1f),
+                            text = "系统仍可能限制后台。建议允许忽略电池优化，并在小米应用详情中开启自启动。",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        OutlinedButton(onClick = onRequestNotificationBackgroundAccess) {
+                            Text(text = "解除限制")
+                        }
+                    }
+                }
+            }
+
             OutlinedTextField(
                 modifier = Modifier.fillMaxWidth(),
                 value = intervalText,
@@ -327,6 +360,52 @@ fun WechatReminderSettingsCard(
                     ) {
                         Text(text = "允许提醒通知")
                     }
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                OutlinedButton(
+                    modifier = Modifier.weight(1f),
+                    onClick = onChooseReminderSound
+                ) {
+                    Text(text = "选择App提示音")
+                }
+                OutlinedButton(
+                    modifier = Modifier.weight(1f),
+                    onClick = onRequestNotificationBackgroundAccess
+                ) {
+                    Text(
+                        text = if (notificationBackgroundUnrestricted) {
+                            "后台已放行"
+                        } else {
+                            "后台运行设置"
+                        }
+                    )
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                OutlinedButton(
+                    modifier = Modifier.weight(1f),
+                    onClick = {
+                        feedbackText = onTestNotificationNow()
+                    }
+                ) {
+                    Text(text = "立即测试提示音")
+                }
+                OutlinedButton(
+                    modifier = Modifier.weight(1f),
+                    onClick = {
+                        feedbackText = onScheduleBackgroundNotificationTest()
+                    }
+                ) {
+                    Text(text = "10秒后台测试")
                 }
             }
 

@@ -18,6 +18,7 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.Orientation
@@ -60,6 +61,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.viewinterop.AndroidView
@@ -69,10 +71,12 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.core.net.toUri
 import com.example.harleyapp.data.WebsiteToolRepository
 import com.example.harleyapp.model.EbookWebDownloadRequest
+import com.example.harleyapp.model.WebsiteBookmarkSaveResult
 import com.example.harleyapp.model.WebsiteShortcut
 import com.example.harleyapp.model.WebsiteToolSettings
 import com.example.harleyapp.web.WebsiteScriptController
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import java.util.Locale
 import kotlin.math.roundToInt
 
@@ -87,6 +91,7 @@ import kotlin.math.roundToInt
  * @param onManageWebsites 无网站时返回首页添加网站的回调。
  * @param onFullscreenChanged 自定义视频全屏状态回调，用于让宿主隐藏底部导航。
  * @param onEbookDownloadRequested 网页触发下载时，把公开直链交给电子书仓库的回调。
+ * @param onBookmarkCurrentPage 把WebView当前实际标题和地址收藏进网站库的回调。
  * @param modifier 外部传入的页面安全边距。
  *
  * @return 无返回值，直接输出网站浏览页面。
@@ -97,6 +102,7 @@ fun WebsiteScreen(
     onManageWebsites: () -> Unit,
     onFullscreenChanged: (Boolean) -> Unit,
     onEbookDownloadRequested: (EbookWebDownloadRequest) -> Unit,
+    onBookmarkCurrentPage: (String, String) -> WebsiteBookmarkSaveResult,
     modifier: Modifier = Modifier
 ) {
     if (website == null) {
@@ -120,6 +126,15 @@ fun WebsiteScreen(
     }
     var showToolbox by remember(website.id) {
         mutableStateOf(false)
+    }
+    var scriptToolsManuallyOpen by remember(website.id) {
+        mutableStateOf(false)
+    }
+    var suppressAutomaticScriptTools by remember(website.id) {
+        mutableStateOf(false)
+    }
+    var playingVideoCount by remember(website.id) {
+        mutableIntStateOf(0)
     }
     var toolMessage by remember(website.id) {
         mutableStateOf<String?>(null)
@@ -153,6 +168,7 @@ fun WebsiteScreen(
     }
     val currentOnFullscreenChanged by rememberUpdatedState(onFullscreenChanged)
     val currentOnEbookDownloadRequested by rememberUpdatedState(onEbookDownloadRequested)
+    val currentOnBookmarkCurrentPage by rememberUpdatedState(onBookmarkCurrentPage)
     var loadingProgress by remember {
         mutableIntStateOf(0)
     }
@@ -162,6 +178,17 @@ fun WebsiteScreen(
     var canGoBack by remember {
         mutableStateOf(false)
     }
+    var currentPageTitle by remember(website.id) {
+        mutableStateOf(website.title)
+    }
+    var currentPageUrl by remember(website.id) {
+        mutableStateOf(website.url)
+    }
+    val showInlineScriptTools = shouldShowInlineWebsiteScriptTools(
+        manuallyOpen = scriptToolsManuallyOpen,
+        playingVideoCount = playingVideoCount,
+        suppressAutomaticOpen = suppressAutomaticScriptTools
+    )
 
     /** 显示全屏控制层并重新开始自动隐藏倒计时。 */
     fun revealFullscreenControls() {
@@ -194,7 +221,11 @@ fun WebsiteScreen(
             onError = { message ->
                 errorText = message
             },
-            onPageFinished = {
+            onPageFinished = { pageTitle, pageUrl ->
+                currentPageTitle = pageTitle.ifBlank { website.title }
+                currentPageUrl = pageUrl.ifBlank { website.url }
+                playingVideoCount = 0
+                suppressAutomaticScriptTools = false
                 pageGeneration++
             },
             onShowFullscreen = { view, callback ->
@@ -258,6 +289,23 @@ fun WebsiteScreen(
         return true
     }
 
+    /**
+     * 一键收藏WebView当前实际页面并显示具体结果。
+     *
+     * 使用方法：
+     * 普通网页脚本栏或全屏悬浮球的“收藏”按钮调用。函数读取页面跳转后的标题和地址，而不是最初
+     * WebsiteShortcut中的入口地址，因此搜索结果页、文章页等二级页面也能准确保存。
+     *
+     * @return 无返回值；保存结果通过[toolMessage]在当前网页上方短暂显示。
+     */
+    fun bookmarkCurrentPage() {
+        val actualTitle = webView.title.orEmpty().ifBlank { currentPageTitle }
+        val actualUrl = webView.url.orEmpty().ifBlank { currentPageUrl }
+        toolMessage = websiteBookmarkSaveMessage(
+            currentOnBookmarkCurrentPage(actualTitle, actualUrl)
+        )
+    }
+
     // 全屏优先于网页历史；用户按一次返回即可恢复工具栏和系统栏。
     BackHandler(enabled = fullscreenContent != null || canGoBack) {
         if (fullscreenContent != null && fullscreenControlsLocked) {
@@ -302,6 +350,25 @@ fun WebsiteScreen(
         webView.settings.textZoom = toolSettings.textZoomPercent
         webView.keepScreenOn = toolSettings.keepScreenOn
         scriptController.applySettings(webView, toolSettings)
+    }
+
+    // 页面可见时低频检查视频是否真正播放；只在播放后自动展开脚本栏，不因网页仅包含video标签就占空间。
+    LaunchedEffect(webView, pageGeneration, fullscreenContent) {
+        while (isActive) {
+            if (fullscreenContent == null) {
+                scriptController.queryPlayingVideoCount(webView) { count ->
+                    playingVideoCount = count
+                }
+            }
+            delay(PLAYING_VIDEO_CHECK_INTERVAL_MILLIS)
+        }
+    }
+
+    // 一段视频播放结束后解除本轮手动隐藏，下一次开始播放仍可自动给出脚本入口。
+    LaunchedEffect(playingVideoCount) {
+        if (playingVideoCount <= 0) {
+            suppressAutomaticScriptTools = false
+        }
     }
 
     // 操作结果只短暂显示，避免占用网页可视区域。
@@ -536,6 +603,13 @@ fun WebsiteScreen(
                                     }
                                 )
                                 FullscreenToolButton(
+                                    text = "收藏",
+                                    onClick = {
+                                        bookmarkCurrentPage()
+                                        revealFullscreenControls()
+                                    }
+                                )
+                                FullscreenToolButton(
                                     text = "锁屏",
                                     onClick = {
                                         fullscreenControlsLocked = true
@@ -609,12 +683,13 @@ fun WebsiteScreen(
     ) {
         Surface(
             modifier = Modifier.fillMaxWidth(),
-            tonalElevation = 2.dp
+            tonalElevation = 2.dp,
+            shadowElevation = 2.dp
         ) {
             Row(
-                modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                horizontalArrangement = Arrangement.spacedBy(2.dp)
             ) {
                 TextButton(
                     enabled = canGoBack,
@@ -625,16 +700,32 @@ fun WebsiteScreen(
                     Text(text = "← 返回")
                 }
 
-                Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    modifier = Modifier.weight(1f),
+                    text = currentPageTitle,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+
+                TextButton(
+                    onClick = {
+                        if (showInlineScriptTools) {
+                            scriptToolsManuallyOpen = false
+                            suppressAutomaticScriptTools = playingVideoCount > 0
+                        } else {
+                            scriptToolsManuallyOpen = true
+                            suppressAutomaticScriptTools = false
+                        }
+                    }
+                ) {
                     Text(
-                        text = website.title,
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    Text(
-                        text = website.url,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        text = when {
+                            showInlineScriptTools -> "收起"
+                            playingVideoCount > 0 -> "脚本 •"
+                            else -> "脚本"
+                        }
                     )
                 }
 
@@ -649,10 +740,10 @@ fun WebsiteScreen(
 
                 TextButton(
                     onClick = {
-                        openExternalUrl(context, website.url)
+                        openExternalUrl(context, currentPageUrl)
                     }
                 ) {
-                    Text(text = "浏览器")
+                    Text(text = "外部")
                 }
             }
         }
@@ -664,58 +755,63 @@ fun WebsiteScreen(
             )
         }
 
-        Surface(
-            modifier = Modifier.fillMaxWidth(),
-            color = MaterialTheme.colorScheme.surfaceContainerLow
-        ) {
-            Row(
-                modifier = Modifier
-                    .horizontalScroll(rememberScrollState())
-                    .padding(horizontal = 10.dp, vertical = 2.dp),
-                horizontalArrangement = Arrangement.spacedBy(2.dp),
-                verticalAlignment = Alignment.CenterVertically
+        AnimatedVisibility(visible = showInlineScriptTools) {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                color = MaterialTheme.colorScheme.surfaceContainerLow
             ) {
-                TextButton(onClick = { showToolbox = true }) {
-                    Text(text = "网页工具")
-                }
-                TextButton(onClick = { showToolbox = true }) {
-                    Text(text = formatToolbarRate(toolSettings.playbackRate))
-                }
-                TextButton(
-                    onClick = {
-                        scriptController.togglePlayback(webView) { count ->
-                            toolMessage = mediaActionMessage(count, "已切换播放状态")
-                        }
-                    }
+                Row(
+                    modifier = Modifier
+                        .horizontalScroll(rememberScrollState())
+                        .padding(horizontal = 10.dp, vertical = 2.dp),
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(text = "播放/暂停")
-                }
-                TextButton(
-                    onClick = {
-                        scriptController.seekBy(webView, -10) { count ->
-                            toolMessage = mediaActionMessage(count, "已快退10秒")
-                        }
+                    TextButton(onClick = { showToolbox = true }) {
+                        Text(text = "网页工具")
                     }
-                ) {
-                    Text(text = "-10秒")
-                }
-                TextButton(
-                    onClick = {
-                        scriptController.seekBy(webView, 10) { count ->
-                            toolMessage = mediaActionMessage(count, "已快进10秒")
-                        }
+                    TextButton(onClick = { showToolbox = true }) {
+                        Text(text = formatToolbarRate(toolSettings.playbackRate))
                     }
-                ) {
-                    Text(text = "+10秒")
-                }
-                TextButton(
-                    onClick = {
-                        scriptController.requestFullscreen(webView) { count ->
-                            toolMessage = mediaActionMessage(count, "已向播放器请求全屏")
-                        }
+                    TextButton(onClick = ::bookmarkCurrentPage) {
+                        Text(text = "收藏当前页")
                     }
-                ) {
-                    Text(text = "全屏")
+                    TextButton(
+                        onClick = {
+                            scriptController.togglePlayback(webView) { count ->
+                                toolMessage = mediaActionMessage(count, "已切换播放状态")
+                            }
+                        }
+                    ) {
+                        Text(text = "播放/暂停")
+                    }
+                    TextButton(
+                        onClick = {
+                            scriptController.seekBy(webView, -10) { count ->
+                                toolMessage = mediaActionMessage(count, "已快退10秒")
+                            }
+                        }
+                    ) {
+                        Text(text = "-10秒")
+                    }
+                    TextButton(
+                        onClick = {
+                            scriptController.seekBy(webView, 10) { count ->
+                                toolMessage = mediaActionMessage(count, "已快进10秒")
+                            }
+                        }
+                    ) {
+                        Text(text = "+10秒")
+                    }
+                    TextButton(
+                        onClick = {
+                            scriptController.requestFullscreen(webView) { count ->
+                                toolMessage = mediaActionMessage(count, "已向播放器请求全屏")
+                            }
+                        }
+                    ) {
+                        Text(text = "全屏")
+                    }
                 }
             }
         }
@@ -818,6 +914,27 @@ fun WebsiteScreen(
 }
 
 /**
+ * 判断普通网页模式下是否应该显示横向脚本工具栏。
+ *
+ * 使用方法：
+ * WebsiteScreen每次视频播放状态或用户手动开关变化时调用。手动打开优先级最高；视频正在播放时
+ * 自动打开，但用户本轮主动收起后保持隐藏，直到当前视频全部停止再允许下次自动展开。
+ *
+ * @param manuallyOpen 用户是否主动要求保持展开。
+ * @param playingVideoCount 当前正在播放的视频数量。
+ * @param suppressAutomaticOpen 是否抑制本轮播放的自动展开。
+ *
+ * @return 应显示脚本工具栏返回true，否则返回false。
+ */
+internal fun shouldShowInlineWebsiteScriptTools(
+    manuallyOpen: Boolean,
+    playingVideoCount: Int,
+    suppressAutomaticOpen: Boolean
+): Boolean {
+    return manuallyOpen || (playingVideoCount > 0 && !suppressAutomaticOpen)
+}
+
+/**
  * 用户删除全部网站后显示空状态，并引导回首页添加。
  *
  * @param modifier 外部传入的页面安全边距。
@@ -861,12 +978,12 @@ private fun EmptyWebsiteScreen(
  * 创建并配置用于HTTP或HTTPS网页浏览的WebView。
  *
  * @param context 页面上下文，用于创建WebView和打开外部协议。
- * @param initialUrl 当前网站的完整HTTPS网址。
+ * @param initialUrl 当前网站的完整HTTP或HTTPS网址。
  * @param initialSettings 当前网站首次创建WebView时应用的原生设置。
  * @param onProgressChanged 页面加载进度变化回调，范围为0到100。
  * @param onNavigationStateChanged 是否可以网页后退的状态回调。
  * @param onError 主页面加载失败时的中文错误提示回调；传null表示清除旧错误。
- * @param onPageFinished 页面完成加载后的脚本重应用通知。
+ * @param onPageFinished 页面完成加载后的标题、网址和脚本重应用通知。
  * @param onShowFullscreen 网站请求显示自定义全屏View的回调。
  * @param onHideFullscreen 网站请求退出自定义全屏的回调。
  * @param onFindResult 页内查找位置和总数回调。
@@ -882,7 +999,7 @@ private fun createWebsiteWebView(
     onProgressChanged: (Int) -> Unit,
     onNavigationStateChanged: (Boolean) -> Unit,
     onError: (String?) -> Unit,
-    onPageFinished: () -> Unit,
+    onPageFinished: (String, String) -> Unit,
     onShowFullscreen: (View, WebChromeClient.CustomViewCallback) -> Unit,
     onHideFullscreen: () -> Unit,
     onFindResult: (Int, Int, Boolean) -> Unit,
@@ -912,9 +1029,12 @@ private fun createWebsiteWebView(
             onPageStartedCallback = {
                 onError(null)
             },
-            onPageFinishedCallback = {
+            onPageFinishedCallback = { view, finishedUrl ->
                 onNavigationStateChanged(canGoBack())
-                onPageFinished()
+                onPageFinished(
+                    view?.title.orEmpty(),
+                    finishedUrl.orEmpty()
+                )
             },
             onMainFrameErrorCallback = { message ->
                 onError(message)
@@ -993,7 +1113,7 @@ private fun WebsiteErrorView(
  * 使用系统默认浏览器或支持该链接的应用打开网址。
  *
  * @param context 用于启动Activity的上下文。
- * @param url 完整HTTPS网址。
+ * @param url 完整HTTP或HTTPS网址。
  *
  * @return 成功发送启动请求返回true；设备没有可用浏览器时返回false。
  */
@@ -1015,13 +1135,13 @@ private fun openExternalUrl(context: Context, url: String): Boolean {
  *
  * @param context 用于打开非HTTP协议的上下文。
  * @param onPageStartedCallback 主页面开始加载回调。
- * @param onPageFinishedCallback 主页面加载完成回调。
+ * @param onPageFinishedCallback 主页面加载完成后的WebView与最终网址回调。
  * @param onMainFrameErrorCallback 主页面失败回调。
  */
 private class HarleyWebViewClient(
     private val context: Context,
     private val onPageStartedCallback: () -> Unit,
-    private val onPageFinishedCallback: () -> Unit,
+    private val onPageFinishedCallback: (WebView?, String?) -> Unit,
     private val onMainFrameErrorCallback: (String) -> Unit
 ) : WebViewClient() {
 
@@ -1049,7 +1169,7 @@ private class HarleyWebViewClient(
      */
     override fun onPageFinished(view: WebView?, url: String?) {
         super.onPageFinished(view, url)
-        onPageFinishedCallback()
+        onPageFinishedCallback(view, url)
     }
 
     /**
@@ -1321,6 +1441,25 @@ private fun mediaActionMessage(mediaCount: Int, successMessage: String): String 
 }
 
 /**
+ * 把网页脚本收藏结果转换为用户可直接理解的反馈。
+ *
+ * 使用方法：
+ * [WebsiteScreen]调用宿主的onBookmarkCurrentPage后传入返回状态。成功时说明收藏位于网站详情且
+ * 默认不加入首页轮播；重复、内部页面地址无效或本地保存失败时分别给出对应原因。
+ *
+ * @param result HarleyApp完成网址校验、重复检查及持久化后返回的状态。
+ * @return 可显示在普通网页工具栏或全屏控制层顶部的中文提示。
+ */
+internal fun websiteBookmarkSaveMessage(result: WebsiteBookmarkSaveResult): String {
+    return when (result) {
+        WebsiteBookmarkSaveResult.SAVED -> "已收藏当前页，可在网站详情中管理"
+        WebsiteBookmarkSaveResult.ALREADY_SAVED -> "当前页面已经收藏"
+        WebsiteBookmarkSaveResult.INVALID_URL -> "当前页面不是可收藏的HTTP或HTTPS网址"
+        WebsiteBookmarkSaveResult.SAVE_FAILED -> "收藏保存失败，请重试"
+    }
+}
+
+/**
  * 计算全屏脚本悬浮球拖动后的安全纵向偏移。
  *
  * 使用方法：
@@ -1344,6 +1483,8 @@ internal fun calculateFullscreenBallOffset(
 private const val TAG = "WebsiteScreen"
 private const val TOOL_MESSAGE_DURATION_MILLIS = 2_600L
 private const val FULLSCREEN_CONTROLS_HIDE_DELAY_MILLIS = 3_000L
+/** 普通网页模式检查视频播放状态的间隔，兼顾自动弹出及时性和WebView脚本开销。 */
+private const val PLAYING_VIDEO_CHECK_INTERVAL_MILLIS = 1_200L
 private val FULLSCREEN_FLOATING_BALL_SIZE = 52.dp
 private val FULLSCREEN_FLOATING_BALL_MAX_VERTICAL_OFFSET = 120.dp
 private val FULLSCREEN_FLOATING_PANEL_MAX_WIDTH = 520.dp

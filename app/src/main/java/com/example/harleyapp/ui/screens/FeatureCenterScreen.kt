@@ -104,13 +104,22 @@ enum class FeatureCenterPage {
  * @param initialEbookId 全局搜索要求直接打开的电子书id。
  * @param ebookRepository 电子书原文件、离线索引和阅读进度仓库。
  * @param onEbookImmersiveChanged 电子书沉浸阅读状态变化回调，用于隐藏或恢复App底部导航栏。
+ * @param onNotebookArticlePublished 新草稿首次正式发布成功后的伙伴成长回调。
+ * @param onEbookReadingDuration 电子书阅读器前台有效阅读毫秒数回调。
  * @param onInitialSearchTargetConsumed 初始搜索目标完成跳转后的清理回调。
  * @param wechatReminderSettings 微信未查看消息提醒设置。
  * @param wechatReminderStatus 微信提醒监听状态。
  * @param notificationAccessGranted 是否已授予通知使用权。
  * @param notificationListenerConnected 通知监听服务是否已连接。
+ * @param notificationBackgroundUnrestricted 是否已允许App忽略系统电池优化。
  * @param onSaveWechatReminderSettings 保存微信提醒设置的回调。
  * @param onOpenNotificationAccess 打开通知使用权设置的回调。
+ * @param onChooseWechatReminderSound 打开微信提醒App内独立提示音选择器的回调。
+ * @param onChooseScheduledReminderSound 打开普通提醒App内独立提示音选择器的回调。
+ * @param onRequestNotificationBackgroundAccess 请求解除电池后台限制的回调。
+ * @param onTestScheduledNotificationNow 立即测试普通提醒已选择提示音的回调。
+ * @param onTestWechatNotificationNow 立即测试微信提醒已选择提示音的回调。
+ * @param onScheduleBackgroundNotificationTest 安排10秒后台测试并返回中文结果的回调。
  * @param reminders 普通通知提醒计划。
  * @param notificationPermissionGranted 是否具备发送通知权限。
  * @param exactAlarmPermissionGranted 是否具备准时触发提醒所需的精确Alarm权限。
@@ -150,13 +159,22 @@ fun FeatureCenterScreen(
     initialEbookId: String?,
     ebookRepository: EbookRepository,
     onEbookImmersiveChanged: (Boolean) -> Unit,
+    onNotebookArticlePublished: () -> Unit,
+    onEbookReadingDuration: (Long) -> Unit,
     onInitialSearchTargetConsumed: () -> Unit,
     wechatReminderSettings: WechatReminderSettings,
     wechatReminderStatus: WechatReminderStatus,
     notificationAccessGranted: Boolean,
     notificationListenerConnected: Boolean,
+    notificationBackgroundUnrestricted: Boolean,
     onSaveWechatReminderSettings: (WechatReminderSettings) -> Boolean,
     onOpenNotificationAccess: () -> Unit,
+    onChooseWechatReminderSound: () -> Unit,
+    onChooseScheduledReminderSound: () -> Unit,
+    onRequestNotificationBackgroundAccess: () -> Unit,
+    onTestScheduledNotificationNow: () -> String,
+    onTestWechatNotificationNow: () -> String,
+    onScheduleBackgroundNotificationTest: () -> String,
     reminders: List<ScheduledReminder>,
     notificationPermissionGranted: Boolean,
     exactAlarmPermissionGranted: Boolean,
@@ -216,25 +234,37 @@ fun FeatureCenterScreen(
                 notificationListenerConnected = notificationListenerConnected,
                 notificationPermissionGranted = notificationPermissionGranted,
                 exactAlarmPermissionGranted = exactAlarmPermissionGranted,
+                notificationBackgroundUnrestricted = notificationBackgroundUnrestricted,
                 onSaveSettings = onSaveWechatReminderSettings,
                 onOpenNotificationAccess = onOpenNotificationAccess,
                 onRequestNotificationPermission = onRequestNotificationPermission,
-                onRequestExactAlarmPermission = onRequestExactAlarmPermission
+                onRequestExactAlarmPermission = onRequestExactAlarmPermission,
+                onChooseReminderSound = onChooseWechatReminderSound,
+                onRequestNotificationBackgroundAccess =
+                    onRequestNotificationBackgroundAccess,
+                onTestNotificationNow = onTestWechatNotificationNow,
+                onScheduleBackgroundNotificationTest = onScheduleBackgroundNotificationTest
             )
         }
 
         FeatureCenterPage.GENERAL_REMINDER -> FeatureCardDetailScreen(
             modifier = modifier,
             title = "通知提醒",
-            subtitle = "管理一次性或按天重复的本机提醒",
+            subtitle = "管理一次性或多时间单位重复的本机提醒",
             onBack = { onPageChanged(FeatureCenterPage.OVERVIEW) }
         ) {
             ReminderCard(
                 reminders = reminders,
                 notificationPermissionGranted = notificationPermissionGranted,
                 exactAlarmPermissionGranted = exactAlarmPermissionGranted,
+                notificationBackgroundUnrestricted = notificationBackgroundUnrestricted,
                 onRequestNotificationPermission = onRequestNotificationPermission,
                 onRequestExactAlarmPermission = onRequestExactAlarmPermission,
+                onChooseReminderSound = onChooseScheduledReminderSound,
+                onRequestNotificationBackgroundAccess =
+                    onRequestNotificationBackgroundAccess,
+                onTestNotificationNow = onTestScheduledNotificationNow,
+                onScheduleBackgroundNotificationTest = onScheduleBackgroundNotificationTest,
                 onSaveReminder = onSaveReminder,
                 onDeleteReminder = onDeleteReminder
             )
@@ -271,6 +301,7 @@ fun FeatureCenterScreen(
             modifier = modifier,
             initialArticleId = initialNotebookArticleId,
             onInitialArticleConsumed = onInitialSearchTargetConsumed,
+            onArticlePublished = onNotebookArticlePublished,
             onBack = { onPageChanged(FeatureCenterPage.OVERVIEW) }
         )
 
@@ -280,6 +311,7 @@ fun FeatureCenterScreen(
             initialBookId = initialEbookId,
             onInitialBookConsumed = onInitialSearchTargetConsumed,
             onImmersiveChanged = onEbookImmersiveChanged,
+            onReadingDuration = onEbookReadingDuration,
             onBack = { onPageChanged(FeatureCenterPage.OVERVIEW) }
         )
     }

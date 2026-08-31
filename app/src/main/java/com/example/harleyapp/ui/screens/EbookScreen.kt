@@ -1,10 +1,14 @@
 package com.example.harleyapp.ui.screens
 
+import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
 import android.graphics.Bitmap
+import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
 import androidx.activity.compose.BackHandler
+import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
@@ -95,6 +99,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.zIndex
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import com.example.harleyapp.data.EbookRepository
 import com.example.harleyapp.data.EbookNoteRepository
 import com.example.harleyapp.model.EbookBook
@@ -118,6 +124,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.absoluteValue
 import kotlin.math.roundToInt
 
@@ -190,6 +197,7 @@ private data class EbookFeedbackDialogState(
  * @param initialBookId 全局搜索要求直接打开的书籍id；为空表示显示书架。
  * @param onInitialBookConsumed 初始书籍成功定位或确认不存在后的消费回调。
  * @param onImmersiveChanged 阅读器是否处于无干扰模式的回调，用于联动隐藏App外层底部导航。
+ * @param onReadingDuration 阅读器处于前台RESUMED状态的有效阅读毫秒数回调。
  * @param onBack 从书架返回功能中心的回调。
  * @param modifier 外部安全边距和布局修饰器。
  *
@@ -201,6 +209,7 @@ fun EbookScreen(
     initialBookId: String?,
     onInitialBookConsumed: () -> Unit,
     onImmersiveChanged: (Boolean) -> Unit,
+    onReadingDuration: (Long) -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -365,6 +374,7 @@ fun EbookScreen(
                 book = selectedBook,
                 repository = repository,
                 onImmersiveChanged = onImmersiveChanged,
+                onReadingDuration = onReadingDuration,
                 onBack = {
                     selectedBookId = ""
                     books = repository.getBooks()
@@ -1494,6 +1504,7 @@ internal fun createOpaqueArgb(red: Int, green: Int, blue: Int): Int {
  * @param book 当前书籍。
  * @param repository 读取正文、渲染PDF和保存进度的仓库。
  * @param onImmersiveChanged 沉浸状态变化回调；true时外层隐藏App底部四个导航按钮。
+ * @param onReadingDuration 阅读器位于前台期间按段上报的有效阅读毫秒数。
  * @param onBack 返回书架并刷新目录的回调。
  *
  * @return 无返回值。
@@ -1503,10 +1514,14 @@ private fun EbookReader(
     book: EbookBook,
     repository: EbookRepository,
     onImmersiveChanged: (Boolean) -> Unit,
+    onReadingDuration: (Long) -> Unit,
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
+    val activity = remember(context) { context.findComponentActivity() }
     val latestImmersiveChanged by rememberUpdatedState(onImmersiveChanged)
+    val latestReadingDuration by rememberUpdatedState(onReadingDuration)
+    val readingStartedAtMillis = remember(book.id) { AtomicLong(0L) }
     var extractedText by remember(book.id) { mutableStateOf("") }
     var textLoaded by remember(book.id) { mutableStateOf(book.format == EbookFormat.PDF) }
     var currentPage by remember(book.id) {
@@ -1587,6 +1602,55 @@ private fun EbookReader(
     val readAloudState = EbookReadAloudState.entries.firstOrNull { state ->
         state.name == readAloudStateName
     } ?: EbookReadAloudState.ERROR
+
+    // 只统计阅读器所在Activity处于RESUMED状态的单调时钟时间。锁屏、切后台和离开阅读器都会
+    // 立即结算当前片段；无法取得Activity时宁可不计时，也不能把后台停留误算成阅读。
+    DisposableEffect(book.id, activity) {
+        fun beginReadingIfNeeded() {
+            readingStartedAtMillis.compareAndSet(0L, SystemClock.elapsedRealtime())
+        }
+
+        fun flushReadingDuration() {
+            val startedAtMillis = readingStartedAtMillis.getAndSet(0L)
+            if (startedAtMillis <= 0L) return
+            val elapsedMillis = (SystemClock.elapsedRealtime() - startedAtMillis).coerceAtLeast(0L)
+            if (elapsedMillis > 0L) latestReadingDuration(elapsedMillis)
+        }
+
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> beginReadingIfNeeded()
+                Lifecycle.Event.ON_PAUSE,
+                Lifecycle.Event.ON_STOP,
+                Lifecycle.Event.ON_DESTROY -> flushReadingDuration()
+                else -> Unit
+            }
+        }
+        activity?.lifecycle?.addObserver(observer)
+        if (activity?.lifecycle?.currentState?.isAtLeast(Lifecycle.State.RESUMED) == true) {
+            beginReadingIfNeeded()
+        }
+
+        onDispose {
+            activity?.lifecycle?.removeObserver(observer)
+            flushReadingDuration()
+        }
+    }
+
+    // 阅读时间每分钟落盘一次，兼顾首页成长进度及时刷新和SharedPreferences写入频率。
+    LaunchedEffect(book.id, activity) {
+        while (true) {
+            delay(EBOOK_READING_REPORT_INTERVAL_MILLIS)
+            val startedAtMillis = readingStartedAtMillis.get()
+            if (startedAtMillis <= 0L) continue
+
+            val nowMillis = SystemClock.elapsedRealtime()
+            if (readingStartedAtMillis.compareAndSet(startedAtMillis, nowMillis)) {
+                val elapsedMillis = (nowMillis - startedAtMillis).coerceAtLeast(0L)
+                if (elapsedMillis > 0L) latestReadingDuration(elapsedMillis)
+            }
+        }
+    }
 
     DisposableEffect(book.id) {
         onDispose {
@@ -3543,8 +3607,26 @@ private fun formatEbookSize(bytes: Long): String {
     }
 }
 
+/**
+ * 从当前界面上下文向外查找承载 Compose 的 ComponentActivity。
+ *
+ * 电子书阅读时长只应在 Activity 处于前台 RESUMED 状态时累计，因此这里需要拿到宿主 Activity
+ * 的生命周期。主题包装器通常会形成多层 ContextWrapper，本函数会逐层解包，直到找到
+ * ComponentActivity；若当前上下文并非界面上下文，则安全返回 null，不会影响阅读器本身使用。
+ *
+ * @return 当前上下文对应的 ComponentActivity；无法找到时返回 null。
+ */
+private tailrec fun Context.findComponentActivity(): ComponentActivity? {
+    return when (this) {
+        is ComponentActivity -> this
+        is ContextWrapper -> baseContext.findComponentActivity()
+        else -> null
+    }
+}
+
 private const val MAX_BOOK_QUERY_LENGTH = 80
 private const val EBOOK_SCREEN_TAG = "EbookScreen"
+private const val EBOOK_READING_REPORT_INTERVAL_MILLIS = 60_000L
 private const val BOOKS_PER_SHELF_ROW = 10
 private const val SHELF_ROWS_PER_PAGE = 3
 private const val BOOKS_PER_SHELF_PAGE = BOOKS_PER_SHELF_ROW * SHELF_ROWS_PER_PAGE

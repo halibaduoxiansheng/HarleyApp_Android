@@ -1,6 +1,7 @@
 package com.example.harleyapp
 
 import android.content.Intent
+import android.app.NotificationManager
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -17,6 +18,7 @@ import com.example.harleyapp.data.AppearanceRepository
 import com.example.harleyapp.data.AppLockRepository
 import com.example.harleyapp.data.CompanionRepository
 import com.example.harleyapp.model.AppVisualTheme
+import com.example.harleyapp.notification.NotificationAlertChannels
 import com.example.harleyapp.ui.HarleyApp
 import com.example.harleyapp.ui.screens.AppUnlockScreen
 import com.example.harleyapp.ui.screens.HalibaduoStartupScreen
@@ -49,6 +51,11 @@ class MainActivity : ComponentActivity() {
         // 让Compose自行处理状态栏、导航栏与内容区域之间的安全边距。
         enableEdgeToEdge()
 
+        // 提前创建两个强提醒渠道，用户首次收到通知前即可在系统设置中检查声音、振动和横幅选项。
+        NotificationAlertChannels.createAll(
+            getSystemService(NotificationManager::class.java)
+        )
+
         setContent {
             val systemDarkTheme = isSystemInDarkTheme()
             val appearanceRepository = remember {
@@ -68,6 +75,9 @@ class MainActivity : ComponentActivity() {
             var visualThemeName by rememberSaveable {
                 mutableStateOf(appearanceRepository.getVisualTheme().name)
             }
+            var startupAnimationEnabled by rememberSaveable {
+                mutableStateOf(appearanceRepository.isStartupAnimationEnabled())
+            }
             val visualTheme = AppVisualTheme.fromStoredName(visualThemeName)
             val initialUnlockRequired = remember {
                 if (appLockRepository.completeRecoveryIfDue()) {
@@ -77,7 +87,8 @@ class MainActivity : ComponentActivity() {
                 }
             }
             var startupFinished by rememberSaveable {
-                mutableStateOf(false)
+                // 关闭动画时直接进入后续密码锁或主页；开关只在本次Activity创建时决定是否播放。
+                mutableStateOf(!startupAnimationEnabled)
             }
             var unlockedForThisSession by rememberSaveable {
                 mutableStateOf(!initialUnlockRequired)
@@ -116,6 +127,7 @@ class MainActivity : ComponentActivity() {
                     else -> HarleyApp(
                         isDarkTheme = darkThemeEnabled,
                         visualTheme = visualTheme,
+                        startupAnimationEnabled = startupAnimationEnabled,
                         openTodayRequest = openTodayRequest,
                         onOpenTodayRequestConsumed = {
                             openTodayRequest = false
@@ -133,6 +145,16 @@ class MainActivity : ComponentActivity() {
                                 visualThemeName = theme.name
                             }
                             saved
+                        },
+                        onSetStartupAnimationEnabled = { enabled ->
+                            val saved = appearanceRepository.setStartupAnimationEnabled(enabled)
+                            if (saved) {
+                                startupAnimationEnabled = enabled
+                            }
+                            saved
+                        },
+                        onExitApp = {
+                            finish()
                         }
                     )
                 }

@@ -140,6 +140,20 @@ data class WebsiteLibrary(
 )
 
 /**
+ * 网页脚本“一键收藏当前页”的保存结果。
+ *
+ * 使用方法：
+ * HarleyApp完成网址校验、重复检查和本地持久化后返回对应状态；WebsiteScreen根据状态显示明确
+ * 中文反馈，避免把重复收藏、无效内部页面和真正的存储失败都混成同一条提示。
+ */
+enum class WebsiteBookmarkSaveResult {
+    SAVED,
+    ALREADY_SAVED,
+    INVALID_URL,
+    SAVE_FAILED
+}
+
+/**
  * 取得参与首页自动轮播的网站，并按收藏夹树和同层手动顺序展开。
  *
  * 使用方法：

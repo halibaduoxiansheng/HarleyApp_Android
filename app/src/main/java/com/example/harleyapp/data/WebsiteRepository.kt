@@ -21,8 +21,8 @@ import org.json.JSONObject
  *
  * 使用方法：
  * 使用Application Context创建仓库，通过getWebsites读取有序列表，通过saveWebsites整组覆盖保存。
- * 首次安装且从未保存过配置时返回halibaduo.cn与鸠摩搜书；升级用户会执行一次鸠摩搜书迁移，
- * 用户之后主动删除网站会保留删除结果，不会在每次启动时擅自加回来。
+ * 首次安装且从未保存过配置时返回空列表，由用户自行添加HTTP或HTTPS网站；升级用户已经保存的
+ * 网站保持不变，不会因删除代码内置网站而丢失自己的收藏。
  *
  * @param context Android上下文，内部会转换为Application Context避免持有Activity。
  */
@@ -36,68 +36,22 @@ class WebsiteRepository(context: Context) {
     /**
      * 读取用户保存的网站，并保持轮播顺序。
      *
-     * @return 已保存的网站列表；首次使用或存储内容整体损坏时返回默认网站。
+     * @return 已保存的网站列表；首次使用或存储内容整体损坏时返回空列表。
      */
     fun getWebsites(): List<WebsiteShortcut> {
         if (!preferences.contains(KEY_WEBSITES)) {
-            preferences.edit()
-                .putBoolean(KEY_JIUMO_BUILTIN_MIGRATED, true)
-                .commit()
-            return DEFAULT_WEBSITES
+            return initialWebsiteShortcuts()
         }
 
         val storedJson = preferences.getString(KEY_WEBSITES, null)
-            ?: return DEFAULT_WEBSITES
+            ?: return initialWebsiteShortcuts()
 
-        val decodedWebsites = decodeWebsites(storedJson) ?: return DEFAULT_WEBSITES
-        val migratedWebsites = decodedWebsites.map(::migrateLegacyDefaultWebsite)
-        val completedWebsites = addBuiltinJiumoOnce(migratedWebsites)
-        if (
-            completedWebsites != decodedWebsites &&
-            completedWebsites == migratedWebsites &&
-            !saveWebsites(completedWebsites)
-        ) {
-            Log.e(TAG, "Failed to persist migrated default website URL")
+        val decodedWebsites = decodeWebsites(storedJson) ?: return initialWebsiteShortcuts()
+        val migratedWebsites = removeObsoleteBuiltInWebsites(decodedWebsites)
+        if (migratedWebsites != decodedWebsites && !saveWebsites(migratedWebsites)) {
+            Log.e(TAG, "Failed to remove obsolete built-in websites")
         }
-
-        return completedWebsites
-    }
-
-    /**
-     * 为升级用户一次性加入鸠摩搜书，随后尊重用户自己的删除和排序操作。
-     *
-     * 使用方法：
-     * [getWebsites]完成旧网址迁移后自动调用。迁移标记成功保存后不会再次添加；如果用户已经
-     * 自行收藏同一稳定id，只记录完成标记并保留现有配置。
-     *
-     * @param websites 当前已经解码并修复的网址列表。
-     * @return 加入鸠摩搜书并成功保存时返回新列表；保存失败或已经迁移时返回原列表。
-     */
-    private fun addBuiltinJiumoOnce(websites: List<WebsiteShortcut>): List<WebsiteShortcut> {
-        if (preferences.getBoolean(KEY_JIUMO_BUILTIN_MIGRATED, false)) {
-            return websites
-        }
-
-        val updatedWebsites = if (websites.any { website -> website.id == JIUMO_WEBSITE.id }) {
-            websites
-        } else {
-            websites + JIUMO_WEBSITE.copy(
-                sortOrder = (websites.maxOfOrNull(WebsiteShortcut::sortOrder) ?: -1) + 1
-            )
-        }
-        val websitesSaved = updatedWebsites == websites || saveWebsites(updatedWebsites)
-        if (!websitesSaved) {
-            Log.e(TAG, "Failed to add built-in Jiumo website")
-            return websites
-        }
-
-        val migrationSaved = preferences.edit()
-            .putBoolean(KEY_JIUMO_BUILTIN_MIGRATED, true)
-            .commit()
-        if (!migrationSaved) {
-            Log.e(TAG, "Failed to persist built-in Jiumo migration state")
-        }
-        return updatedWebsites
+        return migratedWebsites
     }
 
     /**
@@ -484,24 +438,6 @@ class WebsiteRepository(context: Context) {
     }
 
     /**
-     * 把旧版本内置网站使用的HTTPS地址迁移为当前可访问的HTTP地址。
-     *
-     * 使用方法：
-     * [getWebsites]解码每条网站后自动调用。函数只匹配内置网站的稳定id和旧版完整地址，
-     * 不会修改用户自行添加的网站，也不会把其他HTTPS网站降级为HTTP。
-     *
-     * @param website 从本地存储读取的一条网站配置。
-     * @return 旧版内置地址返回替换URL后的副本，其他配置原样返回。
-     */
-    private fun migrateLegacyDefaultWebsite(website: WebsiteShortcut): WebsiteShortcut {
-        return if (website.id == DEFAULT_WEBSITE.id && website.url == LEGACY_DEFAULT_WEBSITE_URL) {
-            website.copy(url = DEFAULT_WEBSITE.url)
-        } else {
-            website
-        }
-    }
-
-    /**
      * 检查单条网站是否具备稳定id、可显示名称和有效HTTP或HTTPS网址。
      *
      * @param website 待检查的网站。
@@ -522,7 +458,6 @@ class WebsiteRepository(context: Context) {
         const val KEY_WEBSITES = "websites"
         const val KEY_FOLDERS = "folders"
         const val KEY_DEFAULT_WEBSITE_ID = "default_website_id"
-        const val KEY_JIUMO_BUILTIN_MIGRATED = "jiumo_builtin_migrated_v1"
         const val JSON_ID = "id"
         const val JSON_TITLE = "title"
         const val JSON_URL = "url"
@@ -534,24 +469,38 @@ class WebsiteRepository(context: Context) {
         const val JSON_SORT_ORDER = "sort_order"
         const val JSON_NAME = "name"
         const val JSON_PARENT_ID = "parent_id"
-        const val LEGACY_DEFAULT_WEBSITE_URL = "https://www.halibaduo.cn"
-
-        val DEFAULT_WEBSITE = WebsiteShortcut(
-            id = "default_halibaduo",
-            title = "Harley网站",
-            url = "http://www.halibaduo.cn",
-            palette = WebsitePalette.OCEAN
-        )
-
-        val JIUMO_WEBSITE = WebsiteShortcut(
-            id = "builtin_jiumo_diary",
-            title = "鸠摩搜书",
-            url = "https://www.jiumodiary.com/",
-            palette = WebsitePalette.AMBER,
-            showOnHome = true,
-            sortOrder = 1
-        )
-
-        val DEFAULT_WEBSITES = listOf(DEFAULT_WEBSITE, JIUMO_WEBSITE)
     }
 }
+
+/**
+ * 新安装且尚未创建网站收藏时使用的初始列表。
+ *
+ * 使用方法：
+ * [WebsiteRepository.getWebsites]在本地没有网站配置或整体配置损坏时返回本列表。列表固定为空，
+ * 防止未来维护时又把开发者网站、搜书网站或其他推广入口自动写入用户收藏。
+ *
+ * @return 空的网站列表；用户只能通过页面新增或脚本“一键收藏”创建内容。
+ */
+internal fun initialWebsiteShortcuts(): List<WebsiteShortcut> = emptyList()
+
+/**
+ * 移除旧版本曾自动写入的开发者网站和搜书网站，同时保留用户自己创建的同网址收藏。
+ *
+ * 使用方法：
+ * [WebsiteRepository.getWebsites]解码旧列表后调用。函数只匹配旧内置条目的稳定id，不按标题或
+ * 域名删除，所以用户后来手动添加的halibaduo.cn、鸠摩搜书或其他相同网址不会被误删。
+ *
+ * @param websites 从旧版本本地存储读取的网站列表。
+ * @return 删除两个旧内置稳定id后的列表；不存在旧条目时内容和顺序保持不变。
+ */
+internal fun removeObsoleteBuiltInWebsites(
+    websites: List<WebsiteShortcut>
+): List<WebsiteShortcut> {
+    return websites.filterNot { website -> website.id in OBSOLETE_BUILTIN_WEBSITE_IDS }
+}
+
+/** 旧版本自动插入的网站稳定id，仅用于一次升级清理，不再用于创建任何默认收藏。 */
+private val OBSOLETE_BUILTIN_WEBSITE_IDS = setOf(
+    "default_halibaduo",
+    "builtin_jiumo_diary"
+)

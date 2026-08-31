@@ -12,11 +12,12 @@ import com.example.harleyapp.notification.WechatNotificationListenerService
 import com.example.harleyapp.notification.WechatReminderScheduler
 
 /**
- * 在系统重启、应用升级或重新获得精确闹钟权限后恢复通知计划。
+ * 在系统重启、应用升级、系统时间变化或重新获得精确闹钟权限后恢复通知计划。
  *
  * 使用方法：
- * 在AndroidManifest中监听BOOT_COMPLETED、MY_PACKAGE_REPLACED和精确闹钟授权广播，由系统
- * 自动创建并调用，不需要用户先打开页面。恢复范围同时包含通用定时提醒和微信等待提醒。
+ * 在AndroidManifest中监听BOOT_COMPLETED、MY_PACKAGE_REPLACED、时间或时区变化和精确闹钟
+ * 授权广播，由系统自动创建并调用，不需要用户先打开页面。恢复范围同时包含通用定时提醒和
+ * 微信等待提醒。
  */
 class ReminderBootReceiver : BroadcastReceiver() {
 
@@ -24,7 +25,7 @@ class ReminderBootReceiver : BroadcastReceiver() {
      * 读取本机全部通知计划，并重新提交未来计划或尽快处理中断期间错过的计划。
      *
      * @param context Android广播上下文。
-     * @param intent 系统启动完成、应用升级完成或精确闹钟重新授权广播Intent。
+     * @param intent 系统启动完成、应用升级完成、时间变化或精确闹钟重新授权广播Intent。
      *
      * @return 无返回值；收到其他广播时直接忽略。
      */
@@ -108,6 +109,8 @@ class ReminderBootReceiver : BroadcastReceiver() {
         val SUPPORTED_ACTIONS = setOf(
             Intent.ACTION_BOOT_COMPLETED,
             Intent.ACTION_MY_PACKAGE_REPLACED,
+            Intent.ACTION_TIME_CHANGED,
+            Intent.ACTION_TIMEZONE_CHANGED,
             ACTION_SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED
         )
     }

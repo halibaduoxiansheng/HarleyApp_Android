@@ -11,6 +11,9 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- 允许高重要性提醒渠道在用户未关闭系统或渠道振动时提供振动反馈。 -->
     <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- 后台Alarm触发后短时播放用户选择的系统提示音，服务最多运行五秒并自动退出。 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <!-- OTA下载完成后仍由用户在Android系统安装界面确认，不执行静默安装。 -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <!-- Android 12及以上需要用户在系统页面单独允许，定时提醒才能避开较大的非精确时间窗口。 -->
@@ -50,11 +53,10 @@
         android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_family_launcher"
         android:label="@string/app_name"
-        android:networkSecurityConfig="@xml/network_security_config"
         android:roundIcon="@mipmap/ic_family_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.HarleyApp"
-        android:usesCleartextTraffic="false">
+        android:usesCleartextTraffic="true">
         <activity
             android:name=".MainActivity"
             android:configChanges="keyboardHidden|orientation|screenSize"
@@ -98,6 +100,15 @@
             </intent-filter>
         </service>
 
+        <!--
+            系统通知框架在部分小米版本中静默发布时，短时前台服务补充播放渠道所选系统铃声。
+            服务不导出、不常驻，最多五秒后自动停止。
+        -->
+        <service
+            android:name=".notification.ReminderAlertPlaybackService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
+
         <!-- 只接收本应用创建的显式Alarm广播，用于重复展示未查看微信消息提醒。 -->
         <receiver
             android:name=".notification.WechatReminderReceiver"
@@ -116,6 +127,11 @@
             android:name=".reminder.ReminderReceiver"
             android:exported="false" />
 
+        <!-- 只接收App内“10秒后台测试”创建的显式Alarm，不接受其他应用广播。 -->
+        <receiver
+            android:name=".notification.NotificationTestReceiver"
+            android:exported="false" />
+
         <!-- 重启、应用升级或重新获得精确闹钟权限后，恢复通用提醒和微信等待提醒。 -->
         <receiver
             android:name=".reminder.ReminderBootReceiver"
@@ -124,6 +140,8 @@
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.TIME_SET" />
+                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
                 <action android:name="android.app.action.SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED" />
             </intent-filter>
         </receiver>
