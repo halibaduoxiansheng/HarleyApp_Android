@@ -141,6 +141,33 @@ private data class PendingEbookNoteDraft(
 )
 
 /**
+ * 阅读器即将持久化的完整阅读状态快照。
+ *
+ * 使用方法：
+ * 阅读器每次重组时根据当前页码和阅读设置创建最新快照；正常停留时由防抖任务保存，退出阅读器时
+ * 由DisposableEffect读取最后一份快照并立即落盘，从而避免用户快速返回书架时丢失最后一次翻页。
+ *
+ * @param bookId 当前书籍稳定标识。
+ * @param currentPage 当前零基页码。
+ * @param pageCount 当前正文实际页数。
+ * @param readingMode 当前翻页方式。
+ * @param readingBackground 当前阅读背景。
+ * @param fontScale 当前正文字号倍率。
+ * @param fontFamily 当前正文字体。
+ * @param readyToSave PDF始终为true；文本书籍只有完成正文加载后才为true。
+ */
+private data class EbookReadingProgressSnapshot(
+    val bookId: String,
+    val currentPage: Int,
+    val pageCount: Int,
+    val readingMode: EbookReadingMode,
+    val readingBackground: EbookReadingBackground,
+    val fontScale: Float,
+    val fontFamily: EbookFontFamily,
+    val readyToSave: Boolean
+)
+
+/**
  * 电子书导入或封面操作需要显示的强提示。
  *
  * @param success 操作是否成功，用于决定弹窗标题。
@@ -1482,15 +1509,15 @@ private fun EbookReader(
     val latestImmersiveChanged by rememberUpdatedState(onImmersiveChanged)
     var extractedText by remember(book.id) { mutableStateOf("") }
     var textLoaded by remember(book.id) { mutableStateOf(book.format == EbookFormat.PDF) }
-    var currentPage by rememberSaveable(book.id) {
-        mutableStateOf(book.currentPage.coerceIn(0, book.pageCount - 1))
+    var currentPage by remember(book.id) {
+        mutableIntStateOf(book.currentPage.coerceIn(0, book.pageCount.coerceAtLeast(1) - 1))
     }
-    var readingModeName by rememberSaveable(book.id) { mutableStateOf(book.readingMode.name) }
-    var readingBackgroundName by rememberSaveable(book.id) {
+    var readingModeName by remember(book.id) { mutableStateOf(book.readingMode.name) }
+    var readingBackgroundName by remember(book.id) {
         mutableStateOf(book.readingBackground.name)
     }
-    var fontScale by rememberSaveable(book.id) { mutableStateOf(book.fontScale) }
-    var fontFamilyName by rememberSaveable(book.id) { mutableStateOf(book.fontFamily.name) }
+    var fontScale by remember(book.id) { mutableStateOf(book.fontScale) }
+    var fontFamilyName by remember(book.id) { mutableStateOf(book.fontFamily.name) }
     var controlsVisible by rememberSaveable(book.id) { mutableStateOf(true) }
     var showReaderSettings by rememberSaveable(book.id) { mutableStateOf(false) }
     var showTableOfContents by rememberSaveable(book.id) { mutableStateOf(false) }
@@ -1581,16 +1608,66 @@ private fun EbookReader(
         }
     }
 
-    val textPages = remember(extractedText) { paginateEbookText(extractedText) }
+    val textPages = remember(extractedText, textLoaded, book.format) {
+        if (book.format != EbookFormat.PDF && !textLoaded) {
+            emptyList()
+        } else {
+            paginateEbookText(extractedText)
+        }
+    }
     val chapters = remember(textPages, book.format) {
         if (book.format == EbookFormat.PDF) emptyList() else buildEbookTableOfContents(textPages)
     }
-    val pageCount = if (book.format == EbookFormat.PDF) {
-        book.pageCount.coerceAtLeast(1)
-    } else {
-        textPages.size.coerceAtLeast(1)
+    val pageCount = resolveEbookReaderPageCount(
+        format = book.format,
+        savedPageCount = book.pageCount,
+        textLoaded = textLoaded,
+        loadedTextPageCount = textPages.size
+    )
+
+    // 等真实正文页数准备完成后再修正边界，不能用加载中的临时页数覆盖上次阅读位置。
+    LaunchedEffect(book.id, book.format, textLoaded, pageCount) {
+        if (book.format == EbookFormat.PDF || textLoaded) {
+            currentPage = currentPage.coerceIn(0, pageCount - 1)
+        }
     }
-    currentPage = currentPage.coerceIn(0, pageCount - 1)
+
+    val latestProgressSnapshot by rememberUpdatedState(
+        EbookReadingProgressSnapshot(
+            bookId = book.id,
+            currentPage = currentPage,
+            pageCount = pageCount,
+            readingMode = readingMode,
+            readingBackground = readingBackground,
+            fontScale = fontScale,
+            fontFamily = fontFamily,
+            readyToSave = book.format == EbookFormat.PDF || textLoaded
+        )
+    )
+
+    // 退出阅读器时同步写入最后一页，补足350毫秒防抖任务可能被页面销毁取消的时间窗口。
+    DisposableEffect(book.id, repository) {
+        onDispose {
+            val snapshot = latestProgressSnapshot
+            if (snapshot.readyToSave) {
+                val saved = synchronized(repository) {
+                    repository.saveReadingProgress(
+                        bookId = snapshot.bookId,
+                        currentPage = snapshot.currentPage,
+                        pageCount = snapshot.pageCount,
+                        readingMode = snapshot.readingMode,
+                        readingBackground = snapshot.readingBackground,
+                        fontScale = snapshot.fontScale,
+                        fontFamily = snapshot.fontFamily
+                    )
+                }
+                if (!saved) {
+                    Log.w(EBOOK_SCREEN_TAG, "Failed to flush ebook reading progress on reader exit")
+                }
+            }
+        }
+    }
+
     val currentChapter = chapters.lastOrNull { chapter -> chapter.pageIndex <= currentPage }
     val originalPageText = if (book.format == EbookFormat.PDF) {
         ""
@@ -1710,17 +1787,20 @@ private fun EbookReader(
         fontScale,
         fontFamily
     ) {
+        if (book.format != EbookFormat.PDF && !textLoaded) return@LaunchedEffect
         delay(PROGRESS_SAVE_DEBOUNCE_MILLIS)
         withContext(Dispatchers.IO) {
-            repository.saveReadingProgress(
-                bookId = book.id,
-                currentPage = currentPage,
-                pageCount = pageCount,
-                readingMode = readingMode,
-                readingBackground = readingBackground,
-                fontScale = fontScale,
-                fontFamily = fontFamily
-            )
+            synchronized(repository) {
+                repository.saveReadingProgress(
+                    bookId = book.id,
+                    currentPage = currentPage,
+                    pageCount = pageCount,
+                    readingMode = readingMode,
+                    readingBackground = readingBackground,
+                    fontScale = fontScale,
+                    fontFamily = fontFamily
+                )
+            }
         }
     }
 
@@ -2743,11 +2823,11 @@ private fun TextEbookPage(
     onOpenNotes: () -> Unit
 ) {
     var textFieldValue by remember(text) { mutableStateOf(TextFieldValue(text)) }
-    val selectionStart = minOf(textFieldValue.selection.start, textFieldValue.selection.end)
-        .coerceIn(0, text.length)
-    val selectionEnd = maxOf(textFieldValue.selection.start, textFieldValue.selection.end)
-        .coerceIn(selectionStart, text.length)
-    val selectedText = text.substring(selectionStart, selectionEnd).trim()
+    val selectedText = normalizeEbookNoteSelection(
+        text = text,
+        selectionStart = textFieldValue.selection.start,
+        selectionEnd = textFieldValue.selection.end
+    )
     val scrollModifier = if (allowVerticalScroll) {
         Modifier.verticalScroll(rememberScrollState())
     } else {
@@ -2757,32 +2837,43 @@ private fun TextEbookPage(
         modifier = Modifier
             .fillMaxSize()
             .background(backgroundColor)
-            .then(scrollModifier)
-            .padding(
-                horizontal = 24.dp,
-                vertical = if (controlsVisible) 72.dp else 24.dp
-            )
     ) {
-        BasicTextField(
-            modifier = Modifier.fillMaxWidth(),
-            value = textFieldValue,
-            onValueChange = { updatedValue ->
-                // 阅读区只允许改变选区，禁止输入法或粘贴操作改写原书正文。
-                textFieldValue = updatedValue.copy(text = text)
-            },
-            readOnly = true,
-            textStyle = MaterialTheme.typography.bodyLarge.copy(
-                fontSize = (18f * fontScale).sp,
-                lineHeight = (30f * fontScale).sp,
-                fontFamily = composeFontFamily(fontFamily),
-                color = textColor
+        // 正文单独滚动，页边笔记标记和选区操作条固定在可视区域，不随长篇正文移动到屏幕外。
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .then(scrollModifier)
+                .padding(
+                    horizontal = 24.dp,
+                    vertical = if (controlsVisible) 72.dp else 24.dp
+                )
+        ) {
+            BasicTextField(
+                modifier = Modifier.fillMaxWidth(),
+                value = textFieldValue,
+                onValueChange = { updatedValue ->
+                    // 阅读区只允许改变选区，禁止输入法或粘贴操作改写原书正文。
+                    textFieldValue = updatedValue.copy(text = text)
+                },
+                readOnly = true,
+                textStyle = MaterialTheme.typography.bodyLarge.copy(
+                    fontSize = (18f * fontScale).sp,
+                    lineHeight = (30f * fontScale).sp,
+                    fontFamily = composeFontFamily(fontFamily),
+                    color = textColor
+                )
             )
-        )
+        }
 
         if (noteCount > 0) {
             Surface(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
+                    .padding(
+                        top = if (controlsVisible) 74.dp else 16.dp,
+                        end = 16.dp
+                    )
+                    .zIndex(5f)
                     .clickable(onClick = onOpenNotes),
                 color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.94f),
                 contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
@@ -2797,15 +2888,55 @@ private fun TextEbookPage(
             }
         }
 
-        if (selectedText.isNotBlank()) {
-            Button(
-                modifier = Modifier.align(Alignment.BottomCenter),
-                onClick = {
-                    onCreateNote(selectedText.take(MAX_NOTE_SELECTION_LENGTH))
-                    textFieldValue = TextFieldValue(text)
-                }
+        AnimatedVisibility(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(
+                    start = 16.dp,
+                    end = 16.dp,
+                    bottom = if (controlsVisible) 104.dp else 20.dp
+                )
+                .zIndex(6f),
+            visible = selectedText.isNotBlank(),
+            enter = fadeIn() + slideInVertically { height -> height / 2 },
+            exit = fadeOut() + slideOutVertically { height -> height / 2 }
+        ) {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.98f),
+                contentColor = MaterialTheme.colorScheme.onSurface,
+                shape = RoundedCornerShape(18.dp),
+                tonalElevation = 8.dp,
+                shadowElevation = 10.dp
             ) {
-                Text("为选中文字写笔记")
+                Row(
+                    modifier = Modifier.padding(start = 14.dp, top = 8.dp, end = 8.dp, bottom = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "已选择 ${selectedText.length} 个字",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = selectedText,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Button(
+                        onClick = {
+                            onCreateNote(selectedText)
+                            textFieldValue = TextFieldValue(text)
+                        }
+                    ) {
+                        Text("写笔记")
+                    }
+                }
             }
         }
     }
@@ -3064,55 +3195,108 @@ private fun EbookTableOfContentsDialog(
     onChapterSelected: (EbookChapter) -> Unit,
     onDismiss: () -> Unit
 ) {
+    var query by remember(chapters) { mutableStateOf("") }
     val currentChapterIndex = chapters.indexOfLast { chapter -> chapter.pageIndex <= currentPage }
+    val currentChapter = chapters.getOrNull(currentChapterIndex)
+    val filteredChapters = remember(chapters, query) {
+        val keyword = query.trim()
+        if (keyword.isBlank()) {
+            chapters
+        } else {
+            chapters.filter { chapter ->
+                chapter.title.contains(keyword, ignoreCase = true) ||
+                    (chapter.pageIndex + 1).toString().contains(keyword)
+            }
+        }
+    }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("目录 · ${chapters.size}章") },
+        title = { Text("目录 · ${chapters.size}项") },
         text = {
-            LazyColumn(
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(500.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp)
+                    .height(520.dp)
             ) {
-                items(
-                    items = chapters,
-                    key = { chapter -> "${chapter.pageIndex}_${chapter.title}" }
-                ) { chapter ->
-                    val chapterIndex = chapters.indexOf(chapter)
-                    val selected = chapterIndex == currentChapterIndex
-                    Surface(
+                OutlinedTextField(
+                    modifier = Modifier.fillMaxWidth(),
+                    value = query,
+                    onValueChange = { value -> query = value.take(MAX_TABLE_OF_CONTENTS_QUERY_LENGTH) },
+                    label = { Text("搜索章节标题或页码") },
+                    placeholder = { Text("例如：山边小村、第一章、120") },
+                    singleLine = true
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                if (filteredChapters.isEmpty()) {
+                    Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable { onChapterSelected(chapter) },
-                        shape = RoundedCornerShape(10.dp),
-                        color = if (selected) {
-                            MaterialTheme.colorScheme.primaryContainer
-                        } else {
-                            Color.Transparent
-                        }
+                            .weight(1f),
+                        contentAlignment = Alignment.Center
                     ) {
-                        Row(
-                            modifier = Modifier.padding(
-                                start = (12 + (chapter.level - 1).coerceIn(0, 3) * 12).dp,
-                                end = 12.dp,
-                                top = 10.dp,
-                                bottom = 10.dp
-                            ),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                modifier = Modifier.weight(1f),
-                                text = chapter.title,
-                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            Text(
-                                text = "${chapter.pageIndex + 1}页",
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                style = MaterialTheme.typography.labelSmall
-                            )
+                        Text(
+                            text = "没有找到匹配的目录",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        items(
+                            items = filteredChapters,
+                            key = { chapter -> "${chapter.pageIndex}_${chapter.title}" }
+                        ) { chapter ->
+                            val selected = chapter == currentChapter
+                            Surface(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { onChapterSelected(chapter) },
+                                shape = RoundedCornerShape(10.dp),
+                                color = if (selected) {
+                                    MaterialTheme.colorScheme.primaryContainer
+                                } else {
+                                    Color.Transparent
+                                }
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(
+                                        start = (12 + (chapter.level - 1).coerceIn(0, 3) * 12).dp,
+                                        end = 12.dp,
+                                        top = 10.dp,
+                                        bottom = 10.dp
+                                    ),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = chapter.title,
+                                            fontWeight = if (selected) {
+                                                FontWeight.Bold
+                                            } else {
+                                                FontWeight.Normal
+                                            },
+                                            maxLines = 3,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        if (selected) {
+                                            Text(
+                                                text = "当前阅读章节",
+                                                color = MaterialTheme.colorScheme.primary,
+                                                style = MaterialTheme.typography.labelSmall
+                                            )
+                                        }
+                                    }
+                                    Text(
+                                        text = "${chapter.pageIndex + 1}页",
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        style = MaterialTheme.typography.labelSmall
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -3153,6 +3337,54 @@ private fun EbookJumpDialog(
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
     )
+}
+
+/**
+ * 计算阅读器当前应使用的可靠页数，避免正文加载中的占位页覆盖历史阅读位置。
+ *
+ * 使用方法：
+ * PDF直接传入仓库保存页数；TEXT、EPUB、MOBI等文本型书籍在正文加载前使用仓库页数，加载完成后
+ * 切换为本次实际分页数量。所有输入都会收敛到至少1页，调用者可安全执行页码边界限制。
+ *
+ * @param format 当前书籍格式。
+ * @param savedPageCount 仓库中上一次保存或导入时得到的页数。
+ * @param textLoaded 文本型书籍是否已经读取并完成本次分页准备。
+ * @param loadedTextPageCount 当前内存中的实际文本分页数量。
+ * @return 当前阶段可用于恢复、展示和保存进度的可靠页数，最小为1。
+ */
+internal fun resolveEbookReaderPageCount(
+    format: EbookFormat,
+    savedPageCount: Int,
+    textLoaded: Boolean,
+    loadedTextPageCount: Int
+): Int {
+    return when {
+        format == EbookFormat.PDF -> savedPageCount
+        !textLoaded -> savedPageCount
+        else -> loadedTextPageCount
+    }.coerceAtLeast(1)
+}
+
+/**
+ * 把Compose正文选区转换为可保存的电子书摘录。
+ *
+ * 使用方法：
+ * 将BasicTextField回传的原始selection起止位置连同正文传入。函数兼容反向拖动和越界位置，去除
+ * 首尾空白并限制最大保存长度，返回结果可直接交给阅读笔记创建弹窗。
+ *
+ * @param text 当前页完整正文。
+ * @param selectionStart 原始选区起点，可能大于终点或暂时越界。
+ * @param selectionEnd 原始选区终点，可能小于起点或暂时越界。
+ * @return 规范化后的摘录；没有有效选择时返回空字符串。
+ */
+internal fun normalizeEbookNoteSelection(
+    text: String,
+    selectionStart: Int,
+    selectionEnd: Int
+): String {
+    val safeStart = minOf(selectionStart, selectionEnd).coerceIn(0, text.length)
+    val safeEnd = maxOf(selectionStart, selectionEnd).coerceIn(safeStart, text.length)
+    return text.substring(safeStart, safeEnd).trim().take(MAX_NOTE_SELECTION_LENGTH)
 }
 
 /**
@@ -3204,39 +3436,82 @@ internal fun paginateEbookText(text: String): List<String> {
 internal fun buildEbookTableOfContents(pages: List<String>): List<EbookChapter> {
     val chapters = mutableListOf<EbookChapter>()
     val seen = mutableSetOf<String>()
-    pages.forEachIndexed { pageIndex, pageText ->
-        pageText.lineSequence().forEach { rawLine ->
-            val line = rawLine.trim().replace(Regex("\\s+"), " ")
-            if (line.length !in 1..MAX_CHAPTER_TITLE_LENGTH) return@forEach
+    val sourceLines = pages.flatMapIndexed { pageIndex, pageText ->
+        pageText.lineSequence().mapNotNull { rawLine ->
+            val normalized = rawLine.trim().replace(Regex("\\s+"), " ")
+            normalized.takeIf(String::isNotBlank)?.let { line -> pageIndex to line }
+        }.toList()
+    }
+    sourceLines.forEachIndexed { lineIndex, (pageIndex, line) ->
+        if (line.length !in 1..MAX_CHAPTER_TITLE_LENGTH) return@forEachIndexed
 
-            val markdownMatch = MARKDOWN_CHAPTER_PATTERN.matchEntire(line)
-            val normalizedTitle: String
-            val level: Int
-            when {
-                markdownMatch != null -> {
-                    normalizedTitle = markdownMatch.groupValues[2].trim()
-                    level = markdownMatch.groupValues[1].length.coerceIn(1, 4)
-                }
-                CHINESE_CHAPTER_PATTERN.matches(line) ||
-                    ENGLISH_CHAPTER_PATTERN.matches(line) ||
-                    SPECIAL_CHAPTER_PATTERN.matches(line) -> {
-                    normalizedTitle = line
-                    level = 1
-                }
-                else -> return@forEach
+        val markdownMatch = MARKDOWN_CHAPTER_PATTERN.matchEntire(line)
+        val normalizedTitle: String
+        val level: Int
+        when {
+            markdownMatch != null -> {
+                normalizedTitle = markdownMatch.groupValues[2].trim()
+                level = markdownMatch.groupValues[1].length.coerceIn(1, 4)
             }
-            if (normalizedTitle.length !in 1..MAX_CHAPTER_TITLE_LENGTH) return@forEach
-            val key = "$pageIndex|${normalizedTitle.lowercase(Locale.ROOT)}"
-            if (seen.add(key)) {
-                chapters += EbookChapter(
-                    title = normalizedTitle,
-                    pageIndex = pageIndex,
-                    level = level
+            CHINESE_CHAPTER_PATTERN.matches(line) -> {
+                normalizedTitle = enrichChineseEbookChapterTitle(
+                    chapterMarker = line,
+                    nextLine = sourceLines.getOrNull(lineIndex + 1)?.second.orEmpty()
                 )
+                level = 1
             }
+            ENGLISH_CHAPTER_PATTERN.matches(line) || SPECIAL_CHAPTER_PATTERN.matches(line) -> {
+                normalizedTitle = line
+                level = 1
+            }
+            else -> return@forEachIndexed
+        }
+        if (normalizedTitle.length !in 1..MAX_CHAPTER_TITLE_LENGTH) return@forEachIndexed
+        val key = "$pageIndex|${normalizedTitle.lowercase(Locale.ROOT)}"
+        if (seen.add(key)) {
+            chapters += EbookChapter(
+                title = normalizedTitle,
+                pageIndex = pageIndex,
+                level = level
+            )
         }
     }
     return chapters.take(MAX_TABLE_OF_CONTENTS_ITEMS)
+}
+
+/**
+ * 为只有“第X章/回/卷”等编号的中文章节补充下一行短标题。
+ *
+ * 使用方法：
+ * [buildEbookTableOfContents]识别到纯章节编号后调用。若下一行是无句末标点的短文本，则将两行合并
+ * 为“第一章 山边小村”；若下一行更像正文、另一个章节或Markdown标题，则保留原编号，避免误收正文。
+ *
+ * @param chapterMarker 已确认符合中文章节格式的当前行。
+ * @param nextLine 正文中的下一条非空行；不存在时传入空字符串。
+ * @return 包含可靠副标题的完整目录名，或未经修改的章节编号。
+ */
+private fun enrichChineseEbookChapterTitle(chapterMarker: String, nextLine: String): String {
+    if (!CHINESE_BARE_CHAPTER_PATTERN.matches(chapterMarker)) return chapterMarker
+    val subtitle = nextLine.trim().replace(Regex("\\s+"), " ")
+    if (!isLikelyEbookChapterSubtitle(subtitle)) return chapterMarker
+    return "$chapterMarker $subtitle".take(MAX_CHAPTER_TITLE_LENGTH)
+}
+
+/**
+ * 判断章节编号后的短行是否更像章节副标题而不是普通正文。
+ *
+ * 使用方法：
+ * 仅由[enrichChineseEbookChapterTitle]调用。判断会拒绝空行、超长句、带常见句末标点的句子、另一个
+ * 章节编号以及Markdown标题，以较保守的方式补充目录详情。
+ *
+ * @param line 待判断的下一条非空正文行。
+ * @return 可以作为章节副标题时返回true，否则返回false。
+ */
+private fun isLikelyEbookChapterSubtitle(line: String): Boolean {
+    if (line.length !in 1..MAX_CHAPTER_SUBTITLE_LENGTH) return false
+    if (CHINESE_CHAPTER_PATTERN.matches(line) || ENGLISH_CHAPTER_PATTERN.matches(line)) return false
+    if (MARKDOWN_CHAPTER_PATTERN.matches(line) || SPECIAL_CHAPTER_PATTERN.matches(line)) return false
+    return CHAPTER_SUBTITLE_SENTENCE_PUNCTUATION.none(line::contains)
 }
 
 /**
@@ -3283,6 +3558,8 @@ private const val MAX_READER_FONT_SCALE = 1.8f
 private const val READER_FONT_STEP = 0.1f
 private const val EBOOK_TTS_SETTINGS_ACTION = "com.android.settings.TTS_SETTINGS"
 private const val MAX_CHAPTER_TITLE_LENGTH = 72
+private const val MAX_CHAPTER_SUBTITLE_LENGTH = 36
+private const val MAX_TABLE_OF_CONTENTS_QUERY_LENGTH = 48
 private const val MAX_TABLE_OF_CONTENTS_ITEMS = 2_000
 private const val MAX_NOTE_SELECTION_LENGTH = 8_000
 private const val MAX_NOTE_COMMENT_LENGTH = 8_000
@@ -3313,6 +3590,9 @@ private val MARKDOWN_CHAPTER_PATTERN = Regex("^(#{1,4})\\s+(.+)$")
 private val CHINESE_CHAPTER_PATTERN = Regex(
     "^第[〇零一二三四五六七八九十百千万两0-9]+[章节回卷部篇集](?!正文(?:[。.]|$)).{0,60}$"
 )
+private val CHINESE_BARE_CHAPTER_PATTERN = Regex(
+    "^第[〇零一二三四五六七八九十百千万两0-9]+[章节回卷部篇集]$"
+)
 private val ENGLISH_CHAPTER_PATTERN = Regex(
     "^(chapter|book|part)\\s+([0-9ivxlcdm]+|[a-z]+)([ .:：-].{0,52})?$",
     RegexOption.IGNORE_CASE
@@ -3321,6 +3601,7 @@ private val SPECIAL_CHAPTER_PATTERN = Regex(
     "^(序|序言|前言|楔子|引子|引言|后记|尾声|终章|附录|contents|preface|prologue|epilogue)$",
     RegexOption.IGNORE_CASE
 )
+private val CHAPTER_SUBTITLE_SENTENCE_PUNCTUATION = charArrayOf('。', '！', '？', '!', '?', '；', ';')
 
 /**
  * 书脊预设色选项。

@@ -11,7 +11,9 @@ import com.example.harleyapp.ui.screens.buildEbookShelfPages
 import com.example.harleyapp.ui.screens.buildEbookTableOfContents
 import com.example.harleyapp.ui.screens.createOpaqueArgb
 import com.example.harleyapp.ui.screens.moveEbookShelfBook
+import com.example.harleyapp.ui.screens.normalizeEbookNoteSelection
 import com.example.harleyapp.ui.screens.paginateEbookText
+import com.example.harleyapp.ui.screens.resolveEbookReaderPageCount
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -54,6 +56,59 @@ class EbookModelsTest {
             source.filterNot(Char::isWhitespace),
             pages.joinToString("").filterNot(Char::isWhitespace)
         )
+    }
+
+    /**
+     * 验证文本书籍加载正文期间沿用仓库页数，不能把上次停留页误压回第一页。
+     *
+     * @return 无返回值；加载前页数或加载后实际页数选择错误时由JUnit报告失败。
+     */
+    @Test
+    fun ebookReaderKeepsSavedPageCountUntilTextLoaded() {
+        assertEquals(
+            7_434,
+            resolveEbookReaderPageCount(
+                format = EbookFormat.MOBI,
+                savedPageCount = 7_434,
+                textLoaded = false,
+                loadedTextPageCount = 0
+            )
+        )
+        assertEquals(
+            7_510,
+            resolveEbookReaderPageCount(
+                format = EbookFormat.MOBI,
+                savedPageCount = 7_434,
+                textLoaded = true,
+                loadedTextPageCount = 7_510
+            )
+        )
+        assertEquals(
+            32,
+            resolveEbookReaderPageCount(
+                format = EbookFormat.PDF,
+                savedPageCount = 32,
+                textLoaded = true,
+                loadedTextPageCount = 1
+            )
+        )
+    }
+
+    /**
+     * 验证长按产生的反向选区和暂时越界位置都能安全转换成笔记摘录。
+     *
+     * @return 无返回值；选区排序、边界限制或首尾空白处理错误时由JUnit报告失败。
+     */
+    @Test
+    fun ebookNoteSelectionNormalizesNativeSelectionRange() {
+        val text = "  第一段正文，用于创建阅读笔记。  "
+
+        assertEquals(
+            "第一段正文，用于创建阅读笔记。",
+            normalizeEbookNoteSelection(text, text.length + 20, -5)
+        )
+        assertEquals("第一段", normalizeEbookNoteSelection(text, 2, 5))
+        assertEquals("", normalizeEbookNoteSelection(text, 4, 4))
     }
 
     /**
@@ -124,6 +179,28 @@ class EbookModelsTest {
         )
         assertEquals(listOf(0, 1, 2, 3), chapters.map { chapter -> chapter.pageIndex })
         assertEquals(2, chapters[2].level)
+    }
+
+    /**
+     * 验证章节编号与下一行短标题会组成完整目录名，而普通正文不会被误接到章节编号后。
+     *
+     * @return 无返回值；副标题遗漏或正文被错误合并时由JUnit报告失败。
+     */
+    @Test
+    fun tableOfContentsKeepsDetailedChineseChapterTitles() {
+        val chapters = buildEbookTableOfContents(
+            listOf(
+                "第一章\n山边小村\n这是第一章正文。",
+                "第二章\n韩立睁开眼睛，看见窗外已经天亮了。",
+                "第三章 墨大夫"
+            )
+        )
+
+        assertEquals(
+            listOf("第一章 山边小村", "第二章", "第三章 墨大夫"),
+            chapters.map { chapter -> chapter.title }
+        )
+        assertEquals(listOf(0, 1, 2), chapters.map { chapter -> chapter.pageIndex })
     }
 
     /**
