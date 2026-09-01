@@ -7,9 +7,12 @@ import com.example.harleyapp.model.EbookBook
 import com.example.harleyapp.model.EbookFormat
 import com.example.harleyapp.system.detectEbookLanguageCode
 import com.example.harleyapp.system.splitEbookTranslationText
+import com.example.harleyapp.ui.screens.EbookMeasuredTextPage
 import com.example.harleyapp.ui.screens.buildEbookShelfPages
 import com.example.harleyapp.ui.screens.buildEbookTableOfContents
 import com.example.harleyapp.ui.screens.createOpaqueArgb
+import com.example.harleyapp.ui.screens.findEbookPageIndexForExcerpt
+import com.example.harleyapp.ui.screens.findEbookPageIndexForOffset
 import com.example.harleyapp.ui.screens.moveEbookShelfBook
 import com.example.harleyapp.ui.screens.normalizeEbookNoteSelection
 import com.example.harleyapp.ui.screens.paginateEbookText
@@ -90,6 +93,67 @@ class EbookModelsTest {
                 savedPageCount = 32,
                 textLoaded = true,
                 loadedTextPageCount = 1
+            )
+        )
+    }
+
+    /**
+     * 验证字号、字体或屏幕尺寸改变后，可以用完整正文字符位置找回包含该位置的新页面。
+     *
+     * @return 无返回值；页首、页尾或越界位置映射错误时由JUnit报告失败。
+     */
+    @Test
+    fun dynamicPaginationRestoresPageFromTextOffset() {
+        val pages = listOf(
+            EbookMeasuredTextPage("第一页", startOffset = 0, endOffset = 100),
+            EbookMeasuredTextPage("第二页", startOffset = 100, endOffset = 245),
+            EbookMeasuredTextPage("第三页", startOffset = 245, endOffset = 400)
+        )
+
+        assertEquals(0, findEbookPageIndexForOffset(pages, -20))
+        assertEquals(0, findEbookPageIndexForOffset(pages, 99))
+        assertEquals(1, findEbookPageIndexForOffset(pages, 100))
+        assertEquals(1, findEbookPageIndexForOffset(pages, 244))
+        assertEquals(2, findEbookPageIndexForOffset(pages, 245))
+        assertEquals(2, findEbookPageIndexForOffset(pages, 999))
+    }
+
+    /**
+     * 验证旧笔记在真实屏幕重新分页后，会按摘录起点跳到新页，并在重复摘录中选择靠近原页的一处。
+     *
+     * @return 无返回值；摘录定位、重复内容选择或找不到时的回退页错误时由JUnit报告失败。
+     */
+    @Test
+    fun ebookNoteExcerptRemapsToDynamicPage() {
+        val repeatedExcerpt = "这是需要保留的摘录"
+        val firstPageText = "开头内容。$repeatedExcerpt。"
+        val secondPageText = "中间内容。"
+        val thirdPageText = "靠后的章节。$repeatedExcerpt。结束。"
+        val fullText = firstPageText + secondPageText + thirdPageText
+        val secondStart = firstPageText.length
+        val thirdStart = secondStart + secondPageText.length
+        val pages = listOf(
+            EbookMeasuredTextPage(firstPageText, 0, secondStart),
+            EbookMeasuredTextPage(secondPageText, secondStart, thirdStart),
+            EbookMeasuredTextPage(thirdPageText, thirdStart, fullText.length)
+        )
+
+        assertEquals(
+            2,
+            findEbookPageIndexForExcerpt(
+                pages = pages,
+                fullText = fullText,
+                excerpt = repeatedExcerpt,
+                fallbackPageIndex = 2
+            )
+        )
+        assertEquals(
+            1,
+            findEbookPageIndexForExcerpt(
+                pages = pages,
+                fullText = fullText,
+                excerpt = "不存在的摘录",
+                fallbackPageIndex = 1
             )
         )
     }

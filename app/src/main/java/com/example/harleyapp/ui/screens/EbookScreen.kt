@@ -4,6 +4,12 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.Paint
+import android.graphics.Typeface
+import android.graphics.text.LineBreaker
+import android.text.Layout
+import android.text.StaticLayout
+import android.text.TextPaint
 import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
@@ -87,6 +93,7 @@ import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -98,6 +105,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.zIndex
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -156,6 +164,7 @@ private data class PendingEbookNoteDraft(
  *
  * @param bookId 当前书籍稳定标识。
  * @param currentPage 当前零基页码。
+ * @param currentTextOffset 文本书籍当前页在完整正文中的字符起点；PDF固定为0。
  * @param pageCount 当前正文实际页数。
  * @param readingMode 当前翻页方式。
  * @param readingBackground 当前阅读背景。
@@ -166,12 +175,26 @@ private data class PendingEbookNoteDraft(
 private data class EbookReadingProgressSnapshot(
     val bookId: String,
     val currentPage: Int,
+    val currentTextOffset: Int,
     val pageCount: Int,
     val readingMode: EbookReadingMode,
     val readingBackground: EbookReadingBackground,
     val fontScale: Float,
     val fontFamily: EbookFontFamily,
     val readyToSave: Boolean
+)
+
+/**
+ * 一页按真实阅读区域测量后的文本及其原文位置。
+ *
+ * @param text 当前页完整正文，不包含下一页内容。
+ * @param startOffset 当前页首字符在完整提取正文中的零基位置。
+ * @param endOffset 当前页末尾后一位在完整提取正文中的零基位置。
+ */
+internal data class EbookMeasuredTextPage(
+    val text: String,
+    val startOffset: Int,
+    val endOffset: Int
 )
 
 /**
@@ -1519,13 +1542,27 @@ private fun EbookReader(
 ) {
     val context = LocalContext.current
     val activity = remember(context) { context.findComponentActivity() }
+    val density = LocalDensity.current
     val latestImmersiveChanged by rememberUpdatedState(onImmersiveChanged)
     val latestReadingDuration by rememberUpdatedState(onReadingDuration)
     val readingStartedAtMillis = remember(book.id) { AtomicLong(0L) }
+    var readerViewportSize by remember(book.id) { mutableStateOf(IntSize.Zero) }
     var extractedText by remember(book.id) { mutableStateOf("") }
     var textLoaded by remember(book.id) { mutableStateOf(book.format == EbookFormat.PDF) }
+    var measuredTextPages by remember(book.id) {
+        mutableStateOf<List<EbookMeasuredTextPage>>(emptyList())
+    }
+    var paginationReady by remember(book.id) {
+        mutableStateOf(book.format == EbookFormat.PDF)
+    }
+    var paginationProgress by remember(book.id) {
+        mutableStateOf(if (book.format == EbookFormat.PDF) 1f else 0f)
+    }
     var currentPage by remember(book.id) {
         mutableIntStateOf(book.currentPage.coerceIn(0, book.pageCount.coerceAtLeast(1) - 1))
+    }
+    var currentTextOffset by remember(book.id) {
+        mutableIntStateOf(book.currentTextOffset.coerceAtLeast(0))
     }
     var readingModeName by remember(book.id) { mutableStateOf(book.readingMode.name) }
     var readingBackgroundName by remember(book.id) {
@@ -1672,26 +1709,122 @@ private fun EbookReader(
         }
     }
 
-    val textPages = remember(extractedText, textLoaded, book.format) {
-        if (book.format != EbookFormat.PDF && !textLoaded) {
-            emptyList()
-        } else {
-            paginateEbookText(extractedText)
-        }
+    val pageHorizontalPaddingPx = with(density) {
+        (READER_PAGE_HORIZONTAL_PADDING * 2).roundToPx()
     }
+    val pageVerticalInsetsPx = with(density) {
+        (READER_TOP_TEXT_INSET + READER_BOTTOM_TEXT_INSET).roundToPx()
+    }
+    val pageContentWidthPx = (readerViewportSize.width - pageHorizontalPaddingPx).coerceAtLeast(0)
+    val pageContentHeightPx = (readerViewportSize.height - pageVerticalInsetsPx).coerceAtLeast(0)
+
+    // 正文、字号、字体或可用区域变化后在后台重新排版。大体积MOBI不会阻塞Compose主线程。
+    LaunchedEffect(
+        book.id,
+        book.format,
+        extractedText,
+        textLoaded,
+        pageContentWidthPx,
+        pageContentHeightPx,
+        fontScale,
+        fontFamily,
+        density.density,
+        density.fontScale
+    ) {
+        if (book.format == EbookFormat.PDF) {
+            paginationProgress = 1f
+            paginationReady = true
+            return@LaunchedEffect
+        }
+        if (
+            !textLoaded ||
+            pageContentWidthPx <= 0 ||
+            pageContentHeightPx <= 0
+        ) {
+            paginationProgress = 0f
+            paginationReady = false
+            return@LaunchedEffect
+        }
+
+        paginationProgress = 0f
+        paginationReady = false
+        val fontSizePx = with(density) { (READER_BASE_FONT_SIZE_SP * fontScale).sp.toPx() }
+        val lineHeightPx = with(density) { (READER_BASE_LINE_HEIGHT_SP * fontScale).sp.toPx() }
+        measuredTextPages = withContext(Dispatchers.Default) {
+            paginateEbookTextToViewport(
+                text = extractedText,
+                contentWidthPx = pageContentWidthPx,
+                contentHeightPx = pageContentHeightPx,
+                fontSizePx = fontSizePx,
+                lineHeightPx = lineHeightPx,
+                fontFamily = fontFamily,
+                onProgress = { progress -> paginationProgress = progress }
+            )
+        }
+        paginationProgress = 1f
+        paginationReady = true
+    }
+
+    val textPages = remember(measuredTextPages) {
+        measuredTextPages.map(EbookMeasuredTextPage::text)
+    }
+    val readerTextReady = textLoaded && (book.format == EbookFormat.PDF || paginationReady)
     val chapters = remember(textPages, book.format) {
         if (book.format == EbookFormat.PDF) emptyList() else buildEbookTableOfContents(textPages)
     }
     val pageCount = resolveEbookReaderPageCount(
         format = book.format,
         savedPageCount = book.pageCount,
-        textLoaded = textLoaded,
+        textLoaded = readerTextReady,
         loadedTextPageCount = textPages.size
     )
 
+    // 旧版本笔记只保存页码。真实屏幕分页后根据摘录在完整正文中的位置重新定位，避免字体或屏幕
+    // 尺寸变化导致页边标记、笔记列表跳转仍停留在旧页码。
+    val displayedEbookNotes = remember(
+        ebookNotes,
+        measuredTextPages,
+        extractedText,
+        book.format
+    ) {
+        if (book.format == EbookFormat.PDF || measuredTextPages.isEmpty()) {
+            ebookNotes
+        } else {
+            ebookNotes.map { note ->
+                note.copy(
+                    pageIndex = findEbookPageIndexForExcerpt(
+                        pages = measuredTextPages,
+                        fullText = extractedText,
+                        excerpt = note.excerpt,
+                        fallbackPageIndex = note.pageIndex
+                    )
+                )
+            }
+        }
+    }
+
+    // 字号、字体或屏幕尺寸改变后，按正文字符位置找回原来的段落，而不是继续使用已经失效的页码。
+    LaunchedEffect(book.id, book.format, readerTextReady, measuredTextPages) {
+        if (book.format != EbookFormat.PDF && readerTextReady) {
+            currentPage = findEbookPageIndexForOffset(
+                pages = measuredTextPages,
+                textOffset = currentTextOffset
+            )
+        }
+    }
+
+    // 用户真正翻到新页后更新字符锚点，供退出保存、字号变化和横竖屏变化时恢复位置。
+    LaunchedEffect(book.id, book.format, currentPage) {
+        if (book.format != EbookFormat.PDF && paginationReady) {
+            measuredTextPages.getOrNull(currentPage)?.let { page ->
+                currentTextOffset = page.startOffset
+            }
+        }
+    }
+
     // 等真实正文页数准备完成后再修正边界，不能用加载中的临时页数覆盖上次阅读位置。
-    LaunchedEffect(book.id, book.format, textLoaded, pageCount) {
-        if (book.format == EbookFormat.PDF || textLoaded) {
+    LaunchedEffect(book.id, book.format, readerTextReady, pageCount) {
+        if (book.format == EbookFormat.PDF || readerTextReady) {
             currentPage = currentPage.coerceIn(0, pageCount - 1)
         }
     }
@@ -1700,12 +1833,13 @@ private fun EbookReader(
         EbookReadingProgressSnapshot(
             bookId = book.id,
             currentPage = currentPage,
+            currentTextOffset = if (book.format == EbookFormat.PDF) 0 else currentTextOffset,
             pageCount = pageCount,
             readingMode = readingMode,
             readingBackground = readingBackground,
             fontScale = fontScale,
             fontFamily = fontFamily,
-            readyToSave = book.format == EbookFormat.PDF || textLoaded
+            readyToSave = book.format == EbookFormat.PDF || readerTextReady
         )
     )
 
@@ -1718,6 +1852,7 @@ private fun EbookReader(
                     repository.saveReadingProgress(
                         bookId = snapshot.bookId,
                         currentPage = snapshot.currentPage,
+                        currentTextOffset = snapshot.currentTextOffset,
                         pageCount = snapshot.pageCount,
                         readingMode = snapshot.readingMode,
                         readingBackground = snapshot.readingBackground,
@@ -1845,19 +1980,21 @@ private fun EbookReader(
     LaunchedEffect(
         book.id,
         currentPage,
+        currentTextOffset,
         pageCount,
         readingMode,
         readingBackground,
         fontScale,
         fontFamily
     ) {
-        if (book.format != EbookFormat.PDF && !textLoaded) return@LaunchedEffect
+        if (book.format != EbookFormat.PDF && !readerTextReady) return@LaunchedEffect
         delay(PROGRESS_SAVE_DEBOUNCE_MILLIS)
         withContext(Dispatchers.IO) {
             synchronized(repository) {
                 repository.saveReadingProgress(
                     bookId = book.id,
                     currentPage = currentPage,
+                    currentTextOffset = if (book.format == EbookFormat.PDF) 0 else currentTextOffset,
                     pageCount = pageCount,
                     readingMode = readingMode,
                     readingBackground = readingBackground,
@@ -1876,15 +2013,28 @@ private fun EbookReader(
     Box(
         modifier = Modifier
             .fillMaxSize()
+            .onSizeChanged { size -> readerViewportSize = size }
             .background(readerPalette.background)
     ) {
-        if (!textLoaded) {
+        if (!readerTextReady) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth(0.65f))
+                    if (textLoaded) {
+                        LinearProgressIndicator(
+                            modifier = Modifier.fillMaxWidth(0.65f),
+                            progress = { paginationProgress.coerceIn(0f, 1f) }
+                        )
+                    } else {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth(0.65f))
+                    }
                     Text(
                         modifier = Modifier.padding(top = 12.dp),
-                        text = "正在准备离线正文…",
+                        text = if (textLoaded) {
+                            "正在按当前屏幕和字号重新分页… " +
+                                "${(paginationProgress * 100f).roundToInt()}%"
+                        } else {
+                            "正在准备离线正文…"
+                        },
                         color = readerPalette.text.copy(alpha = 0.72f)
                     )
                 }
@@ -1903,7 +2053,7 @@ private fun EbookReader(
                 fontScale = fontScale,
                 fontFamily = fontFamily,
                 controlsVisible = controlsVisible,
-                noteCountsByPage = ebookNotes.groupingBy(EbookNote::pageIndex).eachCount(),
+                noteCountsByPage = displayedEbookNotes.groupingBy(EbookNote::pageIndex).eachCount(),
                 onToggleControls = { controlsVisible = !controlsVisible },
                 onCreateNote = { excerpt, page ->
                     pendingNoteDraft = PendingEbookNoteDraft(
@@ -1930,14 +2080,17 @@ private fun EbookReader(
             exit = fadeOut() + slideOutVertically { height -> -height }
         ) {
             Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(READER_TOP_BAR_HEIGHT),
                 color = readerPalette.control.copy(alpha = 0.97f),
                 tonalElevation = 5.dp,
                 shadowElevation = 5.dp
             ) {
                 Row(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 8.dp, vertical = 5.dp),
+                        .fillMaxSize()
+                        .padding(horizontal = 8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     TextButton(
@@ -1971,24 +2124,29 @@ private fun EbookReader(
             exit = fadeOut() + slideOutVertically { height -> height }
         ) {
             Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(READER_BOTTOM_BAR_HEIGHT),
                 color = readerPalette.control.copy(alpha = 0.94f),
                 tonalElevation = 4.dp
             ) {
                 Column(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 18.dp, vertical = 8.dp),
+                        .fillMaxSize()
+                        .padding(horizontal = 14.dp, vertical = 4.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(52.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         TextButton(
                             enabled = currentPage > 0,
                             onClick = { currentPage -= 1 }
                         ) {
-                            Text("‹ 上一页", color = readerPalette.controlText)
+                            Text("‹ 上页", color = readerPalette.controlText)
                         }
                         Text(
                             modifier = Modifier.weight(1f),
@@ -2001,48 +2159,62 @@ private fun EbookReader(
                             enabled = currentPage < pageCount - 1,
                             onClick = { currentPage += 1 }
                         ) {
-                            Text("下一页 ›", color = readerPalette.controlText)
+                            Text("下页 ›", color = readerPalette.controlText)
                         }
                     }
-                    Text(
-                        text = currentChapter?.let { chapter ->
-                            "${chapter.title} · 单击正文进入沉浸阅读"
-                        } ?: "单击正文进入沉浸阅读",
-                        color = readerPalette.controlText.copy(alpha = 0.72f),
-                        style = MaterialTheme.typography.labelSmall
-                    )
-                    if (ebookNotes.isNotEmpty()) {
-                        TextButton(onClick = { showBookNotes = true }) {
-                            val currentPageNoteCount = ebookNotes.count { note ->
-                                note.pageIndex == currentPage
-                            }
-                            Text(
-                                text = if (currentPageNoteCount > 0) {
-                                    "本页笔记 $currentPageNoteCount · 全书 ${ebookNotes.size}"
-                                } else {
-                                    "全书笔记 ${ebookNotes.size}"
-                                },
-                                color = readerPalette.controlText
-                            )
-                        }
-                    }
-                    if (translationDisplayMode != EbookTranslationDisplayMode.ORIGINAL) {
-                        val stageText = when (translationStage) {
+
+                    val translationStatus = if (
+                        translationDisplayMode != EbookTranslationDisplayMode.ORIGINAL
+                    ) {
+                        when (translationStage) {
                             EbookTranslationStage.IDLE -> "等待离线翻译"
                             EbookTranslationStage.PREPARING_MODEL -> "正在准备离线语言模型…"
                             EbookTranslationStage.TRANSLATING -> "正在手机本地翻译本页…"
                             EbookTranslationStage.READY -> "离线译文已就绪"
                             EbookTranslationStage.ERROR -> translationMessage.ifBlank { "离线翻译失败" }
                         }
+                    } else {
+                        null
+                    }
+                    val footerColor = if (translationStage == EbookTranslationStage.ERROR) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        readerPalette.controlText.copy(alpha = 0.74f)
+                    }
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(32.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
                         Text(
-                            text = stageText,
-                            color = if (translationStage == EbookTranslationStage.ERROR) {
-                                MaterialTheme.colorScheme.error
-                            } else {
-                                readerPalette.controlText.copy(alpha = 0.75f)
-                            },
-                            style = MaterialTheme.typography.labelSmall
+                            modifier = Modifier.weight(1f),
+                            text = translationStatus
+                                ?: currentChapter?.title
+                                ?: "轻触正文进入沉浸阅读",
+                            color = footerColor,
+                            style = MaterialTheme.typography.labelSmall,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
+                        if (displayedEbookNotes.isNotEmpty()) {
+                            val currentPageNoteCount = displayedEbookNotes.count { note ->
+                                note.pageIndex == currentPage
+                            }
+                            Text(
+                                modifier = Modifier
+                                    .clickable { showBookNotes = true }
+                                    .padding(start = 12.dp, top = 6.dp, bottom = 6.dp),
+                                text = if (currentPageNoteCount > 0) {
+                                    "笔记 $currentPageNoteCount/${displayedEbookNotes.size}"
+                                } else {
+                                    "笔记 ${displayedEbookNotes.size}"
+                                },
+                                color = readerPalette.controlText,
+                                style = MaterialTheme.typography.labelSmall,
+                                maxLines = 1
+                            )
+                        }
                     }
                 }
             }
@@ -2057,7 +2229,7 @@ private fun EbookReader(
             fontScale = fontScale,
             fontFamily = fontFamily,
             chapterCount = chapters.size,
-            noteCount = ebookNotes.size,
+            noteCount = displayedEbookNotes.size,
             translationDisplayMode = translationDisplayMode,
             readAloudReady = readAloudState == EbookReadAloudState.READY,
             isAutoReading = isAutoReading || isSpeaking,
@@ -2159,7 +2331,7 @@ private fun EbookReader(
 
     if (showBookNotes) {
         EbookNotesDialog(
-            notes = ebookNotes,
+            notes = displayedEbookNotes,
             currentPage = currentPage,
             onJump = { note ->
                 currentPage = note.pageIndex.coerceIn(0, pageCount - 1)
@@ -2697,13 +2869,13 @@ private fun EbookPageContainer(
     onOpenPageNotes: (Int) -> Unit,
     onPageChanged: (Int) -> Unit
 ) {
-    val pageContent: @Composable (Int, Boolean) -> Unit = { page, allowInnerScroll ->
+    val pageContent: @Composable (Int) -> Unit = { page ->
         if (book.format == EbookFormat.PDF) {
             PdfEbookPage(
                 book = book,
                 pageIndex = page,
                 repository = repository,
-                allowVerticalScroll = allowInnerScroll
+                controlsVisible = controlsVisible
             )
         } else {
             TextEbookPage(
@@ -2714,7 +2886,6 @@ private fun EbookPageContainer(
                 },
                 fontScale = fontScale,
                 fontFamily = fontFamily,
-                allowVerticalScroll = allowInnerScroll,
                 controlsVisible = controlsVisible,
                 noteCount = noteCountsByPage[page] ?: 0,
                 backgroundColor = readerPalette.background,
@@ -2775,7 +2946,7 @@ private fun EbookPageContainer(
                         }
                         .background(readerPalette.background)
                 ) {
-                    pageContent(page, true)
+                    pageContent(page)
                     if (signedOffset.absoluteValue > 0.01f) {
                         Box(
                             modifier = Modifier
@@ -2820,7 +2991,7 @@ private fun EbookPageContainer(
                 modifier = Modifier.fillMaxSize(),
                 state = pagerState,
                 beyondViewportPageCount = 1
-            ) { page -> pageContent(page, true) }
+            ) { page -> pageContent(page) }
         }
 
         EbookReadingMode.VERTICAL -> {
@@ -2840,7 +3011,7 @@ private fun EbookPageContainer(
                 modifier = Modifier.fillMaxSize(),
                 state = pagerState,
                 beyondViewportPageCount = 1
-            ) { page -> pageContent(page, false) }
+            ) { page -> pageContent(page) }
         }
 
             EbookReadingMode.FADE -> {
@@ -2849,7 +3020,7 @@ private fun EbookPageContainer(
                     targetState = currentPage,
                     transitionSpec = { fadeIn() togetherWith fadeOut() },
                     label = "ebook_fade_page"
-                ) { page -> pageContent(page, true) }
+                ) { page -> pageContent(page) }
             }
     }
     }
@@ -2864,7 +3035,6 @@ private fun EbookPageContainer(
  * @param text 当前页正文。
  * @param fontScale 用户设置的字号倍率。
  * @param fontFamily 用户设置的字体族。
- * @param allowVerticalScroll 当前分页模式是否允许页内上下滚动。
  * @param controlsVisible 工具栏是否显示，用于为顶部和底部控制栏预留阅读边距。
  * @param noteCount 当前页已经保存的笔记数量。
  * @param backgroundColor 阅读背景颜色。
@@ -2878,7 +3048,6 @@ private fun TextEbookPage(
     text: String,
     fontScale: Float,
     fontFamily: EbookFontFamily,
-    allowVerticalScroll: Boolean,
     controlsVisible: Boolean,
     noteCount: Int,
     backgroundColor: Color,
@@ -2892,28 +3061,28 @@ private fun TextEbookPage(
         selectionStart = textFieldValue.selection.start,
         selectionEnd = textFieldValue.selection.end
     )
-    val scrollModifier = if (allowVerticalScroll) {
-        Modifier.verticalScroll(rememberScrollState())
-    } else {
-        Modifier
-    }
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(backgroundColor)
     ) {
-        // 正文单独滚动，页边笔记标记和选区操作条固定在可视区域，不随长篇正文移动到屏幕外。
+        // 一页正文严格使用当前屏幕可读区域，不再提供页内滚动；翻页手势是阅读后续内容的唯一入口。
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .then(scrollModifier)
                 .padding(
-                    horizontal = 24.dp,
-                    vertical = if (controlsVisible) 72.dp else 24.dp
+                    start = READER_PAGE_HORIZONTAL_PADDING,
+                    top = if (controlsVisible) READER_TOP_TEXT_INSET else READER_IMMERSIVE_TEXT_PADDING,
+                    end = READER_PAGE_HORIZONTAL_PADDING,
+                    bottom = if (controlsVisible) {
+                        READER_BOTTOM_TEXT_INSET
+                    } else {
+                        READER_IMMERSIVE_TEXT_PADDING
+                    }
                 )
         ) {
             BasicTextField(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxSize(),
                 value = textFieldValue,
                 onValueChange = { updatedValue ->
                     // 阅读区只允许改变选区，禁止输入法或粘贴操作改写原书正文。
@@ -2921,8 +3090,8 @@ private fun TextEbookPage(
                 },
                 readOnly = true,
                 textStyle = MaterialTheme.typography.bodyLarge.copy(
-                    fontSize = (18f * fontScale).sp,
-                    lineHeight = (30f * fontScale).sp,
+                    fontSize = (READER_BASE_FONT_SIZE_SP * fontScale).sp,
+                    lineHeight = (READER_BASE_LINE_HEIGHT_SP * fontScale).sp,
                     fontFamily = composeFontFamily(fontFamily),
                     color = textColor
                 )
@@ -2934,7 +3103,7 @@ private fun TextEbookPage(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
                     .padding(
-                        top = if (controlsVisible) 74.dp else 16.dp,
+                        top = if (controlsVisible) READER_TOP_TEXT_INSET + 8.dp else 16.dp,
                         end = 16.dp
                     )
                     .zIndex(5f)
@@ -2958,7 +3127,9 @@ private fun TextEbookPage(
                 .padding(
                     start = 16.dp,
                     end = 16.dp,
-                    bottom = if (controlsVisible) 104.dp else 20.dp
+                    bottom = if (controlsVisible) {
+                        READER_BOTTOM_TEXT_INSET + 8.dp
+                    } else 20.dp
                 )
                 .zIndex(6f),
             visible = selectedText.isNotBlank(),
@@ -3006,13 +3177,24 @@ private fun TextEbookPage(
     }
 }
 
-/** @return 后台渲染并显示的一页PDF。 */
+/**
+ * 后台渲染并在当前屏幕可读区域内完整显示一页PDF。
+ *
+ * 使用方法：
+ * 由[EbookPageContainer]传入书籍、页码和工具栏状态；本函数不提供页内滚动，整张PDF页会等比缩放。
+ *
+ * @param book 当前PDF书籍。
+ * @param pageIndex 当前零基页码。
+ * @param repository 负责渲染PDF页面的仓库。
+ * @param controlsVisible 工具栏是否显示，用于预留不会遮挡页面的上下区域。
+ * @return 无返回值，直接绘制一页PDF。
+ */
 @Composable
 private fun PdfEbookPage(
     book: EbookBook,
     pageIndex: Int,
     repository: EbookRepository,
-    allowVerticalScroll: Boolean
+    controlsVisible: Boolean
 ) {
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
         val density = LocalDensity.current
@@ -3021,17 +3203,16 @@ private fun PdfEbookPage(
         LaunchedEffect(book.id, pageIndex, targetWidth) {
             bitmap = repository.renderPdfPage(book, pageIndex, targetWidth)
         }
-        val scrollModifier = if (allowVerticalScroll) {
-            Modifier.verticalScroll(rememberScrollState())
-        } else {
-            Modifier
-        }
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .then(scrollModifier)
-                .padding(8.dp),
-            contentAlignment = Alignment.TopCenter
+                .padding(
+                    start = 8.dp,
+                    top = if (controlsVisible) READER_TOP_TEXT_INSET else 8.dp,
+                    end = 8.dp,
+                    bottom = if (controlsVisible) READER_BOTTOM_TEXT_INSET else 8.dp
+                ),
+            contentAlignment = Alignment.Center
         ) {
             val pageBitmap = bitmap
             if (pageBitmap == null) {
@@ -3040,8 +3221,8 @@ private fun PdfEbookPage(
                 Image(
                     bitmap = pageBitmap.asImageBitmap(),
                     contentDescription = "${book.title}第${pageIndex + 1}页",
-                    modifier = Modifier.fillMaxWidth(),
-                    contentScale = ContentScale.FillWidth
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Fit
                 )
             }
         }
@@ -3452,6 +3633,253 @@ internal fun normalizeEbookNoteSelection(
 }
 
 /**
+ * 按当前手机真实正文宽高、字号和字体把完整离线正文切成不可滚动的屏幕页。
+ *
+ * 使用方法：
+ * 阅读器取得自身像素尺寸后，在Dispatchers.Default后台调用本函数。传入的宽高必须已经扣除正文
+ * 水平留白以及普通模式的顶部、底部工具栏安全区。返回结果可直接用于HorizontalPager或VerticalPager。
+ *
+ * 实现使用与正文相同的Android系统字体、字号和行高逐行排版；每页最多包含可视区域能容纳的完整行，
+ * 因此用户不需要在单页内继续下拉。大文件按固定字符块排版，每块一次生成多页，并保留块尾尚未
+ * 凑满一页的文字交给下一块继续计算。这样既不会把整本MOBI一次装入StaticLayout，也不会为了每一页
+ * 重复排版后续正文。
+ *
+ * @param text 完整离线正文。
+ * @param contentWidthPx 正文扣除左右留白后的可用像素宽度。
+ * @param contentHeightPx 正文扣除上下控制栏安全区后的可用像素高度。
+ * @param fontSizePx 当前正文字号像素值。
+ * @param lineHeightPx 当前正文行高像素值。
+ * @param fontFamily 用户选择的系统字体族。
+ * @param onProgress 每处理完一个字符块回传0到1之间的进度；不需要显示进度时可省略。
+ *
+ * @return 至少一页的测量分页结果；正文为空或尺寸无效时返回说明页。
+ */
+internal fun paginateEbookTextToViewport(
+    text: String,
+    contentWidthPx: Int,
+    contentHeightPx: Int,
+    fontSizePx: Float,
+    lineHeightPx: Float,
+    fontFamily: EbookFontFamily,
+    onProgress: (Float) -> Unit = {}
+): List<EbookMeasuredTextPage> {
+    if (text.isBlank() || contentWidthPx <= 0 || contentHeightPx <= 0) {
+        return listOf(
+            EbookMeasuredTextPage(
+                text = "没有解析到可显示的正文",
+                startOffset = 0,
+                endOffset = 0
+            )
+        )
+    }
+
+    val safeLineHeightPx = lineHeightPx.coerceAtLeast(1f)
+    val maxLines = (contentHeightPx / safeLineHeightPx).toInt().coerceAtLeast(1)
+    val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+        textSize = fontSizePx.coerceAtLeast(1f)
+        typeface = androidTypeface(fontFamily)
+    }
+    val lineSpacingExtra = (safeLineHeightPx - textPaint.fontSpacing).coerceAtLeast(0f)
+    val pages = mutableListOf<EbookMeasuredTextPage>()
+    var chunkStart = 0
+
+    while (chunkStart < text.length) {
+        val chunkEnd = (chunkStart + PAGE_LAYOUT_CHARACTER_WINDOW).coerceAtMost(text.length)
+        val chunkText = text.substring(chunkStart, chunkEnd)
+        val layout = StaticLayout.Builder.obtain(
+            chunkText,
+            0,
+            chunkText.length,
+            textPaint,
+            contentWidthPx
+        )
+            .setAlignment(Layout.Alignment.ALIGN_NORMAL)
+            .setBreakStrategy(LineBreaker.BREAK_STRATEGY_SIMPLE)
+            .setHyphenationFrequency(Layout.HYPHENATION_FREQUENCY_NONE)
+            .setIncludePad(false)
+            .setLineSpacing(lineSpacingExtra, 1f)
+            .build()
+
+        // 非最后一块至少保留末尾一个未满页。即使字符块刚好在一行中间结束，该行也会进入下一块
+        // 重新排版，从而保证页边界不受固定分块位置影响。
+        val emittedLineCount = if (chunkEnd >= text.length) {
+            layout.lineCount
+        } else {
+            ((layout.lineCount - 1).coerceAtLeast(0) / maxLines) * maxLines
+        }
+
+        if (emittedLineCount <= 0) {
+            // 正常手机尺寸下固定字符块一定能形成多页。这里仅处理极端超宽屏或异常字体指标，
+            // 直接扩大到剩余正文完成一次排版，确保循环始终向前推进而不会停在加载页面。
+            val fallbackLayout = StaticLayout.Builder.obtain(
+                text,
+                chunkStart,
+                text.length,
+                textPaint,
+                contentWidthPx
+            )
+                .setAlignment(Layout.Alignment.ALIGN_NORMAL)
+                .setBreakStrategy(LineBreaker.BREAK_STRATEGY_SIMPLE)
+                .setHyphenationFrequency(Layout.HYPHENATION_FREQUENCY_NONE)
+                .setIncludePad(false)
+                .setLineSpacing(lineSpacingExtra, 1f)
+                .build()
+            appendMeasuredEbookPages(
+                sourceText = text,
+                sourceStartOffset = 0,
+                layout = fallbackLayout,
+                emittedLineCount = fallbackLayout.lineCount,
+                maxLinesPerPage = maxLines,
+                destination = pages
+            )
+            chunkStart = text.length
+        } else {
+            appendMeasuredEbookPages(
+                sourceText = text,
+                sourceStartOffset = chunkStart,
+                layout = layout,
+                emittedLineCount = emittedLineCount,
+                maxLinesPerPage = maxLines,
+                destination = pages
+            )
+            val emittedCharacterCount = layout.getLineEnd(emittedLineCount - 1)
+                .coerceIn(1, chunkText.length)
+            chunkStart += emittedCharacterCount
+        }
+        onProgress(chunkStart.toFloat() / text.length.toFloat())
+    }
+
+    return pages.ifEmpty {
+        listOf(EbookMeasuredTextPage("没有解析到可显示的正文", 0, 0))
+    }
+}
+
+/**
+ * 把一次StaticLayout排版结果按每屏可容纳行数追加为多个阅读页。
+ *
+ * 使用方法：
+ * 仅由[paginateEbookTextToViewport]在后台分块分页时调用。调用者必须保证[emittedLineCount]
+ * 不超过layout实际行数，并且非最后一个字符块不传入未排满一页的尾部行。
+ *
+ * @param sourceText 完整离线正文，用于按绝对字符位置取得每页文本。
+ * @param sourceStartOffset 当前layout第0个字符在完整正文中的绝对位置。
+ * @param layout 当前字符块已经完成的Android行排版结果。
+ * @param emittedLineCount 本次允许输出的行数。
+ * @param maxLinesPerPage 每一屏最多容纳的完整行数。
+ * @param destination 接收分页结果的可变列表。
+ * @return 无返回值，分页结果直接追加到[destination]。
+ */
+private fun appendMeasuredEbookPages(
+    sourceText: String,
+    sourceStartOffset: Int,
+    layout: StaticLayout,
+    emittedLineCount: Int,
+    maxLinesPerPage: Int,
+    destination: MutableList<EbookMeasuredTextPage>
+) {
+    var pageFirstLine = 0
+    while (pageFirstLine < emittedLineCount) {
+        val pageLastLine = (pageFirstLine + maxLinesPerPage)
+            .coerceAtMost(emittedLineCount) - 1
+        val relativeStart = layout.getLineStart(pageFirstLine)
+        val relativeEnd = layout.getLineEnd(pageLastLine)
+        val absoluteStart = (sourceStartOffset + relativeStart)
+            .coerceIn(0, sourceText.length)
+        val absoluteEnd = (sourceStartOffset + relativeEnd)
+            .coerceIn(absoluteStart, sourceText.length)
+
+        if (absoluteEnd > absoluteStart) {
+            destination += EbookMeasuredTextPage(
+                text = sourceText.substring(absoluteStart, absoluteEnd).trim(),
+                startOffset = absoluteStart,
+                endOffset = absoluteEnd
+            )
+        }
+        pageFirstLine = pageLastLine + 1
+    }
+}
+
+/**
+ * 根据正文字符锚点定位新分页中的页码。
+ *
+ * 使用方法：
+ * 字号、字体、横竖屏或阅读区域变化后，把保存的currentTextOffset传入，恢复到包含该字符的页面。
+ *
+ * @param pages 当前真实屏幕分页结果。
+ * @param textOffset 需要恢复的完整正文字符位置。
+ * @return 包含该位置的零基页码；空列表返回0，越界位置会限制到首尾页。
+ */
+internal fun findEbookPageIndexForOffset(
+    pages: List<EbookMeasuredTextPage>,
+    textOffset: Int
+): Int {
+    if (pages.isEmpty()) return 0
+    val safeOffset = textOffset.coerceAtLeast(0)
+    var low = 0
+    var high = pages.lastIndex
+    var result = 0
+    while (low <= high) {
+        val middle = (low + high) ushr 1
+        if (pages[middle].startOffset <= safeOffset) {
+            result = middle
+            low = middle + 1
+        } else {
+            high = middle - 1
+        }
+    }
+    return result.coerceIn(0, pages.lastIndex)
+}
+
+/**
+ * 根据笔记摘录重新定位真实屏幕分页后的页码。
+ *
+ * 使用方法：
+ * 电子书完成动态分页后，为旧笔记逐条调用本函数。函数优先在完整正文中查找摘录，并在摘录重复
+ * 出现时选择距离原页位置最近的一处；找不到时保留经过边界修正的原页码。
+ *
+ * @param pages 当前真实屏幕分页结果。
+ * @param fullText 完整离线正文。
+ * @param excerpt 笔记保存的原文摘录。
+ * @param fallbackPageIndex 无法匹配摘录时使用的原零基页码。
+ * @return 摘录起点所在的当前零基页码。
+ */
+internal fun findEbookPageIndexForExcerpt(
+    pages: List<EbookMeasuredTextPage>,
+    fullText: String,
+    excerpt: String,
+    fallbackPageIndex: Int
+): Int {
+    if (pages.isEmpty()) return 0
+    val safeFallbackPage = fallbackPageIndex.coerceIn(0, pages.lastIndex)
+    val normalizedExcerpt = excerpt.trim()
+    if (normalizedExcerpt.isBlank() || fullText.isBlank()) return safeFallbackPage
+
+    val fallbackOffset = pages[safeFallbackPage].startOffset
+    var searchStart = 0
+    var closestOffset = -1
+    var closestDistance = Int.MAX_VALUE
+    while (searchStart < fullText.length) {
+        val matchOffset = fullText.indexOf(normalizedExcerpt, startIndex = searchStart)
+        if (matchOffset < 0) break
+        val distance = kotlin.math.abs(matchOffset.toLong() - fallbackOffset.toLong())
+            .coerceAtMost(Int.MAX_VALUE.toLong())
+            .toInt()
+        if (distance < closestDistance) {
+            closestDistance = distance
+            closestOffset = matchOffset
+            if (distance == 0) break
+        }
+        searchStart = matchOffset + 1
+    }
+
+    return if (closestOffset >= 0) {
+        findEbookPageIndexForOffset(pages, closestOffset)
+    } else {
+        safeFallbackPage
+    }
+}
+
+/**
  * 把离线正文分割为适合手机翻页的段落页。
  *
  * @param text 完整纯文本。
@@ -3593,6 +4021,16 @@ private fun composeFontFamily(option: EbookFontFamily): FontFamily {
     }
 }
 
+/** @return 与Compose正文选项对应的Android系统字体，用于后台真实行宽测量。 */
+private fun androidTypeface(option: EbookFontFamily): Typeface {
+    return when (option) {
+        EbookFontFamily.SERIF -> Typeface.SERIF
+        EbookFontFamily.SANS_SERIF -> Typeface.SANS_SERIF
+        EbookFontFamily.MONOSPACE -> Typeface.MONOSPACE
+        EbookFontFamily.CURSIVE -> Typeface.create("cursive", Typeface.NORMAL)
+    }
+}
+
 /** @return 字节大小转换后的易读文本。 */
 private fun formatEbookSize(bytes: Long): String {
     val safeBytes = bytes.coerceAtLeast(0L)
@@ -3634,10 +4072,19 @@ private const val MAX_SPINE_TITLE_CHARACTERS = 8
 private val SHELF_PROGRESS_AREA_HEIGHT = 24.dp
 private const val TEXT_PAGE_CHARACTER_LIMIT = 1_050
 private const val MIN_TEXT_PAGE_REMAINDER = 80
+private const val PAGE_LAYOUT_CHARACTER_WINDOW = 64_000
 private const val PROGRESS_SAVE_DEBOUNCE_MILLIS = 350L
 private const val MIN_READER_FONT_SCALE = 0.75f
 private const val MAX_READER_FONT_SCALE = 1.8f
 private const val READER_FONT_STEP = 0.1f
+private const val READER_BASE_FONT_SIZE_SP = 18f
+private const val READER_BASE_LINE_HEIGHT_SP = 30f
+private val READER_PAGE_HORIZONTAL_PADDING = 24.dp
+private val READER_TOP_BAR_HEIGHT = 56.dp
+private val READER_BOTTOM_BAR_HEIGHT = 96.dp
+private val READER_TOP_TEXT_INSET = READER_TOP_BAR_HEIGHT + 8.dp
+private val READER_BOTTOM_TEXT_INSET = READER_BOTTOM_BAR_HEIGHT + 8.dp
+private val READER_IMMERSIVE_TEXT_PADDING = 24.dp
 private const val EBOOK_TTS_SETTINGS_ACTION = "com.android.settings.TTS_SETTINGS"
 private const val MAX_CHAPTER_TITLE_LENGTH = 72
 private const val MAX_CHAPTER_SUBTITLE_LENGTH = 36

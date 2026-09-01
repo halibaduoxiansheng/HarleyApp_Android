@@ -578,6 +578,7 @@ class EbookRepository(context: Context) {
      *
      * @param bookId 目标书籍id。
      * @param currentPage 当前零基页码。
+     * @param currentTextOffset 文本书籍当前页在完整正文中的字符起点；PDF传入0。
      * @param pageCount 阅读器实际分页总数。
      * @param readingMode 当前翻页模式。
      * @param fontScale 当前文本字号倍率。
@@ -588,6 +589,7 @@ class EbookRepository(context: Context) {
     fun saveReadingProgress(
         bookId: String,
         currentPage: Int,
+        currentTextOffset: Int,
         pageCount: Int,
         readingMode: EbookReadingMode,
         fontScale: Float,
@@ -602,6 +604,7 @@ class EbookRepository(context: Context) {
                 if (book.id == bookId) {
                     book.copy(
                         currentPage = currentPage.coerceIn(0, safePageCount - 1),
+                        currentTextOffset = currentTextOffset.coerceAtLeast(0),
                         pageCount = safePageCount,
                         readingMode = readingMode,
                         fontScale = fontScale.coerceIn(MIN_FONT_SCALE, MAX_FONT_SCALE),
@@ -1174,6 +1177,7 @@ class EbookRepository(context: Context) {
             put("updatedAtMillis", book.updatedAtMillis)
             put("lastReadAtMillis", book.lastReadAtMillis)
             put("currentPage", book.currentPage)
+            put("currentTextOffset", book.currentTextOffset)
             put("pageCount", book.pageCount)
             put("readingMode", book.readingMode.name)
             put("fontScale", book.fontScale.toDouble())
@@ -1204,6 +1208,10 @@ class EbookRepository(context: Context) {
                 EbookFontFamily.valueOf(json.optString("fontFamily"))
             }.getOrDefault(EbookFontFamily.SERIF)
             val createdAtMillis = json.optLong("createdAtMillis")
+            val currentPage = json.optInt("currentPage").coerceAtLeast(0)
+            val legacyTextOffset = (currentPage.toLong() * LEGACY_READER_PAGE_CHARACTERS)
+                .coerceAtMost(Int.MAX_VALUE.toLong())
+                .toInt()
             EbookBook(
                 id = json.getString("id"),
                 title = json.optString("title").ifBlank { "未命名书籍" },
@@ -1216,7 +1224,9 @@ class EbookRepository(context: Context) {
                 createdAtMillis = createdAtMillis,
                 updatedAtMillis = json.optLong("updatedAtMillis"),
                 lastReadAtMillis = json.optLong("lastReadAtMillis"),
-                currentPage = json.optInt("currentPage").coerceAtLeast(0),
+                currentPage = currentPage,
+                currentTextOffset = json.optInt("currentTextOffset", legacyTextOffset)
+                    .coerceAtLeast(0),
                 pageCount = json.optInt("pageCount", 1).coerceAtLeast(1),
                 readingMode = readingMode,
                 fontScale = json.optDouble("fontScale", 1.0).toFloat()
@@ -1371,6 +1381,7 @@ class EbookRepository(context: Context) {
         const val MAX_COVER_DECODE_HEIGHT = 1_200
         const val MAX_SINGLE_CHAPTER_BYTES = 16L * 1024L * 1024L
         const val DEFAULT_PAGE_CHARACTERS = 1_300
+        const val LEGACY_READER_PAGE_CHARACTERS = 1_050L
         const val MAX_REPLACEMENT_DIVISOR = 100
         const val MAX_TITLE_LENGTH = 120
         const val MAX_AUTHOR_LENGTH = 80
