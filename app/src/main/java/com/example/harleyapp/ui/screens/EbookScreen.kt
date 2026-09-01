@@ -27,6 +27,7 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -111,6 +112,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.example.harleyapp.data.EbookRepository
 import com.example.harleyapp.data.EbookNoteRepository
+import com.example.harleyapp.data.EbookPaginationCacheSpec
 import com.example.harleyapp.model.EbookBook
 import com.example.harleyapp.model.EbookChapter
 import com.example.harleyapp.model.EbookFontFamily
@@ -119,6 +121,7 @@ import com.example.harleyapp.model.EbookImportProgress
 import com.example.harleyapp.model.EbookNote
 import com.example.harleyapp.model.EbookReadingBackground
 import com.example.harleyapp.model.EbookReadingMode
+import com.example.harleyapp.model.EbookShelfSkin
 import com.example.harleyapp.model.EbookTranslationDirection
 import com.example.harleyapp.model.EbookTranslationDisplayMode
 import com.example.harleyapp.system.EbookOfflineTranslator
@@ -354,9 +357,9 @@ fun EbookScreen(
                     if (saved) books = repository.getBooks()
                     saved
                 },
-                onReorderShelf = { orderedBookIds ->
-                    val saved = repository.reorderShelfBooks(orderedBookIds)
-                    statusMessage = if (saved) "书架顺序已保存" else "书架顺序保存失败"
+                onUpdateShelfSlots = { shelfSlots ->
+                    val saved = repository.updateShelfSlots(shelfSlots)
+                    statusMessage = if (saved) "书架位置已保存" else "书架位置保存失败"
                     if (saved) books = repository.getBooks()
                     saved
                 },
@@ -432,7 +435,7 @@ fun EbookScreen(
  * @param onImport 打开系统文件选择器回调。
  * @param onOpenBook 打开阅读器回调。
  * @param onSetOnShelf 把书籍加入或移出分页书架的回调。
- * @param onReorderShelf 保存书架拖动顺序的回调。
+ * @param onUpdateShelfSlots 保存书架绝对槽位的回调，槽位之间允许保留空白。
  * @param onUpdateMetadata 保存书名、作者和书脊颜色回调。
  * @param onChooseCover 为指定书籍打开系统图片选择器的回调。
  * @param onRemoveCover 删除指定书籍自定义封面的回调。
@@ -451,7 +454,7 @@ private fun EbookLibrary(
     onImport: () -> Unit,
     onOpenBook: (EbookBook) -> Unit,
     onSetOnShelf: (EbookBook, Boolean) -> Boolean,
-    onReorderShelf: (List<String>) -> Boolean,
+    onUpdateShelfSlots: (Map<String, Int>) -> Boolean,
     onUpdateMetadata: (String, String, String, Int) -> Boolean,
     onChooseCover: (EbookBook) -> Unit,
     onRemoveCover: (EbookBook) -> Boolean,
@@ -459,11 +462,14 @@ private fun EbookLibrary(
 ) {
     var query by rememberSaveable { mutableStateOf("") }
     var selectedTabName by rememberSaveable { mutableStateOf(EbookLibraryTab.SHELF.name) }
+    var shelfSkinName by rememberSaveable { mutableStateOf(repository.getShelfSkin().name) }
     var editingBook by remember { mutableStateOf<EbookBook?>(null) }
     var deletingBook by remember { mutableStateOf<EbookBook?>(null) }
     val selectedTab = EbookLibraryTab.entries.firstOrNull { tab ->
         tab.name == selectedTabName
     } ?: EbookLibraryTab.SHELF
+    val shelfSkin = EbookShelfSkin.entries.firstOrNull { skin -> skin.name == shelfSkinName }
+        ?: EbookShelfSkin.WALNUT
     val normalizedQuery = query.trim().lowercase(Locale.CHINA)
     val visibleBooks = remember(books, normalizedQuery) {
         if (normalizedQuery.isBlank()) {
@@ -479,7 +485,7 @@ private fun EbookLibrary(
         }
     }
     val shelfBooks = remember(books) {
-        books.filter(EbookBook::isOnShelf).sortedBy(EbookBook::shelfOrder)
+        books.filter(EbookBook::isOnShelf).sortedBy(EbookBook::shelfSlot)
     }
 
     // 封面或其他信息保存后，保持编辑弹窗指向目录中的最新模型，立即刷新预览和按钮状态。
@@ -571,8 +577,14 @@ private fun EbookLibrary(
             item {
                 EbookShelfPager(
                     books = shelfBooks,
+                    shelfSkin = shelfSkin,
                     onOpenBook = onOpenBook,
-                    onReorderBooks = onReorderShelf,
+                    onUpdateBookSlots = onUpdateShelfSlots,
+                    onShelfSkinChanged = { skin ->
+                        repository.saveShelfSkin(skin).also { saved ->
+                            if (saved) shelfSkinName = skin.name
+                        }
+                    },
                     onManageShelf = { selectedTabName = EbookLibraryTab.ALL.name }
                 )
             }
@@ -665,29 +677,179 @@ private fun EbookLibrary(
     }
 }
 
+/** 保存一套书架皮肤在Compose中实际使用的完整颜色。 */
+private data class EbookShelfPalette(
+    val frame: Color,
+    val backTop: Color,
+    val backMiddle: Color,
+    val backBottom: Color,
+    val shelfTop: Color,
+    val shelfMiddle: Color,
+    val shelfBottom: Color,
+    val title: Color,
+    val grainAlpha: Float
+)
+
 /**
- * 把用户选择的书按每页三十本展示为可横向切换、可长按排序的多层书架。
+ * 把书架皮肤枚举映射为完整木板调色板。
+ *
+ * @param skin 用户当前选择的书架皮肤。
+ * @return 同时覆盖边框、背板、层板、标题和木纹强度的颜色集合。
+ */
+private fun ebookShelfPalette(skin: EbookShelfSkin): EbookShelfPalette {
+    return when (skin) {
+        EbookShelfSkin.WALNUT -> EbookShelfPalette(
+            Color(0xFF4A291C), Color(0xFF7A4B2E), Color(0xFF3C241A), Color(0xFF62402A),
+            Color(0xFFA87548), Color(0xFF5B331F), Color(0xFF2B160F), Color(0xFFFFE2B8), 0.055f
+        )
+        EbookShelfSkin.NATURAL_OAK -> EbookShelfPalette(
+            Color(0xFF8A633C), Color(0xFFD7B780), Color(0xFFA57A48), Color(0xFFC79B62),
+            Color(0xFFE4C394), Color(0xFF9A6F3F), Color(0xFF684527), Color(0xFF3F2B18), 0.09f
+        )
+        EbookShelfSkin.CHERRY -> EbookShelfPalette(
+            Color(0xFF54251F), Color(0xFF9A4B3D), Color(0xFF56261F), Color(0xFF7C382E),
+            Color(0xFFC16A57), Color(0xFF71352A), Color(0xFF361512), Color(0xFFFFD7C5), 0.06f
+        )
+        EbookShelfSkin.EBONY -> EbookShelfPalette(
+            Color(0xFF171717), Color(0xFF3A3A3A), Color(0xFF111111), Color(0xFF292929),
+            Color(0xFF5A5A5A), Color(0xFF252525), Color(0xFF080808), Color(0xFFF2D7A0), 0.07f
+        )
+        EbookShelfSkin.SPRUCE_WHITE -> EbookShelfPalette(
+            Color(0xFFB8B1A5), Color(0xFFF2EEE5), Color(0xFFD5CEC1), Color(0xFFE7E0D4),
+            Color(0xFFFFFFFF), Color(0xFFC7BFB2), Color(0xFF928A80), Color(0xFF4A4640), 0.12f
+        )
+        EbookShelfSkin.DEEP_OCEAN -> EbookShelfPalette(
+            Color(0xFF102A43), Color(0xFF285B78), Color(0xFF102C40), Color(0xFF1D4963),
+            Color(0xFF4F87A3), Color(0xFF173E55), Color(0xFF091E2B), Color(0xFFD6F2FF), 0.06f
+        )
+        EbookShelfSkin.STARRY_PURPLE -> EbookShelfPalette(
+            Color(0xFF2C1D44), Color(0xFF665080), Color(0xFF281C3B), Color(0xFF49345F),
+            Color(0xFF8D72A8), Color(0xFF442F5B), Color(0xFF1C122A), Color(0xFFF0DCFF), 0.08f
+        )
+        EbookShelfSkin.JADE_GREEN -> EbookShelfPalette(
+            Color(0xFF173B32), Color(0xFF3E7462), Color(0xFF173C32), Color(0xFF285747),
+            Color(0xFF70A18C), Color(0xFF285243), Color(0xFF0D2922), Color(0xFFD9F4E8), 0.06f
+        )
+    }
+}
+
+/**
+ * 显示全部书架皮肤的可视化选择弹窗。
  *
  * 使用方法：
- * 由[EbookLibrary]的“我的书架”分栏调用；用户右滑即可进入下一架，点击封面直接继续阅读。
+ * 用户点击书架底部“书架皮肤”时显示。每个选项使用自己的背板与层板色预览；点击后由[onSelect]
+ * 持久化，保存成功时父级关闭弹窗。
  *
- * @param books 已按用户加入顺序排列的书籍。
+ * @param selectedSkin 当前已经生效的皮肤。
+ * @param onSelect 用户选择一个皮肤后的保存回调。
+ * @param onDismiss 关闭弹窗回调。
+ * @return 无返回值，直接显示Material对话框。
+ */
+@Composable
+private fun EbookShelfSkinDialog(
+    selectedSkin: EbookShelfSkin,
+    onSelect: (EbookShelfSkin) -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("选择书架皮肤") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(390.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                EbookShelfSkin.entries.chunked(2).forEach { rowSkins ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        rowSkins.forEach { skin ->
+                            val palette = ebookShelfPalette(skin)
+                            Surface(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(82.dp)
+                                    .clickable { onSelect(skin) }
+                                    .border(
+                                        width = if (skin == selectedSkin) 2.dp else 1.dp,
+                                        color = if (skin == selectedSkin) {
+                                            MaterialTheme.colorScheme.primary
+                                        } else {
+                                            MaterialTheme.colorScheme.outlineVariant
+                                        },
+                                        shape = RoundedCornerShape(12.dp)
+                                    ),
+                                color = palette.backMiddle,
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Column {
+                                    Text(
+                                        modifier = Modifier.padding(start = 10.dp, top = 10.dp),
+                                        text = if (skin == selectedSkin) "✓ ${skin.displayName}" else skin.displayName,
+                                        color = palette.title,
+                                        fontWeight = FontWeight.Bold,
+                                        style = MaterialTheme.typography.labelLarge
+                                    )
+                                    Spacer(modifier = Modifier.weight(1f))
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(15.dp)
+                                            .background(
+                                                Brush.verticalGradient(
+                                                    listOf(
+                                                        palette.shelfTop,
+                                                        palette.shelfMiddle,
+                                                        palette.shelfBottom
+                                                    )
+                                                )
+                                            )
+                                    )
+                                }
+                            }
+                        }
+                        if (rowSkins.size == 1) Spacer(modifier = Modifier.weight(1f))
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("完成") } }
+    )
+}
+
+/**
+ * 把用户选择的书按每页三十个可空槽位展示为可横向切换、可自由放置的多层书架。
+ *
+ * 使用方法：
+ * 由[EbookLibrary]的“我的书架”分栏调用；用户右滑进入下一架，长按书脊可放到任意空槽，点击
+ * “书架皮肤”切换整体外观。
+ *
+ * @param books 已包含唯一绝对槽位的在架书籍。
+ * @param shelfSkin 当前持久化书架皮肤。
  * @param onOpenBook 点击封面后的阅读回调。
- * @param onReorderBooks 一次长按拖动结束后保存全部书架顺序的回调。
+ * @param onUpdateBookSlots 一次长按拖动结束后保存全部书架槽位的回调。
+ * @param onShelfSkinChanged 保存用户新书架皮肤的回调。
  * @param onManageShelf 跳转“全部书籍”管理加入与移出状态的回调。
  * @return 无返回值。
  */
 @Composable
 private fun EbookShelfPager(
     books: List<EbookBook>,
+    shelfSkin: EbookShelfSkin,
     onOpenBook: (EbookBook) -> Unit,
-    onReorderBooks: (List<String>) -> Boolean,
+    onUpdateBookSlots: (Map<String, Int>) -> Boolean,
+    onShelfSkinChanged: (EbookShelfSkin) -> Boolean,
     onManageShelf: () -> Unit
 ) {
-    var orderedBooks by remember(books) { mutableStateOf(books) }
+    var positionedBooks by remember(books) { mutableStateOf(books.sortedBy(EbookBook::shelfSlot)) }
     var draggingBookId by remember { mutableStateOf<String?>(null) }
-    var dragTargetIndex by remember { mutableStateOf<Int?>(null) }
-    val shelfPages = remember(orderedBooks) { buildEbookShelfPages(orderedBooks) }
+    var dragTargetSlot by remember { mutableStateOf<Int?>(null) }
+    var showShelfSkinDialog by rememberSaveable { mutableStateOf(false) }
+    val shelfPages = remember(positionedBooks) { buildEbookShelfPages(positionedBooks) }
     if (shelfPages.isEmpty()) {
         Card(
             modifier = Modifier.fillMaxWidth(),
@@ -712,6 +874,12 @@ private fun EbookShelfPager(
     }
 
     val pagerState = rememberPagerState(pageCount = { shelfPages.size })
+    val shelfCoroutineScope = rememberCoroutineScope()
+    LaunchedEffect(shelfPages.size) {
+        if (pagerState.currentPage > shelfPages.lastIndex) {
+            pagerState.scrollToPage(shelfPages.lastIndex.coerceAtLeast(0))
+        }
+    }
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         HorizontalPager(
             modifier = Modifier
@@ -719,7 +887,7 @@ private fun EbookShelfPager(
                 .height(500.dp),
             state = pagerState,
             userScrollEnabled = draggingBookId == null,
-            beyondViewportPageCount = 1
+            beyondViewportPageCount = if (draggingBookId == null) 1 else shelfPages.lastIndex
         ) { pageIndex ->
             val pageOffset = (
                 (pagerState.currentPage - pageIndex) + pagerState.currentPageOffsetFraction
@@ -733,35 +901,48 @@ private fun EbookShelfPager(
                 },
                 books = shelfPages[pageIndex],
                 shelfNumber = pageIndex + 1,
+                shelfSkin = shelfSkin,
                 draggingBookId = draggingBookId,
+                dragTargetSlot = dragTargetSlot,
                 onOpenBook = onOpenBook,
                 onDragStarted = { bookId ->
                     draggingBookId = bookId
-                    dragTargetIndex = orderedBooks.indexOfFirst { book -> book.id == bookId }
-                        .takeIf { index -> index >= 0 }
+                    dragTargetSlot = positionedBooks.firstOrNull { book -> book.id == bookId }
+                        ?.shelfSlot
                 },
                 onMoveBookBy = { bookId, delta ->
                     if (draggingBookId == bookId) {
-                        val currentTarget = dragTargetIndex
-                            ?: orderedBooks.indexOfFirst { book -> book.id == bookId }
-                        dragTargetIndex = (currentTarget + delta).coerceIn(0, orderedBooks.lastIndex)
+                        val currentTarget = dragTargetSlot
+                            ?: positionedBooks.firstOrNull { book -> book.id == bookId }?.shelfSlot
+                            ?: 0
+                        val targetSlot = (currentTarget + delta)
+                            .coerceIn(0, shelfPages.size * BOOKS_PER_SHELF_PAGE - 1)
+                        dragTargetSlot = targetSlot
+                        val targetPage = targetSlot / BOOKS_PER_SHELF_PAGE
+                        if (targetPage != pagerState.currentPage) {
+                            shelfCoroutineScope.launch { pagerState.animateScrollToPage(targetPage) }
+                        }
                     }
                 },
                 onDragFinished = {
                     val movedBookId = draggingBookId
-                    val fromIndex = orderedBooks.indexOfFirst { book -> book.id == movedBookId }
-                    val targetIndex = dragTargetIndex
-                    if (fromIndex >= 0 && targetIndex != null && targetIndex != fromIndex) {
-                        orderedBooks = moveEbookShelfBook(
-                            books = orderedBooks,
+                    val sourceSlot = positionedBooks.firstOrNull { book ->
+                        book.id == movedBookId
+                    }?.shelfSlot
+                    val targetSlot = dragTargetSlot
+                    if (sourceSlot != null && targetSlot != null && targetSlot != sourceSlot) {
+                        positionedBooks = moveEbookShelfBookToSlot(
+                            books = positionedBooks,
                             bookId = movedBookId.orEmpty(),
-                            targetIndex = targetIndex
+                            targetSlot = targetSlot
                         )
                     }
                     draggingBookId = null
-                    dragTargetIndex = null
-                    if (!onReorderBooks(orderedBooks.map(EbookBook::id))) {
-                        orderedBooks = books
+                    dragTargetSlot = null
+                    if (!onUpdateBookSlots(positionedBooks.associate { book ->
+                            book.id to book.shelfSlot
+                        })) {
+                        positionedBooks = books.sortedBy(EbookBook::shelfSlot)
                     }
                 }
             )
@@ -790,35 +971,69 @@ private fun EbookShelfPager(
                 modifier = Modifier.weight(1f),
                 text = when {
                     draggingBookId != null -> {
-                        "正在移动到第${(dragTargetIndex ?: 0) + 1}位 · 松手保存"
+                        val target = dragTargetSlot ?: 0
+                        "正在移动到第${target / BOOKS_PER_SHELF_PAGE + 1}架" +
+                            "第${target % BOOKS_PER_SHELF_PAGE + 1}位 · 松手保存"
                     }
-                    shelfPages.size > 1 -> "左右滑动切换书架 · 长按书脊拖动排序"
-                    else -> "长按书脊拖动排序 · 当前书架还可继续放书"
+                    shelfPages.size > 1 -> "左右滑动切换书架 · 长按可放到任意空位"
+                    else -> "长按书脊可放到当前书架任意空位"
                 },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            TextButton(onClick = { showShelfSkinDialog = true }) { Text("书架皮肤") }
             TextButton(onClick = onManageShelf) { Text("管理书架") }
         }
     }
+
+    if (showShelfSkinDialog) {
+        EbookShelfSkinDialog(
+            selectedSkin = shelfSkin,
+            onSelect = { skin ->
+                if (onShelfSkinChanged(skin)) showShelfSkinDialog = false
+            },
+            onDismiss = { showShelfSkinDialog = false }
+        )
+    }
 }
 
-/** @return 具有三层木质背板和密集竖排书脊的一页真实书架。 */
+/**
+ * 显示具有三层背板、固定空槽和密集竖排书脊的一页真实书架。
+ *
+ * 使用方法：
+ * [EbookShelfPager]为每一页传入固定三十个可空槽位。本函数根据[shelfSkin]绘制背板与层板，并把
+ * 当前拖动目标传给书脊或空槽显示落点反馈。
+ *
+ * @param books 当前页固定三十个可空槽位。
+ * @param shelfNumber 当前一基书架编号。
+ * @param shelfSkin 当前书架皮肤。
+ * @param draggingBookId 正在拖动的书籍id；没有拖动时为null。
+ * @param dragTargetSlot 当前目标绝对槽位；没有拖动时为null。
+ * @param onOpenBook 点击书脊打开阅读器的回调。
+ * @param onDragStarted 长按开始回调。
+ * @param onMoveBookBy 横向或纵向跨槽移动回调。
+ * @param onDragFinished 松手或取消后的保存回调。
+ * @param modifier 外部页面变换修饰器。
+ * @return 无返回值，直接绘制当前书架页。
+ */
 @Composable
 private fun EbookShelfPage(
-    books: List<EbookBook>,
+    books: List<EbookBook?>,
     shelfNumber: Int,
+    shelfSkin: EbookShelfSkin,
     draggingBookId: String?,
+    dragTargetSlot: Int?,
     onOpenBook: (EbookBook) -> Unit,
     onDragStarted: (String) -> Unit,
     onMoveBookBy: (String, Int) -> Unit,
     onDragFinished: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val shelfPalette = ebookShelfPalette(shelfSkin)
     Card(
         modifier = modifier.fillMaxSize(),
         shape = RoundedCornerShape(18.dp),
-        colors = CardDefaults.cardColors(containerColor = Color(0xFF4A291C)),
+        colors = CardDefaults.cardColors(containerColor = shelfPalette.frame),
         elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
     ) {
         Box(
@@ -826,7 +1041,7 @@ private fun EbookShelfPage(
                 .fillMaxSize()
                 .background(
                     Brush.verticalGradient(
-                        listOf(Color(0xFF7A4B2E), Color(0xFF3C241A), Color(0xFF62402A))
+                        listOf(shelfPalette.backTop, shelfPalette.backMiddle, shelfPalette.backBottom)
                     )
                 )
         ) {
@@ -836,7 +1051,11 @@ private fun EbookShelfPage(
                     val y = size.height * index / 18f
                     drawLine(
                         color = Color.White.copy(
-                            alpha = if (index % 3 == 0) 0.055f else 0.025f
+                            alpha = if (index % 3 == 0) {
+                                shelfPalette.grainAlpha
+                            } else {
+                                shelfPalette.grainAlpha * 0.45f
+                            }
                         ),
                         start = Offset(0f, y),
                         end = Offset(size.width, y + (index % 2) * 3f),
@@ -853,7 +1072,7 @@ private fun EbookShelfPage(
                 Text(
                     text = "HALIBADUO · 第${shelfNumber}书架",
                     style = MaterialTheme.typography.labelLarge,
-                    color = Color(0xFFFFE2B8),
+                    color = shelfPalette.title,
                     fontWeight = FontWeight.Bold
                 )
                 repeat(SHELF_ROWS_PER_PAGE) { rowIndex ->
@@ -870,21 +1089,25 @@ private fun EbookShelfPage(
                             verticalAlignment = Alignment.Bottom
                         ) {
                             repeat(BOOKS_PER_SHELF_ROW) { columnIndex ->
-                                val book = books.getOrNull(
-                                    rowIndex * BOOKS_PER_SHELF_ROW + columnIndex
-                                )
+                                val localSlot = rowIndex * BOOKS_PER_SHELF_ROW + columnIndex
+                                val absoluteSlot = (shelfNumber - 1) * BOOKS_PER_SHELF_PAGE + localSlot
+                                val book = books.getOrNull(localSlot)
                                 if (book != null) {
                                     EbookShelfBook(
                                         modifier = Modifier.width(spineWidth),
                                         book = book,
                                         isDragging = draggingBookId == book.id,
+                                        isDropTarget = dragTargetSlot == absoluteSlot,
                                         onOpen = { onOpenBook(book) },
                                         onDragStarted = { onDragStarted(book.id) },
                                         onMoveBy = { delta -> onMoveBookBy(book.id, delta) },
                                         onDragFinished = onDragFinished
                                     )
                                 } else {
-                                    Spacer(modifier = Modifier.width(spineWidth))
+                                    EbookEmptyShelfSlot(
+                                        modifier = Modifier.width(spineWidth),
+                                        isDropTarget = dragTargetSlot == absoluteSlot
+                                    )
                                 }
                             }
                         }
@@ -896,15 +1119,63 @@ private fun EbookShelfPage(
                             .background(
                                 Brush.verticalGradient(
                                     listOf(
-                                        Color(0xFFA87548),
-                                        Color(0xFF5B331F),
-                                        Color(0xFF2B160F)
+                                        shelfPalette.shelfTop,
+                                        shelfPalette.shelfMiddle,
+                                        shelfPalette.shelfBottom
                                     )
                                 ),
                                 RoundedCornerShape(3.dp)
                             )
                     )
                 }
+            }
+        }
+    }
+}
+
+/**
+ * 显示一个可接收书籍的空书架槽位。
+ *
+ * 使用方法：
+ * [EbookShelfPage]遍历固定三十个槽位时，对没有书的槽位调用。拖动目标经过此处时显示金色
+ * “放这里”占位，普通状态保持透明，不破坏真实书架的简洁外观。
+ *
+ * @param isDropTarget 当前拖动目标是否指向本空槽。
+ * @param modifier 父级传入的固定书脊宽度。
+ * @return 无返回值，直接绘制空槽反馈。
+ */
+@Composable
+private fun EbookEmptyShelfSlot(
+    isDropTarget: Boolean,
+    modifier: Modifier = Modifier
+) {
+    Box(
+        modifier = modifier.fillMaxHeight(),
+        contentAlignment = Alignment.BottomCenter
+    ) {
+        if (isDropTarget) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .fillMaxHeight(0.82f)
+                    .background(
+                        color = Color(0x55FFD88A),
+                        shape = RoundedCornerShape(topStart = 4.dp, topEnd = 4.dp)
+                    )
+                    .border(
+                        width = 1.5.dp,
+                        color = Color(0xFFFFD88A),
+                        shape = RoundedCornerShape(topStart = 4.dp, topEnd = 4.dp)
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "放\n这\n里",
+                    color = Color(0xFFFFE9BF),
+                    fontSize = 9.sp,
+                    lineHeight = 10.sp,
+                    fontWeight = FontWeight.Bold
+                )
             }
         }
     }
@@ -919,6 +1190,7 @@ private fun EbookShelfPage(
  *
  * @param book 当前书籍及其阅读进度。
  * @param isDragging 当前书脊是否正在被用户拖动。
+ * @param isDropTarget 当前拖动目标是否指向本书所在槽位。
  * @param onOpen 短按打开书籍的回调。
  * @param onDragStarted 长按开始拖动的回调。
  * @param onMoveBy 相对移动位置回调；正数向后，负数向前。
@@ -930,6 +1202,7 @@ private fun EbookShelfPage(
 private fun EbookShelfBook(
     book: EbookBook,
     isDragging: Boolean,
+    isDropTarget: Boolean,
     onOpen: () -> Unit,
     onDragStarted: () -> Unit,
     onMoveBy: (Int) -> Unit,
@@ -971,6 +1244,11 @@ private fun EbookShelfBook(
                 shadowElevation = if (isDragging) 18f else 0f
             }
             .clickable(onClick = onOpen)
+            .border(
+                width = if (isDropTarget) 2.dp else 0.dp,
+                color = if (isDropTarget) Color(0xFFFFD88A) else Color.Transparent,
+                shape = RoundedCornerShape(topStart = 3.dp, topEnd = 5.dp)
+            )
             .pointerInput(book.id) {
                 detectDragGesturesAfterLongPress(
                     onDragStart = {
@@ -1078,33 +1356,54 @@ private fun EbookShelfBook(
 /**
  * 按书架容量生成稳定分页。
  *
- * @param books 已按书架顺序排序的书籍。
- * @return 每页最多三十本的列表；空书架返回空列表。
+ * @param books 已具备唯一绝对槽位的在架书籍。
+ * @return 每页固定三十个可空槽位；空书架返回空列表，末尾完全空白的书架不会保留。
  */
-internal fun buildEbookShelfPages(books: List<EbookBook>): List<List<EbookBook>> {
-    return books.chunked(BOOKS_PER_SHELF_PAGE)
+internal fun buildEbookShelfPages(books: List<EbookBook>): List<List<EbookBook?>> {
+    if (books.isEmpty()) return emptyList()
+    val positionedBooks = books.filter { book -> book.shelfSlot >= 0 }
+    if (positionedBooks.isEmpty()) return emptyList()
+    val pageCount = positionedBooks.maxOf(EbookBook::shelfSlot) / BOOKS_PER_SHELF_PAGE + 1
+    val slots = MutableList<EbookBook?>(pageCount * BOOKS_PER_SHELF_PAGE) { null }
+    positionedBooks.sortedBy(EbookBook::shelfSlot).forEach { book ->
+        if (book.shelfSlot in slots.indices && slots[book.shelfSlot] == null) {
+            slots[book.shelfSlot] = book
+        }
+    }
+    return slots.chunked(BOOKS_PER_SHELF_PAGE)
 }
 
 /**
- * 把指定书籍移动到目标书架位置，供拖动手势和单元测试共同使用。
+ * 把指定书籍放到目标绝对槽位，供拖动手势和单元测试共同使用。
  *
- * @param books 当前完整书架顺序。
+ * 使用方法：
+ * 长按拖动结束时传入当前全部在架书籍。目标为空时只移动当前书，原槽位保留为空；目标已有书时
+ * 两本书交换槽位，其他空位和书籍完全不动。
+ *
+ * @param books 当前全部在架书籍及其绝对槽位。
  * @param bookId 需要移动的书籍id。
- * @param targetIndex 目标零基位置，超出范围时自动限制。
- * @return 新顺序；找不到书籍或无需移动时返回原列表。
+ * @param targetSlot 目标绝对零基槽位，负数时限制到0。
+ * @return 按槽位排序的新列表；找不到书籍或无需移动时返回原列表。
  */
-internal fun moveEbookShelfBook(
+internal fun moveEbookShelfBookToSlot(
     books: List<EbookBook>,
     bookId: String,
-    targetIndex: Int
+    targetSlot: Int
 ): List<EbookBook> {
-    val fromIndex = books.indexOfFirst { book -> book.id == bookId }
-    if (fromIndex < 0 || books.isEmpty()) return books
-    val safeTarget = targetIndex.coerceIn(0, books.lastIndex)
-    if (safeTarget == fromIndex) return books
-    return books.toMutableList().apply {
-        add(safeTarget, removeAt(fromIndex))
-    }
+    val movingBook = books.firstOrNull { book -> book.id == bookId } ?: return books
+    val sourceSlot = movingBook.shelfSlot
+    val safeTarget = targetSlot.coerceAtLeast(0)
+    if (sourceSlot < 0 || safeTarget == sourceSlot) return books.sortedBy(EbookBook::shelfSlot)
+    val occupiedBookId = books.firstOrNull { book ->
+        book.shelfSlot == safeTarget && book.id != bookId
+    }?.id
+    return books.map { book ->
+        when (book.id) {
+            bookId -> book.copy(shelfSlot = safeTarget, shelfOrder = safeTarget.toLong())
+            occupiedBookId -> book.copy(shelfSlot = sourceSlot, shelfOrder = sourceSlot.toLong())
+            else -> book
+        }
+    }.sortedBy(EbookBook::shelfSlot)
 }
 
 /**
@@ -1750,7 +2049,29 @@ private fun EbookReader(
         paginationReady = false
         val fontSizePx = with(density) { (READER_BASE_FONT_SIZE_SP * fontScale).sp.toPx() }
         val lineHeightPx = with(density) { (READER_BASE_LINE_HEIGHT_SP * fontScale).sp.toPx() }
-        measuredTextPages = withContext(Dispatchers.Default) {
+        val cacheSpec = EbookPaginationCacheSpec(
+            bookId = book.id,
+            textLength = extractedText.length,
+            contentWidthPx = pageContentWidthPx,
+            contentHeightPx = pageContentHeightPx,
+            fontSizePx = fontSizePx,
+            lineHeightPx = lineHeightPx,
+            fontFamily = fontFamily
+        )
+        val cachedBoundaries = repository.loadPaginationBoundaries(cacheSpec)
+        if (cachedBoundaries != null) {
+            val cachedPages = withContext(Dispatchers.Default) {
+                restoreMeasuredEbookPagesFromBoundaries(extractedText, cachedBoundaries)
+            }
+            if (cachedPages.isNotEmpty()) {
+                measuredTextPages = cachedPages
+                paginationProgress = 1f
+                paginationReady = true
+                return@LaunchedEffect
+            }
+        }
+
+        val calculatedPages = withContext(Dispatchers.Default) {
             paginateEbookTextToViewport(
                 text = extractedText,
                 contentWidthPx = pageContentWidthPx,
@@ -1761,8 +2082,13 @@ private fun EbookReader(
                 onProgress = { progress -> paginationProgress = progress }
             )
         }
+        measuredTextPages = calculatedPages
         paginationProgress = 1f
         paginationReady = true
+        repository.savePaginationBoundaries(
+            spec = cacheSpec,
+            boundaries = measuredEbookPagesToBoundaries(calculatedPages)
+        )
     }
 
     val textPages = remember(measuredTextPages) {
@@ -3630,6 +3956,73 @@ internal fun normalizeEbookNoteSelection(
     val safeStart = minOf(selectionStart, selectionEnd).coerceIn(0, text.length)
     val safeEnd = maxOf(selectionStart, selectionEnd).coerceIn(safeStart, text.length)
     return text.substring(safeStart, safeEnd).trim().take(MAX_NOTE_SELECTION_LENGTH)
+}
+
+/**
+ * 把动态分页结果压缩成交替保存每页起点和终点的整数数组。
+ *
+ * 使用方法：
+ * 完成真实屏幕分页后调用，返回值可直接交给[EbookRepository.savePaginationBoundaries]持久化。
+ *
+ * @param pages 当前已经按顺序生成的全部文本页。
+ * @return 长度为页数两倍的start、end数组；空分页返回空数组。
+ */
+internal fun measuredEbookPagesToBoundaries(
+    pages: List<EbookMeasuredTextPage>
+): IntArray {
+    return IntArray(pages.size * 2).also { boundaries ->
+        pages.forEachIndexed { index, page ->
+            boundaries[index * 2] = page.startOffset
+            boundaries[index * 2 + 1] = page.endOffset
+        }
+    }
+}
+
+/**
+ * 使用已经校验的分页边界快速恢复可显示文本页，不再调用Android文字排版器。
+ *
+ * 使用方法：
+ * [EbookRepository.loadPaginationBoundaries]命中后，在后台线程传入完整正文和缓存数组。缓存边界若因
+ * 意外情况越界会返回空列表，调用者随后可以退回完整重新分页。
+ *
+ * @param text 当前完整离线正文。
+ * @param boundaries 交替保存每页start、end的缓存数组。
+ * @return 恢复出的全部文本页；边界非法时返回空列表。
+ */
+internal fun restoreMeasuredEbookPagesFromBoundaries(
+    text: String,
+    boundaries: IntArray
+): List<EbookMeasuredTextPage> {
+    if (!validateMeasuredEbookPageBoundaries(boundaries, text.length)) return emptyList()
+    return buildList(boundaries.size / 2) {
+        boundaries.indices.step(2).forEach { index ->
+            val start = boundaries[index]
+            val end = boundaries[index + 1]
+            add(
+                EbookMeasuredTextPage(
+                    text = text.substring(start, end).trim(),
+                    startOffset = start,
+                    endOffset = end
+                )
+            )
+        }
+    }
+}
+
+/** @return 分页缓存边界连续覆盖全文时返回true。 */
+private fun validateMeasuredEbookPageBoundaries(
+    boundaries: IntArray,
+    textLength: Int
+): Boolean {
+    if (textLength <= 0 || boundaries.isEmpty() || boundaries.size % 2 != 0) return false
+    var expectedStart = 0
+    boundaries.indices.step(2).forEach { index ->
+        val start = boundaries[index]
+        val end = boundaries[index + 1]
+        if (start != expectedStart || end <= start || end > textLength) return false
+        expectedStart = end
+    }
+    return expectedStart == textLength
 }
 
 /**

@@ -2,9 +2,12 @@ package com.example.harleyapp
 
 import com.example.harleyapp.data.APP_LOCK_RECOVERY_WAIT_MILLIS
 import com.example.harleyapp.data.AppLockState
+import com.example.harleyapp.data.normalizeEbookShelfSlots
+import com.example.harleyapp.data.validateEbookPaginationBoundaries
 import com.example.harleyapp.model.AppVisualTheme
 import com.example.harleyapp.model.EbookBook
 import com.example.harleyapp.model.EbookFormat
+import com.example.harleyapp.model.EbookShelfSkin
 import com.example.harleyapp.system.detectEbookLanguageCode
 import com.example.harleyapp.system.splitEbookTranslationText
 import com.example.harleyapp.ui.screens.EbookMeasuredTextPage
@@ -13,10 +16,12 @@ import com.example.harleyapp.ui.screens.buildEbookTableOfContents
 import com.example.harleyapp.ui.screens.createOpaqueArgb
 import com.example.harleyapp.ui.screens.findEbookPageIndexForExcerpt
 import com.example.harleyapp.ui.screens.findEbookPageIndexForOffset
-import com.example.harleyapp.ui.screens.moveEbookShelfBook
+import com.example.harleyapp.ui.screens.measuredEbookPagesToBoundaries
+import com.example.harleyapp.ui.screens.moveEbookShelfBookToSlot
 import com.example.harleyapp.ui.screens.normalizeEbookNoteSelection
 import com.example.harleyapp.ui.screens.paginateEbookText
 import com.example.harleyapp.ui.screens.resolveEbookReaderPageCount
+import com.example.harleyapp.ui.screens.restoreMeasuredEbookPagesFromBoundaries
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -95,6 +100,49 @@ class EbookModelsTest {
                 loadedTextPageCount = 1
             )
         )
+    }
+
+    /**
+     * 验证分页边界缓存可以完整压缩并恢复页面，同时拒绝断裂或未覆盖全文的损坏数组。
+     *
+     * @return 无返回值；缓存往返丢字或损坏边界被接受时由JUnit报告失败。
+     */
+    @Test
+    fun ebookPaginationBoundariesRoundTripAndRejectCorruption() {
+        val text = "第一页正文。第二页正文更长。第三页结束。"
+        val pages = listOf(
+            EbookMeasuredTextPage(text.substring(0, 6), 0, 6),
+            EbookMeasuredTextPage(text.substring(6, 14), 6, 14),
+            EbookMeasuredTextPage(text.substring(14), 14, text.length)
+        )
+        val boundaries = measuredEbookPagesToBoundaries(pages)
+        val restored = restoreMeasuredEbookPagesFromBoundaries(text, boundaries)
+
+        assertTrue(validateEbookPaginationBoundaries(boundaries, text.length))
+        assertEquals(pages, restored)
+        assertTrue(!validateEbookPaginationBoundaries(intArrayOf(0, 6, 7, text.length), text.length))
+        assertTrue(!validateEbookPaginationBoundaries(intArrayOf(0, 6), text.length))
+    }
+
+    /**
+     * 验证没有槽位字段的旧书按原shelfOrder迁移，并保留已有合法空槽。
+     *
+     * @return 无返回值；旧顺序丢失、合法槽位被挤紧或下架书取得槽位时由JUnit报告失败。
+     */
+    @Test
+    fun legacyShelfOrderMigratesWithoutCompactingValidSlots() {
+        val legacyLater = createTestBook(1).copy(shelfSlot = -1, shelfOrder = 200L)
+        val legacyEarlier = createTestBook(2).copy(shelfSlot = -1, shelfOrder = 100L)
+        val positioned = createTestBook(3).copy(shelfSlot = 8, shelfOrder = 8L)
+        val removed = createTestBook(4).copy(isOnShelf = false, shelfSlot = 5)
+        val normalized = normalizeEbookShelfSlots(
+            listOf(legacyLater, legacyEarlier, positioned, removed)
+        )
+
+        assertEquals(1, normalized.first { it.id == legacyLater.id }.shelfSlot)
+        assertEquals(0, normalized.first { it.id == legacyEarlier.id }.shelfSlot)
+        assertEquals(8, normalized.first { it.id == positioned.id }.shelfSlot)
+        assertEquals(-1, normalized.first { it.id == removed.id }.shelfSlot)
     }
 
     /**
@@ -216,9 +264,10 @@ class EbookModelsTest {
         val books = (1..61).map(::createTestBook)
         val pages = buildEbookShelfPages(books)
 
-        assertEquals(listOf(30, 30, 1), pages.map { page -> page.size })
-        assertEquals("book_1", pages.first().first().id)
-        assertEquals("book_61", pages.last().last().id)
+        assertEquals(listOf(30, 30, 30), pages.map { page -> page.size })
+        assertEquals(listOf(30, 30, 1), pages.map { page -> page.count { it != null } })
+        assertEquals("book_1", pages.first().first()?.id)
+        assertEquals("book_61", pages.last().first()?.id)
     }
 
     /**
@@ -279,19 +328,35 @@ class EbookModelsTest {
     }
 
     /**
-     * 验证长按拖动可跨越单页三十本边界，并保持除目标书以外的相对顺序。
+     * 验证拖到空槽后书籍停在指定位置，源槽保持为空且其他书不会自动挤紧。
      *
-     * @return 无返回值；移动位置或剩余顺序错误时由JUnit报告失败。
+     * @return 无返回值；空槽移动或其他书籍位置被意外改变时由JUnit报告失败。
      */
     @Test
-    fun shelfDragCanMoveBookAcrossShelfPages() {
-        val books = (1..35).map(::createTestBook)
-        val moved = moveEbookShelfBook(books, bookId = "book_2", targetIndex = 31)
+    fun shelfDragPlacesBookIntoAnyEmptySlot() {
+        val books = (1..5).map(::createTestBook)
+        val moved = moveEbookShelfBookToSlot(books, bookId = "book_2", targetSlot = 24)
+        val pages = buildEbookShelfPages(moved)
 
-        assertEquals("book_2", moved[31].id)
-        assertEquals("book_1", moved.first().id)
-        assertEquals("book_3", moved[1].id)
-        assertEquals(books.map(EbookBook::id).toSet(), moved.map(EbookBook::id).toSet())
+        assertEquals(24, moved.first { book -> book.id == "book_2" }.shelfSlot)
+        assertEquals(null, pages.first()[1])
+        assertEquals("book_2", pages.first()[24]?.id)
+        assertEquals(2, moved.first { book -> book.id == "book_3" }.shelfSlot)
+    }
+
+    /**
+     * 验证目标槽已有书籍时只交换两本书的位置，不改变其余书和已有空槽。
+     *
+     * @return 无返回值；换位影响第三本书时由JUnit报告失败。
+     */
+    @Test
+    fun shelfDragSwapsOnlyOccupiedTargetSlot() {
+        val books = (1..5).map(::createTestBook)
+        val moved = moveEbookShelfBookToSlot(books, bookId = "book_2", targetSlot = 3)
+
+        assertEquals(3, moved.first { book -> book.id == "book_2" }.shelfSlot)
+        assertEquals(1, moved.first { book -> book.id == "book_4" }.shelfSlot)
+        assertEquals(2, moved.first { book -> book.id == "book_3" }.shelfSlot)
     }
 
     /**
@@ -337,6 +402,20 @@ class EbookModelsTest {
         assertTrue(characterArtworkNames.all(String::isNotBlank))
     }
 
+    /**
+     * 验证书架提供多种名称唯一的可选皮肤，避免选择弹窗出现重复或空白项目。
+     *
+     * @return 无返回值；皮肤数量不足或名称重复时由JUnit报告失败。
+     */
+    @Test
+    fun ebookShelfOffersMultipleNamedSkins() {
+        val names = EbookShelfSkin.entries.map(EbookShelfSkin::displayName)
+
+        assertTrue(names.size >= 8)
+        assertEquals(names.size, names.distinct().size)
+        assertTrue(names.all(String::isNotBlank))
+    }
+
     /** @return 书架分页测试使用的最小完整书籍模型。 */
     private fun createTestBook(index: Int): EbookBook {
         return EbookBook(
@@ -349,7 +428,9 @@ class EbookModelsTest {
             extractedTextFileName = "book_$index.txt",
             fileSizeBytes = index.toLong(),
             createdAtMillis = index.toLong(),
-            updatedAtMillis = index.toLong()
+            updatedAtMillis = index.toLong(),
+            shelfOrder = (index - 1).toLong(),
+            shelfSlot = index - 1
         )
     }
 }

@@ -121,7 +121,8 @@ data class EbookChapter(
  * @param fontFamily 文本阅读字体；PDF不应用此字段。
  * @param readingBackground 上次选择的阅读背景。
  * @param isOnShelf 是否由用户选择展示在分页书架中。
- * @param shelfOrder 书架排序值，数值小的优先显示。
+ * @param shelfOrder 旧版书架排序兼容值；新数据与[shelfSlot]同步保存。
+ * @param shelfSlot 书籍所在的绝对书架槽位，从0开始；不在书架或旧数据尚未迁移时为-1。
  * @param spineColorArgb 用户选择的不透明ARGB书脊颜色；0表示按书籍id自动配色。
  * @param coverFileName 用户自定义封面在App私有封面目录中的受控文件名；为空表示使用默认书脊封面。
  * @param category 书籍类别，用于全部书籍页筛选与说明。
@@ -149,12 +150,33 @@ data class EbookBook(
     val readingBackground: EbookReadingBackground = EbookReadingBackground.PAPER,
     val isOnShelf: Boolean = true,
     val shelfOrder: Long = createdAtMillis,
+    val shelfSlot: Int = -1,
     val spineColorArgb: Int = 0,
     val coverFileName: String = "",
     val category: String = "导入书籍",
     val sourceUrl: String = "",
     val isBundled: Boolean = false
 )
+
+/**
+ * 用户可选择并持久化的真实书架外观。
+ *
+ * 使用方法：
+ * 书架皮肤弹窗使用[displayName]展示名称，EbookRepository保存枚举[name]，Compose页面再把枚举
+ * 映射为木板、背板、层板和文字颜色。新增皮肤不会改变书籍槽位或阅读数据。
+ *
+ * @param displayName 用户界面显示名称。
+ */
+enum class EbookShelfSkin(val displayName: String) {
+    WALNUT("胡桃木"),
+    NATURAL_OAK("自然原木"),
+    CHERRY("樱桃木"),
+    EBONY("黑檀木"),
+    SPRUCE_WHITE("云杉白"),
+    DEEP_OCEAN("深海蓝"),
+    STARRY_PURPLE("星空紫"),
+    JADE_GREEN("墨玉绿")
+}
 
 /**
  * 文本电子书可选择的正文字体族。

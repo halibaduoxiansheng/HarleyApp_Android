@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.pdf.PdfRenderer
 import android.net.Uri
+import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.provider.OpenableColumns
 import android.text.Html
@@ -18,21 +19,140 @@ import com.example.harleyapp.model.EbookImportProgress
 import com.example.harleyapp.model.EbookImportResult
 import com.example.harleyapp.model.EbookReadingBackground
 import com.example.harleyapp.model.EbookReadingMode
+import com.example.harleyapp.model.EbookShelfSkin
 import com.example.harleyapp.model.EbookWebDownloadRequest
 import com.example.harleyapp.system.ChineseScriptConverter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.BufferedInputStream
+import java.io.BufferedOutputStream
 import java.io.ByteArrayOutputStream
+import java.io.DataInputStream
+import java.io.DataOutputStream
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.nio.charset.Charset
+import java.security.MessageDigest
 import java.util.Locale
 import java.util.UUID
 import java.util.zip.ZipFile
 import kotlin.math.roundToInt
+
+/**
+ * 一次文本电子书分页缓存的完整排版条件。
+ *
+ * 使用方法：
+ * 阅读器取得真实正文尺寸、字号像素和字体后创建本对象，并传给
+ * [EbookRepository.loadPaginationBoundaries]或[EbookRepository.savePaginationBoundaries]。
+ * 任一字段变化都会形成新的缓存身份，不会错误复用旧屏幕或旧字号的分页结果。
+ *
+ * @param bookId 书籍稳定id。
+ * @param textLength 当前离线正文字符数量。
+ * @param contentWidthPx 扣除左右正文留白后的像素宽度。
+ * @param contentHeightPx 扣除阅读控制栏安全区后的像素高度。
+ * @param fontSizePx 当前正文字号像素值。
+ * @param lineHeightPx 当前正文行高像素值。
+ * @param fontFamily 当前正文字体族。
+ */
+data class EbookPaginationCacheSpec(
+    val bookId: String,
+    val textLength: Int,
+    val contentWidthPx: Int,
+    val contentHeightPx: Int,
+    val fontSizePx: Float,
+    val lineHeightPx: Float,
+    val fontFamily: EbookFontFamily
+)
+
+/**
+ * 验证磁盘分页缓存中的起止位置是否完整、连续并覆盖整篇正文。
+ *
+ * 使用方法：
+ * 缓存读取完成后传入交替保存的start、end数组。只有本函数返回true时，页面才可以据此截取正文。
+ *
+ * @param boundaries 依次保存每页起点和终点的偶数长度数组。
+ * @param textLength 当前完整正文字符数量。
+ * @return 所有边界合法且从0连续覆盖到[textLength]时返回true。
+ */
+internal fun validateEbookPaginationBoundaries(
+    boundaries: IntArray,
+    textLength: Int
+): Boolean {
+    if (
+        textLength <= 0 ||
+        boundaries.isEmpty() ||
+        boundaries.size % 2 != 0 ||
+        boundaries.size / 2 > MAX_CACHED_EBOOK_PAGE_COUNT
+    ) {
+        return false
+    }
+    var expectedStart = 0
+    boundaries.indices.step(2).forEach { index ->
+        val start = boundaries[index]
+        val end = boundaries[index + 1]
+        if (start != expectedStart || end <= start || end > textLength) return false
+        expectedStart = end
+    }
+    return expectedStart == textLength
+}
+
+private const val MAX_CACHED_EBOOK_PAGE_COUNT = 2_000_000
+
+/**
+ * 把旧版紧凑排序和可能重复、越界的槽位迁移为唯一且稳定的绝对书架槽位。
+ *
+ * 使用方法：
+ * 读取目录后立即调用。已有合法槽位优先保留；没有shelfSlot的旧书按shelfOrder顺序依次填入首个
+ * 空位；不在书架中的书固定使用-1。返回列表保持调用者原顺序。
+ *
+ * @param books 当前完整书库。
+ * @return 每本在架书籍都具备唯一合法槽位的新列表。
+ */
+internal fun normalizeEbookShelfSlots(books: List<EbookBook>): List<EbookBook> {
+    if (books.isEmpty()) return books
+    val slotById = mutableMapOf<String, Int>()
+    val occupiedSlots = mutableSetOf<Int>()
+    val pendingBooks = mutableListOf<EbookBook>()
+
+    books.filter(EbookBook::isOnShelf)
+        .sortedWith(compareBy<EbookBook>(EbookBook::shelfSlot).thenBy(EbookBook::shelfOrder))
+        .forEach { book ->
+            val slot = book.shelfSlot
+            if (slot in 0..MAX_EBOOK_SHELF_SLOT && occupiedSlots.add(slot)) {
+                slotById[book.id] = slot
+            } else {
+                pendingBooks += book
+            }
+        }
+    pendingBooks.sortedBy(EbookBook::shelfOrder).forEach { book ->
+        val slot = firstAvailableEbookShelfSlot(occupiedSlots)
+        occupiedSlots += slot
+        slotById[book.id] = slot
+    }
+
+    return books.map { book ->
+        val normalizedSlot = if (book.isOnShelf) slotById[book.id] ?: -1 else -1
+        if (book.shelfSlot == normalizedSlot) book else book.copy(shelfSlot = normalizedSlot)
+    }
+}
+
+/**
+ * 查找书架上的第一个空槽。
+ *
+ * @param occupiedSlots 已被书籍占用的非负槽位集合。
+ * @return 从0开始的第一个空槽位；书架达到保护上限时返回最后一个槽位。
+ */
+internal fun firstAvailableEbookShelfSlot(occupiedSlots: Set<Int>): Int {
+    for (slot in 0..MAX_EBOOK_SHELF_SLOT) {
+        if (slot !in occupiedSlots) return slot
+    }
+    return MAX_EBOOK_SHELF_SLOT
+}
+
+internal const val MAX_EBOOK_SHELF_SLOT = 9_999
 
 /**
  * 用户设置或删除电子书自定义封面后的结果。
@@ -62,6 +182,7 @@ class EbookRepository(context: Context) {
     private val originalDirectory = File(rootDirectory, ORIGINAL_DIRECTORY)
     private val textDirectory = File(rootDirectory, TEXT_DIRECTORY)
     private val coverDirectory = File(rootDirectory, COVER_DIRECTORY)
+    private val paginationDirectory = File(rootDirectory, PAGINATION_DIRECTORY)
     private val catalogFile = AtomicFile(File(rootDirectory, CATALOG_FILE_NAME))
     private val preferences = applicationContext.getSharedPreferences(
         PREFERENCES_NAME,
@@ -79,11 +200,16 @@ class EbookRepository(context: Context) {
             if (!catalogFile.baseFile.isFile) return emptyList()
             val json = catalogFile.openRead().bufferedReader(Charsets.UTF_8).use { it.readText() }
             val array = JSONArray(json)
-            buildList {
+            val decodedBooks = buildList {
                 for (index in 0 until array.length()) {
                     decodeBook(array.optJSONObject(index))?.let(::add)
                 }
-            }.sortedWith(
+            }
+            val normalizedBooks = normalizeEbookShelfSlots(decodedBooks)
+            if (normalizedBooks != decodedBooks && !saveBooks(normalizedBooks)) {
+                Log.w(TAG, "Failed to persist migrated ebook shelf slots")
+            }
+            normalizedBooks.sortedWith(
                 compareByDescending<EbookBook> { book -> book.lastReadAtMillis }
                     .thenByDescending { book -> book.updatedAtMillis }
                     .thenByDescending { book -> book.createdAtMillis }
@@ -202,6 +328,11 @@ class EbookRepository(context: Context) {
             }
 
             val now = System.currentTimeMillis()
+            val currentBooks = getBooks()
+            val firstEmptyShelfSlot = firstAvailableEbookShelfSlot(
+                currentBooks.filter(EbookBook::isOnShelf)
+                    .mapTo(mutableSetOf(), EbookBook::shelfSlot)
+            )
             val book = EbookBook(
                 id = id,
                 title = displayName.substringBeforeLast('.').trim().ifBlank { "未命名书籍" },
@@ -213,9 +344,11 @@ class EbookRepository(context: Context) {
                 fileSizeBytes = copiedBytes,
                 createdAtMillis = now,
                 updatedAtMillis = now,
-                pageCount = pageCount.coerceAtLeast(1)
+                pageCount = pageCount.coerceAtLeast(1),
+                shelfOrder = firstEmptyShelfSlot.toLong(),
+                shelfSlot = firstEmptyShelfSlot
             )
-            val updated = getBooks().filterNot { current -> current.id == id } + book
+            val updated = currentBooks.filterNot { current -> current.id == id } + book
             reportImportProgress(onProgress, 0.99f, "正在登记到书库…")
             require(saveBooks(updated)) { "Unable to save ebook catalog" }
             reportImportProgress(onProgress, 1f, "导入完成")
@@ -343,6 +476,7 @@ class EbookRepository(context: Context) {
                         pageCount = estimateTextPageCountByLength(characterCount),
                         isOnShelf = index < DEFAULT_STARTER_SHELF_COUNT,
                         shelfOrder = now + index,
+                        shelfSlot = if (index < DEFAULT_STARTER_SHELF_COUNT) index else -1,
                         category = starter.category,
                         sourceUrl = "https://www.gutenberg.org/ebooks/${starter.gutenbergId}",
                         isBundled = true
@@ -371,14 +505,16 @@ class EbookRepository(context: Context) {
         val books = getBooks()
         val target = books.firstOrNull { book -> book.id == bookId } ?: return false
         if (target.isOnShelf == isOnShelf) return true
-        val nextOrder = books.maxOfOrNull(EbookBook::shelfOrder)?.plus(1L)
-            ?: System.currentTimeMillis()
+        val nextSlot = firstAvailableEbookShelfSlot(
+            books.filter(EbookBook::isOnShelf).mapTo(mutableSetOf(), EbookBook::shelfSlot)
+        )
         return saveBooks(
             books.map { book ->
                 if (book.id == bookId) {
                     book.copy(
                         isOnShelf = isOnShelf,
-                        shelfOrder = if (isOnShelf) nextOrder else book.shelfOrder,
+                        shelfOrder = if (isOnShelf) nextSlot.toLong() else book.shelfOrder,
+                        shelfSlot = if (isOnShelf) nextSlot else -1,
                         updatedAtMillis = System.currentTimeMillis()
                     )
                 } else {
@@ -419,7 +555,7 @@ class EbookRepository(context: Context) {
             books.map { book ->
                 val order = orderById[book.id]
                 if (book.isOnShelf && order != null) {
-                    book.copy(shelfOrder = order)
+                    book.copy(shelfOrder = order, shelfSlot = order.toInt())
                 } else {
                     book
                 }
@@ -633,10 +769,11 @@ class EbookRepository(context: Context) {
         val originalDeleted = originalFileFor(target)?.delete() ?: true
         val textDeleted = extractedTextFileFor(target)?.delete() ?: true
         val coverDeleted = coverFileFor(target)?.delete() ?: true
-        if (!originalDeleted || !textDeleted || !coverDeleted) {
+        val paginationCacheDeleted = deletePaginationCaches(bookId)
+        if (!originalDeleted || !textDeleted || !coverDeleted || !paginationCacheDeleted) {
             Log.w(TAG, "Failed to delete one or more ebook files")
         }
-        return originalDeleted && textDeleted && coverDeleted
+        return originalDeleted && textDeleted && coverDeleted && paginationCacheDeleted
     }
 
     /**
@@ -658,6 +795,173 @@ class EbookRepository(context: Context) {
         }.onFailure { error ->
             Log.e(TAG, "Failed to read extracted ebook text", error)
         }.getOrDefault("")
+    }
+
+    /**
+     * 读取用户上次选择的全局书架皮肤。
+     *
+     * 使用方法：
+     * “我的书架”页面创建时调用一次。旧版本没有保存值或枚举值损坏时自动使用胡桃木。
+     *
+     * @return 当前有效书架皮肤。
+     */
+    fun getShelfSkin(): EbookShelfSkin {
+        return runCatching {
+            EbookShelfSkin.valueOf(
+                preferences.getString(SHELF_SKIN_KEY, EbookShelfSkin.WALNUT.name)
+                    ?: EbookShelfSkin.WALNUT.name
+            )
+        }.getOrDefault(EbookShelfSkin.WALNUT)
+    }
+
+    /**
+     * 保存全局书架皮肤。
+     *
+     * @param skin 用户在皮肤弹窗中选择的枚举值。
+     * @return SharedPreferences同步写入成功返回true。
+     */
+    fun saveShelfSkin(skin: EbookShelfSkin): Boolean {
+        return preferences.edit().putString(SHELF_SKIN_KEY, skin.name).commit()
+    }
+
+    /**
+     * 保存全部在架书籍的绝对槽位，允许槽位之间保留空白。
+     *
+     * 使用方法：
+     * 书架长按拖动结束后传入书籍id到目标槽位的映射。合法且不重复的目标会原样保存；缺失、重复或
+     * 越界项目会自动放入第一个空槽，保证目录不会因一次异常手势损坏。
+     *
+     * @param requestedSlots 当前界面中每本在架书籍的目标绝对槽位。
+     * @return 至少存在一本在架书籍且目录保存成功时返回true。
+     */
+    fun updateShelfSlots(requestedSlots: Map<String, Int>): Boolean {
+        val books = normalizeEbookShelfSlots(getBooks())
+        val shelfBooks = books.filter(EbookBook::isOnShelf)
+        if (shelfBooks.isEmpty()) return false
+        val occupiedSlots = mutableSetOf<Int>()
+        val slotById = mutableMapOf<String, Int>()
+        shelfBooks.sortedBy(EbookBook::shelfSlot).forEach { book ->
+            val requestedSlot = requestedSlots[book.id]
+            val slot = if (
+                requestedSlot != null &&
+                requestedSlot in 0..MAX_EBOOK_SHELF_SLOT &&
+                occupiedSlots.add(requestedSlot)
+            ) {
+                requestedSlot
+            } else {
+                firstAvailableEbookShelfSlot(occupiedSlots).also(occupiedSlots::add)
+            }
+            slotById[book.id] = slot
+        }
+        if (shelfBooks.all { book -> slotById[book.id] == book.shelfSlot }) return true
+        return saveBooks(
+            books.map { book ->
+                val slot = slotById[book.id]
+                if (book.isOnShelf && slot != null) {
+                    book.copy(shelfSlot = slot, shelfOrder = slot.toLong())
+                } else {
+                    book
+                }
+            }
+        )
+    }
+
+    /**
+     * 读取与当前书籍、屏幕和字体条件完全一致的分页边界缓存。
+     *
+     * 使用方法：
+     * 阅读器读出完整正文并取得实际可用尺寸后调用。函数先检查进程内LRU缓存，再检查App私有目录
+     * 的二进制缓存；缓存不存在、条件变化、内容损坏或边界无法覆盖全文时返回null，由阅读器重新分页。
+     *
+     * @param spec 当前完整分页条件。
+     * @return 命中时返回交替保存每页start、end的数组；需要重新分页时返回null。
+     */
+    suspend fun loadPaginationBoundaries(spec: EbookPaginationCacheSpec): IntArray? =
+        withContext(Dispatchers.IO) {
+            val identity = paginationCacheIdentity(spec)
+            synchronized(PAGINATION_MEMORY_CACHE_LOCK) {
+                paginationMemoryCache[identity]?.let(IntArray::clone)
+            }?.let { cached ->
+                if (validateEbookPaginationBoundaries(cached, spec.textLength)) {
+                    return@withContext cached
+                }
+                synchronized(PAGINATION_MEMORY_CACHE_LOCK) {
+                    paginationMemoryCache.remove(identity)
+                }
+            }
+
+            val cacheFile = paginationCacheFile(spec, identity)
+            if (!cacheFile.baseFile.isFile) return@withContext null
+            runCatching {
+                DataInputStream(BufferedInputStream(cacheFile.openRead())).use { input ->
+                    require(input.readInt() == PAGINATION_CACHE_MAGIC) { "Invalid cache magic" }
+                    require(input.readInt() == PAGINATION_CACHE_VERSION) { "Invalid cache version" }
+                    require(input.readUTF() == identity) { "Pagination conditions changed" }
+                    val boundaryCount = input.readInt()
+                    require(boundaryCount in 2..MAX_CACHED_EBOOK_PAGE_COUNT * 2) {
+                        "Invalid boundary count"
+                    }
+                    require(boundaryCount % 2 == 0) { "Odd boundary count" }
+                    IntArray(boundaryCount) { input.readInt() }.also { boundaries ->
+                        require(validateEbookPaginationBoundaries(boundaries, spec.textLength)) {
+                            "Invalid pagination boundaries"
+                        }
+                    }
+                }
+            }.onSuccess { boundaries ->
+                putPaginationMemoryCache(identity, boundaries)
+                cacheFile.baseFile.setLastModified(System.currentTimeMillis())
+            }.onFailure { error ->
+                Log.w(TAG, "Discarded invalid ebook pagination cache", error)
+                cacheFile.delete()
+            }.getOrNull()
+        }
+
+    /**
+     * 原子保存当前排版条件对应的分页边界，并同步放入进程内LRU缓存。
+     *
+     * 使用方法：
+     * [paginateEbookTextToViewport]成功完成后，把每页起点和终点交替组成数组再调用。每本书最多保留
+     * 最近六种屏幕或字体配置，横竖屏切换回来时也可以直接命中；缓存失败不影响正常阅读。
+     *
+     * @param spec 当前完整分页条件。
+     * @param boundaries 交替保存每页start、end的连续边界数组。
+     * @return 内存和磁盘缓存均更新成功返回true；参数或磁盘写入失败返回false。
+     */
+    suspend fun savePaginationBoundaries(
+        spec: EbookPaginationCacheSpec,
+        boundaries: IntArray
+    ): Boolean = withContext(Dispatchers.IO) {
+        if (!validateEbookPaginationBoundaries(boundaries, spec.textLength)) {
+            return@withContext false
+        }
+        val identity = paginationCacheIdentity(spec)
+        putPaginationMemoryCache(identity, boundaries)
+        runCatching {
+            ensureDirectories()
+            val cacheFile = paginationCacheFile(spec, identity)
+            require(cacheFile.baseFile.parentFile?.let { it.exists() || it.mkdirs() } == true) {
+                "Unable to create pagination cache directory"
+            }
+            val output = cacheFile.startWrite()
+            try {
+                val dataOutput = DataOutputStream(BufferedOutputStream(output))
+                dataOutput.writeInt(PAGINATION_CACHE_MAGIC)
+                dataOutput.writeInt(PAGINATION_CACHE_VERSION)
+                dataOutput.writeUTF(identity)
+                dataOutput.writeInt(boundaries.size)
+                boundaries.forEach(dataOutput::writeInt)
+                dataOutput.flush()
+                cacheFile.finishWrite(output)
+            } catch (error: Throwable) {
+                cacheFile.failWrite(output)
+                throw error
+            }
+            trimPaginationCacheFiles(spec.bookId)
+            true
+        }.onFailure { error ->
+            Log.w(TAG, "Failed to save ebook pagination cache", error)
+        }.getOrDefault(false)
     }
 
     /**
@@ -744,6 +1048,69 @@ class EbookRepository(context: Context) {
     private fun extractedTextFileFor(book: EbookBook): File? {
         if (!isSafeStoredFileName(book.extractedTextFileName)) return null
         return File(textDirectory, book.extractedTextFileName).takeIf(File::isFile)
+    }
+
+    /** @return 包含算法版本及全部排版条件的稳定缓存身份。 */
+    private fun paginationCacheIdentity(spec: EbookPaginationCacheSpec): String {
+        return listOf(
+            PAGINATION_CACHE_VERSION,
+            spec.bookId,
+            spec.textLength,
+            spec.contentWidthPx,
+            spec.contentHeightPx,
+            spec.fontSizePx.toRawBits(),
+            spec.lineHeightPx.toRawBits(),
+            spec.fontFamily.name,
+            Build.FINGERPRINT
+        ).joinToString(separator = "|")
+    }
+
+    /** @return 当前书籍与排版条件对应的App私有原子缓存文件。 */
+    private fun paginationCacheFile(
+        spec: EbookPaginationCacheSpec,
+        identity: String
+    ): AtomicFile {
+        val bookDirectory = File(paginationDirectory, sha256Hex(spec.bookId))
+        return AtomicFile(File(bookDirectory, "${sha256Hex(identity)}.pages"))
+    }
+
+    /** 把一份分页边界副本放入进程级LRU，避免页面退出后立即重新读取磁盘。 */
+    private fun putPaginationMemoryCache(identity: String, boundaries: IntArray) {
+        synchronized(PAGINATION_MEMORY_CACHE_LOCK) {
+            paginationMemoryCache[identity] = boundaries.clone()
+            while (paginationMemoryCache.size > MAX_PAGINATION_MEMORY_CACHE_ENTRIES) {
+                val oldestKey = paginationMemoryCache.entries.firstOrNull()?.key ?: break
+                paginationMemoryCache.remove(oldestKey)
+            }
+        }
+    }
+
+    /** 每本书只保留最近使用的有限份排版配置，防止反复改字号无限占用私有存储。 */
+    private fun trimPaginationCacheFiles(bookId: String) {
+        val bookDirectory = File(paginationDirectory, sha256Hex(bookId))
+        val cacheFiles = bookDirectory.listFiles { file ->
+            file.isFile && file.extension == "pages"
+        }.orEmpty().sortedByDescending(File::lastModified)
+        cacheFiles.drop(MAX_PAGINATION_CACHE_FILES_PER_BOOK).forEach { staleFile ->
+            if (!staleFile.delete()) Log.w(TAG, "Failed to trim ebook pagination cache")
+        }
+    }
+
+    /** 删除一本书的全部内存与磁盘分页缓存。 */
+    private fun deletePaginationCaches(bookId: String): Boolean {
+        synchronized(PAGINATION_MEMORY_CACHE_LOCK) {
+            val prefix = "$PAGINATION_CACHE_VERSION|$bookId|"
+            paginationMemoryCache.keys.removeAll { identity -> identity.startsWith(prefix) }
+        }
+        val bookDirectory = File(paginationDirectory, sha256Hex(bookId))
+        return !bookDirectory.exists() || bookDirectory.deleteRecursively()
+    }
+
+    /** @return 输入文本的SHA-256小写十六进制摘要，用作不含用户书名的安全目录名。 */
+    private fun sha256Hex(value: String): String {
+        return MessageDigest.getInstance("SHA-256")
+            .digest(value.toByteArray(Charsets.UTF_8))
+            .joinToString(separator = "") { byte -> "%02x".format(byte.toInt() and 0xFF) }
     }
 
     /** @return Content Uri可读文件名，无法查询时返回稳定默认名。 */
@@ -1185,6 +1552,7 @@ class EbookRepository(context: Context) {
             put("readingBackground", book.readingBackground.name)
             put("isOnShelf", book.isOnShelf)
             put("shelfOrder", book.shelfOrder)
+            put("shelfSlot", book.shelfSlot)
             put("spineColorArgb", book.spineColorArgb.toLong())
             put("coverFileName", book.coverFileName)
             put("category", book.category)
@@ -1235,6 +1603,7 @@ class EbookRepository(context: Context) {
                 readingBackground = readingBackground,
                 isOnShelf = json.optBoolean("isOnShelf", true),
                 shelfOrder = json.optLong("shelfOrder", createdAtMillis),
+                shelfSlot = json.optInt("shelfSlot", -1),
                 spineColorArgb = json.optLong("spineColorArgb", 0L).toInt(),
                 coverFileName = json.optString("coverFileName")
                     .takeIf(::isSafeStoredFileName)
@@ -1261,6 +1630,9 @@ class EbookRepository(context: Context) {
         }
         require(coverDirectory.exists() || coverDirectory.mkdirs()) {
             "Unable to create ebook cover directory"
+        }
+        require(paginationDirectory.exists() || paginationDirectory.mkdirs()) {
+            "Unable to create ebook pagination directory"
         }
     }
 
@@ -1359,15 +1731,21 @@ class EbookRepository(context: Context) {
         const val ORIGINAL_DIRECTORY = "original"
         const val TEXT_DIRECTORY = "text"
         const val COVER_DIRECTORY = "covers"
+        const val PAGINATION_DIRECTORY = "pagination"
         const val WEB_DOWNLOAD_CACHE_DIRECTORY = "ebook_web_downloads"
         const val CATALOG_FILE_NAME = "catalog.json"
         const val PREFERENCES_NAME = "harley_ebook_preferences"
         const val STARTER_BOOKS_INSTALLED_KEY = "starter_books_v1_installed"
+        const val SHELF_SKIN_KEY = "ebook_shelf_skin"
         const val STARTER_ASSET_DIRECTORY = "starter_ebooks"
         const val STARTER_BOOK_ID_PREFIX = "starter_gutenberg_"
         const val DEFAULT_STARTER_SHELF_COUNT = 6
         const val MAX_EBOOK_BYTES = 250L * 1024L * 1024L
         const val MAX_EXTRACTED_TEXT_BYTES = 80L * 1024L * 1024L
+        const val PAGINATION_CACHE_MAGIC = 0x48455047
+        const val PAGINATION_CACHE_VERSION = 1
+        const val MAX_PAGINATION_MEMORY_CACHE_ENTRIES = 8
+        const val MAX_PAGINATION_CACHE_FILES_PER_BOOK = 6
         const val COPY_PROGRESS_REPORT_BYTES = 256L * 1024L
         const val COPY_PROGRESS_START = 0.02f
         const val COPY_PROGRESS_END = 0.25f
@@ -1397,6 +1775,8 @@ class EbookRepository(context: Context) {
         const val MAX_FONT_SCALE = 1.8f
         const val OPAQUE_ALPHA_MASK: Int = -0x1000000
         val SAFE_FILE_NAME_REGEX = Regex("[a-zA-Z0-9._-]+")
+        val PAGINATION_MEMORY_CACHE_LOCK = Any()
+        val paginationMemoryCache = object : LinkedHashMap<String, IntArray>(16, 0.75f, true) {}
 
         val STARTER_BOOKS = listOf(
             StarterEbook("24264", "dream_of_red_chamber.txt", "红楼梦", "曹雪芹", "中国文学"),
