@@ -4,6 +4,12 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- 二维码页面只在用户主动进入并授权后调用相机，画面仅在本机分析。 -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <!-- 没有相机的平板或ChromeOS设备仍可安装，并使用相册二维码识别。 -->
+    <uses-feature
+        android:name="android.hardware.camera.any"
+        android:required="false" />
     <!-- 用户仍需在系统“使用情况访问”页面主动授权，才能查询其他App的蜂窝流量汇总。 -->
     <uses-permission
         android:name="android.permission.PACKAGE_USAGE_STATS"

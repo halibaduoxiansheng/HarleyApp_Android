@@ -2,6 +2,8 @@ package com.example.harleyapp
 
 import com.example.harleyapp.data.ChineseGrowthCatalog
 import com.example.harleyapp.model.PrimarySchoolGrade
+import com.example.harleyapp.model.calculateChineseGrowthStreakDays
+import com.example.harleyapp.model.countRecentChineseGrowthEvents
 import com.example.harleyapp.model.isChineseReadingTopicSuitable
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -37,7 +39,7 @@ class ChineseGrowthModelsTest {
         }
     }
 
-    /** 阅读主题必须使用唯一标识、合法年级范围和固定百科标题。 */
+    /** 阅读主题必须使用唯一标识、合法年级范围和固定国内HTTPS延伸地址。 */
     @Test
     fun readingTopicsHaveSafeGradeRanges() {
         val topics = ChineseGrowthCatalog.allReadingTopics()
@@ -45,10 +47,32 @@ class ChineseGrowthModelsTest {
         topics.forEach { topic ->
             assertTrue(topic.minGrade in 1..6)
             assertTrue(topic.maxGrade in topic.minGrade..6)
-            assertTrue(topic.wikipediaTitle.isNotBlank())
             assertTrue(topic.offlineGuide.length >= 40)
             assertTrue(topic.observationQuestion.isNotBlank())
             assertTrue(topic.writingChallenge.isNotBlank())
+            assertEquals("百度百科", topic.extensionSourceName)
+            assertTrue(topic.extensionSourceUrl.startsWith("https://baike.baidu.com/item/"))
+        }
+    }
+
+    /** 每个年级必须提供两篇内容完整、稳定标识唯一的离线诗词课程。 */
+    @Test
+    fun classicCatalogCoversEveryGrade() {
+        val allLessons = ChineseGrowthCatalog.allClassicLessons()
+        assertEquals(allLessons.size, allLessons.map { lesson -> lesson.id }.toSet().size)
+
+        PrimarySchoolGrade.entries.forEach { grade ->
+            val lessons = ChineseGrowthCatalog.classicLessonsFor(grade)
+            assertEquals(2, lessons.size)
+            lessons.forEach { lesson ->
+                assertEquals(grade, lesson.grade)
+                assertTrue(lesson.title.isNotBlank())
+                assertTrue(lesson.author.isNotBlank())
+                assertTrue(lesson.text.lines().size >= 4)
+                assertTrue(lesson.appreciation.length >= 30)
+                assertTrue(lesson.recitationTip.isNotBlank())
+                assertTrue(lesson.practiceQuestion.endsWith("？"))
+            }
         }
     }
 
@@ -63,5 +87,40 @@ class ChineseGrowthModelsTest {
         assertTrue(isChineseReadingTopicSuitable(topic, PrimarySchoolGrade.GRADE_THREE))
         assertTrue(isChineseReadingTopicSuitable(topic, PrimarySchoolGrade.GRADE_FIVE))
         assertFalse(isChineseReadingTopicSuitable(topic, PrimarySchoolGrade.GRADE_SIX))
+    }
+
+    /** 最近七天按真实学习事件计数，使同一课程隔天复习仍能推进周目标。 */
+    @Test
+    fun recentProgressCountsRepeatedLearningOnDifferentDays() {
+        val today = 1_000L
+
+        assertEquals(
+            4,
+            countRecentChineseGrowthEvents(
+                studyEpochDays = listOf(today, today, today - 1L, today - 6L, today - 7L, today + 1L),
+                currentEpochDay = today
+            )
+        )
+    }
+
+    /** 连续学习按自然日去重，并允许今天尚未学习时延续到昨天。 */
+    @Test
+    fun streakUsesDistinctCalendarDaysAndAllowsYesterday() {
+        val today = 2_000L
+
+        assertEquals(
+            3,
+            calculateChineseGrowthStreakDays(
+                studyEpochDays = listOf(today - 1L, today - 1L, today - 2L, today - 3L, today - 5L),
+                currentEpochDay = today
+            )
+        )
+        assertEquals(
+            0,
+            calculateChineseGrowthStreakDays(
+                studyEpochDays = listOf(today - 2L, today - 3L),
+                currentEpochDay = today
+            )
+        )
     }
 }

@@ -63,6 +63,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -126,6 +127,7 @@ import java.util.Locale
  * @param onUseCompanionItem 使用背包物品与伙伴互动的回调。
  * @param onCompleteCompanionInteraction 完成免费互动或小游戏后的回调。
  * @param onQuickSearch 提交首页顶部快捷搜索词的回调；宿主收到后打开完整全局搜索页。
+ * @param onOpenQrScanner 点击搜索框内二维码图标后的回调；宿主收到后直接打开二维码扫描页。
  *
  * @return 无返回值，直接输出首页界面。
  */
@@ -156,7 +158,8 @@ fun HomeScreen(
     onPurchaseCompanionItem: (CompanionShopItem) -> CompanionOperationResult,
     onUseCompanionItem: (CompanionShopItem) -> CompanionOperationResult,
     onCompleteCompanionInteraction: (CompanionInteraction) -> CompanionOperationResult,
-    onQuickSearch: (String) -> Unit
+    onQuickSearch: (String) -> Unit,
+    onOpenQrScanner: () -> Unit
 ) {
     var snapshot by remember {
         mutableStateOf(DeviceSnapshot())
@@ -396,7 +399,8 @@ fun HomeScreen(
                     if (normalizedQuery.isNotEmpty()) {
                         onQuickSearch(normalizedQuery)
                     }
-                }
+                },
+                onOpenQrScanner = onOpenQrScanner
             )
         }
     }
@@ -413,6 +417,7 @@ fun HomeScreen(
  * @param onQueryChanged 输入变化回调。
  * @param onFocusChanged 输入框焦点变化回调，用于输入期间保持搜索条可见。
  * @param onSearch 提交非空关键词的回调。
+ * @param onOpenQrScanner 点击二维码图标后直接进入扫码页的回调。
  *
  * @return 无返回值，直接输出一行搜索框和按钮。
  */
@@ -421,7 +426,8 @@ private fun HomeQuickSearchBar(
     query: String,
     onQueryChanged: (String) -> Unit,
     onFocusChanged: (Boolean) -> Unit,
-    onSearch: () -> Unit
+    onSearch: () -> Unit,
+    onOpenQrScanner: () -> Unit
 ) {
     val searchIconColor = MaterialTheme.colorScheme.primary
     Surface(
@@ -490,6 +496,8 @@ private fun HomeQuickSearchBar(
                 }
             )
 
+            QrScannerShortcut(onClick = onOpenQrScanner)
+
             Surface(
                 enabled = query.isNotBlank(),
                 onClick = onSearch,
@@ -516,6 +524,70 @@ private fun HomeQuickSearchBar(
                         }
                     )
                 }
+            }
+        }
+    }
+}
+
+/**
+ * 在首页搜索框内绘制始终可用的二维码快捷扫描按钮。
+ *
+ * 使用方法：
+ * 由[HomeQuickSearchBar]放在文字输入框和“搜索”按钮之间。用户无需输入搜索词，点击后立即通过
+ * [onClick]交给宿主打开现有二维码扫描页面；本函数只负责图标、点击区域和无障碍说明。
+ *
+ * @param onClick 点击二维码按钮后的回调。
+ *
+ * @return 无返回值，直接输出一个圆形二维码图标按钮。
+ */
+@Composable
+private fun QrScannerShortcut(onClick: () -> Unit) {
+    val iconColor = MaterialTheme.colorScheme.primary
+
+    Surface(
+        modifier = Modifier
+            .size(40.dp)
+            .semantics { contentDescription = "快捷扫描二维码" },
+        onClick = onClick,
+        shape = CircleShape,
+        color = MaterialTheme.colorScheme.primaryContainer
+    ) {
+        Canvas(modifier = Modifier.padding(10.dp)) {
+            val module = size.minDimension / 7f
+            val finderStroke = (module * 0.72f).coerceAtLeast(1f)
+
+            // 三个定位框保留二维码最醒目的结构，小尺寸下仍能快速辨认入口用途。
+            fun drawFinder(column: Int, row: Int) {
+                drawRect(
+                    color = iconColor,
+                    topLeft = Offset(column * module, row * module),
+                    size = Size(module * 3f, module * 3f),
+                    style = Stroke(width = finderStroke)
+                )
+                drawRect(
+                    color = iconColor,
+                    topLeft = Offset((column + 1) * module, (row + 1) * module),
+                    size = Size(module, module)
+                )
+            }
+
+            drawFinder(column = 0, row = 0)
+            drawFinder(column = 4, row = 0)
+            drawFinder(column = 0, row = 4)
+
+            // 右下角使用分散模块补足二维码特征，避免图标被误认为普通网格按钮。
+            listOf(
+                4 to 4,
+                6 to 4,
+                5 to 5,
+                4 to 6,
+                6 to 6
+            ).forEach { (column, row) ->
+                drawRect(
+                    color = iconColor,
+                    topLeft = Offset(column * module, row * module),
+                    size = Size(module, module)
+                )
             }
         }
     }

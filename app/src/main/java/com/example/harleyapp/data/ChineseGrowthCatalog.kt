@@ -1,16 +1,19 @@
 package com.example.harleyapp.data
 
 import com.example.harleyapp.model.ChineseReadingTopic
+import com.example.harleyapp.model.ChineseClassicLesson
 import com.example.harleyapp.model.ChineseWritingMission
 import com.example.harleyapp.model.PrimarySchoolGrade
 import com.example.harleyapp.model.isChineseReadingTopicSuitable
+import java.net.URLEncoder
 
 /**
  * 提供按年级递进的原创写作训练和安全阅读主题白名单。
  *
  * 使用方法：
  * 页面通过[writingMissionsFor]取得当前年级训练，通过[readingTopicsFor]取得适龄阅读主题。写作
- * 内容不复制作文书范文；阅读正文仅由仓库根据这里固定的百科标题联网读取，用户输入不能改变网址。
+ * 内容不复制作文书范文；阅读和诗词核心内容均内置离线，国内延伸资料只使用这里生成的固定白名单
+ * 地址，用户输入不能改变网址。
  */
 object ChineseGrowthCatalog {
 
@@ -61,6 +64,26 @@ object ChineseGrowthCatalog {
         topic("beidou", 5, 6, "科技", "北斗怎样帮助定位", "北斗卫星导航系统", "卫星导航系统通过多颗卫星发送时间和位置信息，接收设备计算自己所在的位置。它可以用于交通、测绘、救援和农业等领域。", "定位系统为什么需要多颗卫星共同工作？", "选择一个应用场景，说明北斗能解决什么问题。")
     )
 
+    private val classicLessons = listOf(
+        classic(PrimarySchoolGrade.GRADE_ONE, 1, "咏鹅", "唐 · 骆宾王", "鹅，鹅，鹅，\n曲项向天歌。\n白毛浮绿水，\n红掌拨清波。", "诗人抓住白毛、绿水、红掌和清波，把颜色与动作放在一起，像一幅会动的画。", "先找“鹅、歌”和“波”三个押韵位置，再配合划水动作朗读。", "诗里用了哪些颜色？它们分别写了什么？"),
+        classic(PrimarySchoolGrade.GRADE_ONE, 2, "静夜思", "唐 · 李白", "床前明月光，\n疑是地上霜。\n举头望明月，\n低头思故乡。", "从月光像白霜的错觉，到抬头看月、低头思乡，四句诗写出了动作和心情的变化。", "用“看见—动作—心情”的顺序背诵，读到最后一句稍微放慢。", "诗人先看到了什么，后来想到了什么？"),
+
+        classic(PrimarySchoolGrade.GRADE_TWO, 1, "登鹳雀楼", "唐 · 王之涣", "白日依山尽，\n黄河入海流。\n欲穷千里目，\n更上一层楼。", "前两句写眼前远景，后两句由看景想到道理：想看得更远，就要继续向上。", "朗读前两句时想象横向远景，后两句把声音读得坚定有力。", "“更上一层楼”除了登楼，还能让你想到什么？"),
+        classic(PrimarySchoolGrade.GRADE_TWO, 2, "悯农（其二）", "唐 · 李绅", "锄禾日当午，\n汗滴禾下土。\n谁知盘中餐，\n粒粒皆辛苦。", "诗从烈日下劳动的细节写起，再联系每天的饭食，让人理解粮食来之不易。", "重读“日当午、汗滴、粒粒”，体会劳动的辛苦和珍惜粮食的语气。", "哪两个细节最能表现劳动辛苦？"),
+
+        classic(PrimarySchoolGrade.GRADE_THREE, 1, "山行", "唐 · 杜牧", "远上寒山石径斜，\n白云生处有人家。\n停车坐爱枫林晚，\n霜叶红于二月花。", "视线从远山石路移到白云人家，最后停在红叶上。诗人用比较突出深秋枫叶的鲜艳。", "按“远看—近看—停下细看”分三层朗读，最后一句读出赞叹。", "诗人的观察位置和视线发生了怎样的变化？"),
+        classic(PrimarySchoolGrade.GRADE_THREE, 2, "望天门山", "唐 · 李白", "天门中断楚江开，\n碧水东流至此回。\n两岸青山相对出，\n孤帆一片日边来。", "江水、青山和孤帆都在运动，诗人像站在行船上，看见两岸景物迎面而来。", "圈出“开、回、出、来”四个动词，用声音表现江水和行船的力量。", "如果诗人站在岸上，看到的画面会有什么不同？"),
+
+        classic(PrimarySchoolGrade.GRADE_FOUR, 1, "题西林壁", "宋 · 苏轼", "横看成岭侧成峰，\n远近高低各不同。\n不识庐山真面目，\n只缘身在此山中。", "观察角度不同，看到的庐山就不同。后两句进一步说明，人身在事物之中时有时难看清全貌。", "前两句读出角度变化，后两句放慢，读出思考意味。", "这首诗怎样从写景转到说道理？"),
+        classic(PrimarySchoolGrade.GRADE_FOUR, 2, "出塞", "唐 · 王昌龄", "秦时明月汉时关，\n万里长征人未还。\n但使龙城飞将在，\n不教胡马度阴山。", "明月和边关连接古今，写出边塞战争延续很久；后两句表达守护家园、盼望安定的愿望。", "第一句读得舒缓辽远，后两句逐渐有力量，同时理解作品的历史背景。", "诗中哪些词语让你感到时间久、路途远？"),
+
+        classic(PrimarySchoolGrade.GRADE_FIVE, 1, "示儿", "宋 · 陆游", "死去元知万事空，\n但悲不见九州同。\n王师北定中原日，\n家祭无忘告乃翁。", "诗人临终仍牵挂国家统一，把个人遗愿与家国情感紧密联系在一起，语言直接而深沉。", "先读懂“同、定、告”的意思，再用克制而坚定的语气朗读。", "诗人最遗憾的事和最期待的事分别是什么？"),
+        classic(PrimarySchoolGrade.GRADE_FIVE, 2, "己亥杂诗", "清 · 龚自珍", "九州生气恃风雷，\n万马齐喑究可哀。\n我劝天公重抖擞，\n不拘一格降人材。", "诗人用风雷比喻推动社会变化的力量，希望打破沉闷局面，让各种人才充分出现。", "对比“万马齐喑”和“重抖擞”的声音强弱，读出由忧虑到呼唤的变化。", "诗中哪组画面形成了鲜明对比？"),
+
+        classic(PrimarySchoolGrade.GRADE_SIX, 1, "石灰吟", "明 · 于谦", "千锤万凿出深山，\n烈火焚烧若等闲。\n粉骨碎身浑不怕，\n要留清白在人间。", "全诗表面写石灰经历开采和烧制，实际借物表达即使经历考验也坚守品格的志向。", "先标出石灰经历的三个阶段，再把最后一句作为情感落点。", "诗人怎样把石灰的特点写成人的品格？"),
+        classic(PrimarySchoolGrade.GRADE_SIX, 2, "竹石", "清 · 郑燮", "咬定青山不放松，\n立根原在破岩中。\n千磨万击还坚劲，\n任尔东西南北风。", "竹子扎根岩缝、承受风吹磨击仍然挺立，表现坚定、顽强和不随环境动摇的品格。", "重读“咬定、千磨万击、任尔”，读出竹子由扎根到经受考验的力量。", "“咬”字换成“长”字，表达效果会有什么变化？")
+    )
+
     /**
      * 取得当前年级全部写作训练。
      *
@@ -81,11 +104,24 @@ object ChineseGrowthCatalog {
         return readingTopics.filter { topic -> isChineseReadingTopicSuitable(topic, grade) }
     }
 
+    /**
+     * 取得当前年级两篇离线古诗文学习内容。
+     *
+     * @param grade 用户选择的年级。
+     * @return 按学习顺序排列的公版原文与原创导读。
+     */
+    fun classicLessonsFor(grade: PrimarySchoolGrade): List<ChineseClassicLesson> {
+        return classicLessons.filter { lesson -> lesson.grade == grade }
+    }
+
     /** @return 全部写作训练，供完整性测试使用。 */
     fun allWritingMissions(): List<ChineseWritingMission> = writingMissions
 
     /** @return 全部阅读主题白名单，供完整性测试和仓库校验使用。 */
     fun allReadingTopics(): List<ChineseReadingTopic> = readingTopics
+
+    /** @return 全部年级的离线古诗文内容，供完整性测试使用。 */
+    fun allClassicLessons(): List<ChineseClassicLesson> = classicLessons
 
     /** 创建结构一致的年级写作任务。 */
     private fun mission(
@@ -109,14 +145,14 @@ object ChineseGrowthCatalog {
         )
     }
 
-    /** 创建只允许固定百科标题的阅读主题。 */
+    /** 创建离线精读主题，并根据固定词条名生成百度百科国内延伸阅读地址。 */
     private fun topic(
         id: String,
         minGrade: Int,
         maxGrade: Int,
         category: String,
         title: String,
-        wikipediaTitle: String,
+        domesticSearchTitle: String,
         offlineGuide: String,
         observationQuestion: String,
         writingChallenge: String
@@ -127,10 +163,41 @@ object ChineseGrowthCatalog {
             maxGrade = maxGrade,
             category = category,
             title = title,
-            wikipediaTitle = wikipediaTitle,
             offlineGuide = offlineGuide,
             observationQuestion = observationQuestion,
-            writingChallenge = writingChallenge
+            writingChallenge = writingChallenge,
+            extensionSourceName = "百度百科",
+            extensionSourceUrl = "$BAIDU_BAIKE_ITEM_PREFIX${encodeUrlPath(domesticSearchTitle)}"
         )
     }
+
+    /** 创建结构一致、使用稳定标识的年级古诗文课程。 */
+    private fun classic(
+        grade: PrimarySchoolGrade,
+        index: Int,
+        title: String,
+        author: String,
+        text: String,
+        appreciation: String,
+        recitationTip: String,
+        practiceQuestion: String
+    ): ChineseClassicLesson {
+        return ChineseClassicLesson(
+            id = "chinese_classic_${grade.gradeNumber}_$index",
+            grade = grade,
+            title = title,
+            author = author,
+            text = text,
+            appreciation = appreciation,
+            recitationTip = recitationTip,
+            practiceQuestion = practiceQuestion
+        )
+    }
+
+    /** 对固定词条路径执行UTF-8编码，避免中文和空格破坏HTTPS地址。 */
+    private fun encodeUrlPath(value: String): String {
+        return URLEncoder.encode(value, Charsets.UTF_8.name()).replace("+", "%20")
+    }
+
+    private const val BAIDU_BAIKE_ITEM_PREFIX = "https://baike.baidu.com/item/"
 }

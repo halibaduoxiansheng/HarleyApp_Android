@@ -21,7 +21,8 @@ enum class HomeFeatureId {
     ENGLISH_WORDS,
     NOTEBOOK,
     EBOOKS,
-    CHINESE_GROWTH
+    CHINESE_GROWTH,
+    QR_SCANNER
 }
 
 /** 首次安装或旧版本升级时沿用首页原有的三个功能入口。 */

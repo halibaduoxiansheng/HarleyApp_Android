@@ -3,28 +3,22 @@ package com.example.harleyapp.data
 import android.content.Context
 import android.util.Log
 import com.example.harleyapp.data.local.LocalDocumentStore
+import com.example.harleyapp.model.ChineseGrowthProgress
 import com.example.harleyapp.model.ChineseReadingArticle
 import com.example.harleyapp.model.ChineseReadingLoadResult
 import com.example.harleyapp.model.ChineseReadingTopic
 import com.example.harleyapp.model.PrimarySchoolGrade
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import com.example.harleyapp.model.calculateChineseGrowthStreakDays
+import com.example.harleyapp.model.countRecentChineseGrowthEvents
 import org.json.JSONObject
-import java.io.IOException
-import java.io.InputStream
-import java.io.InputStreamReader
-import java.net.HttpURLConnection
-import java.net.URL
-import java.net.URLEncoder
-import javax.net.ssl.HttpsURLConnection
+import java.time.LocalDate
 
 /**
- * 保存语文成长年级选择，并读取、缓存白名单百科文章摘要。
+ * 保存语文成长年级、写作草稿和本机学习进度。
  *
  * 使用方法：
- * 使用Application Context创建实例。页面启动时调用[getSelectedGrade]恢复年级，点击主题后在
- * 协程中调用[loadArticle]。仓库只请求[ChineseReadingTopic.wikipediaTitle]提供的固定标题，用户
- * 输入不会进入URL；联网失败时返回上次缓存或原创离线导读，页面始终有内容可读。
+ * 使用Application Context创建实例。页面启动时调用[getSelectedGrade]恢复年级，通过[getProgress]
+ * 读取本机进度；阅读正文调用[loadArticle]直接获得内置原创内容，不依赖境外接口或网络缓存。
  *
  * @param context Android上下文，内部只保留Application Context对应的Room文档存储。
  */
@@ -46,7 +40,7 @@ class ChineseGrowthRepository(context: Context) {
     }
 
     /**
-     * 保存语文写作和阅读共同使用的年级。
+     * 保存语文写作、阅读和诗词共同使用的年级。
      *
      * @param grade 用户刚选择的有效年级。
      * @return Room文档保存成功返回true，否则返回false。
@@ -56,198 +50,17 @@ class ChineseGrowthRepository(context: Context) {
     }
 
     /**
-     * 取得一个白名单主题的在线摘要、缓存或离线导读。
+     * 取得一篇无需网络的原创精读内容。
      *
      * 使用方法：
-     * 页面首次打开主题时把[forceRefresh]设为false，24小时内直接读取缓存；用户点击“重新联网”时
-     * 传true。请求在IO线程执行，异常不会清除旧缓存，也不会把堆栈或服务端内容直接显示给孩子。
+     * 页面打开内置主题时直接调用。正文来自随APK发布的固定目录，不请求境外接口；需要更多资料时，
+     * 页面另行展示[ChineseReadingTopic.extensionSourceUrl]对应的国内站点，并由用户主动确认打开。
      *
      * @param topic [ChineseGrowthCatalog]提供的固定阅读主题。
-     * @param forceRefresh 是否忽略新鲜缓存并重新联网。
-     * @param nowMillis 当前Unix毫秒时间戳，默认读取系统时间，测试或诊断时可传固定值。
-     * @return 始终包含可展示文章的加载结果；回退缓存或离线导读时附带中文提示。
+     * @return 始终包含可展示内容且没有联网失败状态的加载结果。
      */
-    suspend fun loadArticle(
-        topic: ChineseReadingTopic,
-        forceRefresh: Boolean = false,
-        nowMillis: Long = System.currentTimeMillis()
-    ): ChineseReadingLoadResult = withContext(Dispatchers.IO) {
-        val cachedArticle = readCachedArticle(topic)
-        if (!forceRefresh && cachedArticle != null && isFresh(cachedArticle, nowMillis)) {
-            return@withContext ChineseReadingLoadResult(
-                article = cachedArticle.copy(isFromCache = true)
-            )
-        }
-
-        runCatching {
-            val responseJson = downloadSummary(topic.wikipediaTitle)
-            parseSummary(topic, responseJson, nowMillis).also { article ->
-                saveCachedArticle(article)
-            }
-        }.fold(
-            onSuccess = { article ->
-                ChineseReadingLoadResult(article = article)
-            },
-            onFailure = { error ->
-                Log.e(TAG, "Failed to load Chinese reading article", error)
-                if (cachedArticle != null) {
-                    ChineseReadingLoadResult(
-                        article = cachedArticle.copy(isFromCache = true),
-                        notice = "联网失败，正在显示上次成功缓存的内容"
-                    )
-                } else {
-                    ChineseReadingLoadResult(
-                        article = createOfflineArticle(topic),
-                        notice = "暂时无法联网，正在显示内置导读"
-                    )
-                }
-            }
-        )
-    }
-
-    /**
-     * 建立限时HTTPS连接并读取维基百科公开摘要接口。
-     *
-     * @param pageTitle 白名单中固定的中文百科标题。
-     * @return 服务端UTF-8 JSON文本。
-     * @throws IOException 网络异常、HTTP状态异常、空响应或响应过大时抛出。
-     */
-    private fun downloadSummary(pageTitle: String): String {
-        val encodedTitle = URLEncoder.encode(pageTitle, Charsets.UTF_8.name())
-            .replace("+", "%20")
-        val connection = URL("$SUMMARY_API_PREFIX$encodedTitle").openConnection()
-            as HttpsURLConnection
-        connection.requestMethod = "GET"
-        connection.connectTimeout = CONNECT_TIMEOUT_MILLIS
-        connection.readTimeout = READ_TIMEOUT_MILLIS
-        connection.instanceFollowRedirects = true
-        connection.setRequestProperty("Accept", "application/json")
-        connection.setRequestProperty("User-Agent", USER_AGENT)
-
-        return try {
-            if (connection.responseCode != HttpURLConnection.HTTP_OK) {
-                throw IOException("Unexpected Wikipedia HTTP status: ${connection.responseCode}")
-            }
-            readLimitedUtf8(connection.inputStream).also { response ->
-                if (response.isBlank()) throw IOException("Wikipedia response was empty")
-            }
-        } finally {
-            connection.disconnect()
-        }
-    }
-
-    /**
-     * 把公开接口JSON转换成App内文章，并校验来源仍是中文维基百科HTTPS页面。
-     *
-     * @param topic 当前固定主题。
-     * @param responseJson 接口返回的原始JSON。
-     * @param fetchedAtMillis 本次成功取得内容的时间。
-     * @return 可缓存和展示的在线文章。
-     * @throws IOException 缺少标题、正文或合法来源地址时抛出。
-     */
-    private fun parseSummary(
-        topic: ChineseReadingTopic,
-        responseJson: String,
-        fetchedAtMillis: Long
-    ): ChineseReadingArticle {
-        val root = JSONObject(responseJson)
-        val title = root.optString(JSON_TITLE).trim()
-        val body = root.optString(JSON_EXTRACT).trim()
-        val description = root.optString(JSON_DESCRIPTION).trim()
-        val sourceUrl = root.optJSONObject(JSON_CONTENT_URLS)
-            ?.optJSONObject(JSON_DESKTOP)
-            ?.optString(JSON_PAGE)
-            ?.trim()
-            .orEmpty()
-        if (title.isBlank() || body.isBlank()) {
-            throw IOException("Wikipedia response missed title or extract")
-        }
-        if (!sourceUrl.startsWith(ALLOWED_SOURCE_PREFIX)) {
-            throw IOException("Wikipedia response contained an unexpected source URL")
-        }
-        return ChineseReadingArticle(
-            topicId = topic.id,
-            title = title,
-            description = description,
-            body = body.take(MAX_ARTICLE_CHARACTERS),
-            sourceName = SOURCE_NAME,
-            sourceUrl = sourceUrl,
-            licenseLabel = SOURCE_LICENSE,
-            fetchedAtMillis = fetchedAtMillis,
-            isOnlineContent = true,
-            isFromCache = false
-        )
-    }
-
-    /**
-     * 在固定字符上限内读取响应，防止异常服务端占满内存。
-     *
-     * @param inputStream HTTPS响应流，函数结束时自动关闭。
-     * @return 未超过上限的完整JSON文本。
-     * @throws IOException 响应超过上限时抛出。
-     */
-    private fun readLimitedUtf8(inputStream: InputStream): String {
-        return InputStreamReader(inputStream, Charsets.UTF_8).use { reader ->
-            val result = StringBuilder()
-            val buffer = CharArray(RESPONSE_BUFFER_CHARACTERS)
-            while (true) {
-                val readCount = reader.read(buffer)
-                if (readCount < 0) break
-                if (result.length + readCount > MAX_RESPONSE_CHARACTERS) {
-                    throw IOException("Wikipedia response exceeded size limit")
-                }
-                result.append(buffer, 0, readCount)
-            }
-            result.toString()
-        }
-    }
-
-    /** 读取并校验一个主题的本地在线内容缓存。 */
-    private fun readCachedArticle(topic: ChineseReadingTopic): ChineseReadingArticle? {
-        val storedValue = documentStore.getString(NAMESPACE, "$ARTICLE_KEY_PREFIX${topic.id}")
-            ?: return null
-        return runCatching {
-            val root = JSONObject(storedValue)
-            val article = ChineseReadingArticle(
-                topicId = root.optString(JSON_TOPIC_ID),
-                title = root.optString(JSON_TITLE),
-                description = root.optString(JSON_DESCRIPTION),
-                body = root.optString(JSON_BODY),
-                sourceName = root.optString(JSON_SOURCE_NAME),
-                sourceUrl = root.optString(JSON_SOURCE_URL),
-                licenseLabel = root.optString(JSON_LICENSE),
-                fetchedAtMillis = root.optLong(JSON_FETCHED_AT, 0L),
-                isOnlineContent = true,
-                isFromCache = true
-            )
-            article.takeIf {
-                it.topicId == topic.id &&
-                    it.title.isNotBlank() &&
-                    it.body.isNotBlank() &&
-                    it.sourceUrl.startsWith(ALLOWED_SOURCE_PREFIX)
-            }
-        }.getOrElse { error ->
-            Log.e(TAG, "Failed to parse Chinese reading cache", error)
-            null
-        }
-    }
-
-    /** 保存一次成功联网取得的文章缓存。 */
-    private fun saveCachedArticle(article: ChineseReadingArticle): Boolean {
-        val root = JSONObject()
-            .put(JSON_TOPIC_ID, article.topicId)
-            .put(JSON_TITLE, article.title)
-            .put(JSON_DESCRIPTION, article.description)
-            .put(JSON_BODY, article.body)
-            .put(JSON_SOURCE_NAME, article.sourceName)
-            .put(JSON_SOURCE_URL, article.sourceUrl)
-            .put(JSON_LICENSE, article.licenseLabel)
-            .put(JSON_FETCHED_AT, article.fetchedAtMillis)
-        return documentStore.putString(
-            namespace = NAMESPACE,
-            key = "$ARTICLE_KEY_PREFIX${article.topicId}",
-            value = root.toString()
-        )
+    fun loadArticle(topic: ChineseReadingTopic): ChineseReadingLoadResult {
+        return ChineseReadingLoadResult(article = createOfflineArticle(topic))
     }
 
     /** 创建不依赖网络、明确标记为原创导读的文章。 */
@@ -266,40 +79,185 @@ class ChineseGrowthRepository(context: Context) {
         )
     }
 
-    /** 判断在线文章缓存是否处于24小时有效期内。 */
-    private fun isFresh(article: ChineseReadingArticle, nowMillis: Long): Boolean {
-        val ageMillis = nowMillis - article.fetchedAtMillis
-        return article.fetchedAtMillis > 0L && ageMillis in 0 until CACHE_VALID_MILLIS
+    /**
+     * 读取语文成长的累计、本周和连续学习进度。
+     *
+     * 使用方法：
+     * 页面首次进入以及完成任一内容后调用。连续天数允许“今天尚未学习但昨天仍连续”的自然状态，
+     * 一旦最近学习日早于昨天就归零。本函数只读本机Room数据。
+     *
+     * @param currentEpochDay 当前自然日，默认使用设备本地日期；测试时可传固定值。
+     * @return 可直接展示的进度摘要，数据损坏时返回全零状态。
+     */
+    fun getProgress(
+        currentEpochDay: Long = LocalDate.now().toEpochDay()
+    ): ChineseGrowthProgress {
+        val completionDates = readCompletionDates()
+        val studyEventDays = readStudyEventDays().ifEmpty { completionDates.values.toList() }
+        return ChineseGrowthProgress(
+            completedContentIds = completionDates.keys,
+            totalCompletedCount = completionDates.size,
+            weeklyCompletedCount = countRecentChineseGrowthEvents(
+                studyEpochDays = studyEventDays,
+                currentEpochDay = currentEpochDay
+            ),
+            streakDays = calculateChineseGrowthStreakDays(
+                studyEpochDays = studyEventDays,
+                currentEpochDay = currentEpochDay
+            )
+        )
+    }
+
+    /**
+     * 把一项已完成内容记录到本机学习进度。
+     *
+     * 使用方法：
+     * 仅在用户明确点击“完成”后调用；重复完成同一内容保持首次完成日期，不重复增加累计数量。
+     * 未出现在当前内置目录中的标识会被拒绝，避免任意字符串污染进度文档。
+     *
+     * @param contentId 写作任务、阅读主题或诗词课程的稳定标识。
+     * @param currentEpochDay 完成时的设备本地自然日，默认读取今天。
+     * @return 内容已记录或此前已经完成时返回true；标识无效或Room写入失败时返回false。
+     */
+    fun markContentCompleted(
+        contentId: String,
+        currentEpochDay: Long = LocalDate.now().toEpochDay()
+    ): Boolean {
+        if (contentId !in knownContentIds()) return false
+
+        val completionDates = readCompletionDates().toMutableMap()
+        if (contentId !in completionDates) {
+            completionDates[contentId] = currentEpochDay
+            if (!saveCompletionDates(completionDates)) return false
+        }
+        return saveStudyEvent(contentId, currentEpochDay)
+    }
+
+    /**
+     * 读取一项写作训练此前保存的草稿。
+     *
+     * @param missionId [ChineseGrowthCatalog]中的写作任务稳定标识。
+     * @return 草稿正文；任务无效、未保存或读取失败时返回空字符串。
+     */
+    fun getWritingDraft(missionId: String): String {
+        if (missionId !in knownWritingMissionIds()) return ""
+        return documentStore.getString(NAMESPACE, "$WRITING_DRAFT_PREFIX$missionId").orEmpty()
+    }
+
+    /**
+     * 保存一项写作训练的本机草稿。
+     *
+     * 使用方法：
+     * 页面让用户主动点击保存后调用。空白草稿会删除旧文档；正文超过[WRITING_DRAFT_MAX_CHARS]
+     * 时返回false，避免异常输入持续增大本机数据库。
+     *
+     * @param missionId [ChineseGrowthCatalog]中的写作任务稳定标识。
+     * @param draft 用户当前输入的完整草稿。
+     * @return 保存或删除成功返回true；任务无效、正文过长或Room操作失败时返回false。
+     */
+    fun saveWritingDraft(missionId: String, draft: String): Boolean {
+        if (missionId !in knownWritingMissionIds()) return false
+        if (draft.length > WRITING_DRAFT_MAX_CHARS) return false
+        val key = "$WRITING_DRAFT_PREFIX$missionId"
+        return if (draft.isBlank()) {
+            documentStore.remove(NAMESPACE, key)
+        } else {
+            documentStore.putString(NAMESPACE, key, draft)
+        }
+    }
+
+    /** 读取并严格校验内容标识到完成自然日的JSON文档。 */
+    private fun readCompletionDates(): Map<String, Long> {
+        val storedValue = documentStore.getString(NAMESPACE, COMPLETION_DATES_KEY)
+            ?: return emptyMap()
+        return runCatching {
+            val root = JSONObject(storedValue)
+            val knownIds = knownContentIds()
+            buildMap {
+                val keys = root.keys()
+                while (keys.hasNext()) {
+                    val contentId = keys.next()
+                    val epochDay = root.optLong(contentId, INVALID_EPOCH_DAY)
+                    if (contentId in knownIds && epochDay >= 0L) {
+                        put(contentId, epochDay)
+                    }
+                }
+            }
+        }.getOrElse { error ->
+            Log.e(TAG, "Failed to parse Chinese growth completion dates", error)
+            emptyMap()
+        }
+    }
+
+    /** 把完整完成日期映射一次性写回Room文档。 */
+    private fun saveCompletionDates(completionDates: Map<String, Long>): Boolean {
+        val root = JSONObject()
+        completionDates.toSortedMap().forEach { (contentId, epochDay) ->
+            root.put(contentId, epochDay)
+        }
+        return documentStore.putString(NAMESPACE, COMPLETION_DATES_KEY, root.toString())
+    }
+
+    /** 读取并校验每个“内容加自然日”唯一学习事件的日期。 */
+    private fun readStudyEventDays(): List<Long> {
+        val storedValue = documentStore.getString(NAMESPACE, STUDY_EVENTS_KEY)
+            ?: return emptyList()
+        return runCatching {
+            val root = JSONObject(storedValue)
+            buildList {
+                val keys = root.keys()
+                while (keys.hasNext()) {
+                    val eventId = keys.next()
+                    val epochDay = root.optLong(eventId, INVALID_EPOCH_DAY)
+                    if (eventId.contains(STUDY_EVENT_SEPARATOR) && epochDay >= 0L) {
+                        add(epochDay)
+                    }
+                }
+            }
+        }.getOrElse { error ->
+            Log.e(TAG, "Failed to parse Chinese growth study events", error)
+            emptyList()
+        }
+    }
+
+    /** 保存一次按“同一内容同一天”去重的学习事件，使课程可在以后重复学习并计入周目标。 */
+    private fun saveStudyEvent(contentId: String, currentEpochDay: Long): Boolean {
+        val storedValue = documentStore.getString(NAMESPACE, STUDY_EVENTS_KEY)
+        val root = runCatching { JSONObject(storedValue ?: "{}") }.getOrElse { error ->
+            Log.e(TAG, "Failed to parse Chinese growth events before saving", error)
+            JSONObject()
+        }
+        val eventId = "$contentId$STUDY_EVENT_SEPARATOR$currentEpochDay"
+        if (root.has(eventId)) return true
+        root.put(eventId, currentEpochDay)
+        return documentStore.putString(NAMESPACE, STUDY_EVENTS_KEY, root.toString())
+    }
+
+    /** @return 当前版本全部允许写入进度的稳定内容标识。 */
+    private fun knownContentIds(): Set<String> {
+        return buildSet {
+            ChineseGrowthCatalog.allWritingMissions().mapTo(this) { mission -> mission.id }
+            ChineseGrowthCatalog.allReadingTopics().mapTo(this) { topic -> topic.id }
+            ChineseGrowthCatalog.allClassicLessons().mapTo(this) { lesson -> lesson.id }
+        }
+    }
+
+    /** @return 当前版本允许保存草稿的写作任务稳定标识。 */
+    private fun knownWritingMissionIds(): Set<String> {
+        return ChineseGrowthCatalog.allWritingMissions()
+            .mapTo(mutableSetOf()) { mission -> mission.id }
     }
 
     companion object {
         const val NAMESPACE = "harley_chinese_growth"
+        const val WRITING_DRAFT_MAX_CHARS = 20_000
 
         private const val TAG = "ChineseGrowthRepository"
         private const val SELECTED_GRADE_KEY = "selected_grade"
-        private const val ARTICLE_KEY_PREFIX = "reading_article:"
-        private const val SUMMARY_API_PREFIX = "https://zh.wikipedia.org/api/rest_v1/page/summary/"
-        private const val ALLOWED_SOURCE_PREFIX = "https://zh.wikipedia.org/wiki/"
-        private const val USER_AGENT = "HarleyApp/1.0 Android educational reader"
-        private const val SOURCE_NAME = "中文维基百科参与者"
-        private const val SOURCE_LICENSE = "CC BY-SA 4.0（内容可能经过截短）"
-        private const val CONNECT_TIMEOUT_MILLIS = 8_000
-        private const val READ_TIMEOUT_MILLIS = 12_000
-        private const val CACHE_VALID_MILLIS = 24 * 60 * 60 * 1_000L
-        private const val RESPONSE_BUFFER_CHARACTERS = 4_096
-        private const val MAX_RESPONSE_CHARACTERS = 256_000
-        private const val MAX_ARTICLE_CHARACTERS = 8_000
-        private const val JSON_TOPIC_ID = "topicId"
-        private const val JSON_TITLE = "title"
-        private const val JSON_DESCRIPTION = "description"
-        private const val JSON_EXTRACT = "extract"
-        private const val JSON_CONTENT_URLS = "content_urls"
-        private const val JSON_DESKTOP = "desktop"
-        private const val JSON_PAGE = "page"
-        private const val JSON_BODY = "body"
-        private const val JSON_SOURCE_NAME = "sourceName"
-        private const val JSON_SOURCE_URL = "sourceUrl"
-        private const val JSON_LICENSE = "license"
-        private const val JSON_FETCHED_AT = "fetchedAtMillis"
+        private const val COMPLETION_DATES_KEY = "completion_dates"
+        private const val STUDY_EVENTS_KEY = "study_events"
+        private const val WRITING_DRAFT_PREFIX = "writing_draft:"
+        private const val STUDY_EVENT_SEPARATOR = "@"
+        private const val INVALID_EPOCH_DAY = -1L
     }
 }

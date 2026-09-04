@@ -76,7 +76,8 @@ enum class FeatureCenterPage {
     ENGLISH_WORDS,
     NOTEBOOK,
     EBOOKS,
-    CHINESE_GROWTH
+    CHINESE_GROWTH,
+    QR_SCANNER
 }
 
 /**
@@ -222,6 +223,9 @@ fun FeatureCenterScreen(
             onOpenChineseGrowth = {
                 onPageChanged(FeatureCenterPage.CHINESE_GROWTH)
             },
+            onOpenQrScanner = {
+                onPageChanged(FeatureCenterPage.QR_SCANNER)
+            },
             onOpenWechatReminder = {
                 onPageChanged(FeatureCenterPage.WECHAT_REMINDER)
             },
@@ -334,6 +338,11 @@ fun FeatureCenterScreen(
             repository = chineseGrowthRepository,
             onBack = { onPageChanged(FeatureCenterPage.OVERVIEW) }
         )
+
+        FeatureCenterPage.QR_SCANNER -> QrScannerScreen(
+            modifier = modifier,
+            onBack = { onPageChanged(FeatureCenterPage.OVERVIEW) }
+        )
     }
 }
 
@@ -357,6 +366,7 @@ fun FeatureCenterScreen(
  * @param onOpenEbooks 打开本地电子书书架的回调。
  * @param onOpenEnglishWords 打开离线英语单词学习页的回调。
  * @param onOpenChineseGrowth 打开语文写作与阅读成长页的回调。
+ * @param onOpenQrScanner 打开完全本地识别的二维码扫描页回调。
  *
  * @return 无返回值，直接输出功能入口网格。
  */
@@ -376,6 +386,7 @@ private fun FeatureCenterOverview(
     onOpenEbooks: () -> Unit,
     onOpenEnglishWords: () -> Unit,
     onOpenChineseGrowth: () -> Unit,
+    onOpenQrScanner: () -> Unit,
     onOpenWechatReminder: () -> Unit,
     onOpenGeneralReminder: () -> Unit,
     onOpenLocalCleanup: () -> Unit
@@ -403,6 +414,7 @@ private fun FeatureCenterOverview(
         onOpenEbooks = onOpenEbooks,
         onOpenEnglishWords = onOpenEnglishWords,
         onOpenChineseGrowth = onOpenChineseGrowth,
+        onOpenQrScanner = onOpenQrScanner,
         onOpenWechatReminder = onOpenWechatReminder,
         onOpenGeneralReminder = onOpenGeneralReminder,
         onOpenLocalCleanup = onOpenLocalCleanup
@@ -560,6 +572,7 @@ private data class FeatureEntry(
  * @param onOpenEbooks 打开本地电子书书架的回调。
  * @param onOpenEnglishWords 打开离线英语单词学习页的回调。
  * @param onOpenChineseGrowth 打开语文写作与阅读成长页的回调。
+ * @param onOpenQrScanner 打开完全本地识别的二维码扫描页回调。
  * @param onOpenWechatReminder 打开微信消息提醒的回调。
  * @param onOpenGeneralReminder 打开通知提醒的回调。
  * @param onOpenLocalCleanup 打开手机清理的回调。
@@ -578,6 +591,7 @@ private fun featureCenterEntries(
     onOpenEbooks: () -> Unit,
     onOpenEnglishWords: () -> Unit,
     onOpenChineseGrowth: () -> Unit,
+    onOpenQrScanner: () -> Unit,
     onOpenWechatReminder: () -> Unit,
     onOpenGeneralReminder: () -> Unit,
     onOpenLocalCleanup: () -> Unit
@@ -596,7 +610,8 @@ private fun featureCenterEntries(
         FeatureEntry(HomeFeatureId.ENGLISH_WORDS, "英", "英语单词", "离线词库、例句与发音", onOpenEnglishWords),
         FeatureEntry(HomeFeatureId.NOTEBOOK, "记", "记事本", "富内容文章、查询与往期回顾", onOpenNotebook),
         FeatureEntry(HomeFeatureId.EBOOKS, "书", "电子书", "导入书籍、多种翻页与阅读进度", onOpenEbooks),
-        FeatureEntry(HomeFeatureId.CHINESE_GROWTH, "文", "语文成长", "分级写作训练与精选阅读", onOpenChineseGrowth)
+        FeatureEntry(HomeFeatureId.CHINESE_GROWTH, "文", "语文成长", "分级写作训练与精选阅读", onOpenChineseGrowth),
+        FeatureEntry(HomeFeatureId.QR_SCANNER, "码", "二维码扫描", "本地识别相机与相册二维码", onOpenQrScanner)
     )
 }
 

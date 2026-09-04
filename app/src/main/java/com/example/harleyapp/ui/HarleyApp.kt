@@ -1190,6 +1190,11 @@ fun HarleyApp(
                             featureCenterPageName = FeatureCenterPage.CHINESE_GROWTH.name
                             currentSectionName = AppSection.FEATURES.name
                         }
+
+                        HomeFeatureId.QR_SCANNER -> {
+                            featureCenterPageName = FeatureCenterPage.QR_SCANNER.name
+                            currentSectionName = AppSection.FEATURES.name
+                        }
                     }
                 },
                 englishWord = homeEnglishWord,
@@ -1328,6 +1333,11 @@ fun HarleyApp(
                     pendingGlobalSearchQuery = query
                     detailReturnSectionName = AppSection.HOME.name
                     currentSectionName = AppSection.SEARCH.name
+                },
+                onOpenQrScanner = {
+                    detailReturnSectionName = AppSection.HOME.name
+                    featureCenterPageName = FeatureCenterPage.QR_SCANNER.name
+                    currentSectionName = AppSection.FEATURES.name
                 }
             )
 
