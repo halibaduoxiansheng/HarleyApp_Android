@@ -649,6 +649,14 @@ private fun homeFeatureEntries(
             symbol = "书",
             statusLabel = "离线",
             onClick = { onOpenFeature(HomeFeatureId.EBOOKS) }
+        ),
+        HomeFeatureEntry(
+            id = HomeFeatureId.CHINESE_GROWTH,
+            title = "语文成长",
+            description = "写作训练与精选阅读",
+            symbol = "文",
+            statusLabel = "分级",
+            onClick = { onOpenFeature(HomeFeatureId.CHINESE_GROWTH) }
         )
     )
 }

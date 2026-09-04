@@ -65,6 +65,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.example.harleyapp.backup.AppBackupManager
+import com.example.harleyapp.data.ChineseGrowthRepository
 import com.example.harleyapp.data.CompanionRepository
 import com.example.harleyapp.data.DeveloperModeRepository
 import com.example.harleyapp.data.EnglishWordRepository
@@ -94,6 +95,7 @@ import com.example.harleyapp.model.LaunchableApp
 import com.example.harleyapp.model.LedgerEntry
 import com.example.harleyapp.model.LocalCleanupStatus
 import com.example.harleyapp.model.LocalSearchType
+import com.example.harleyapp.model.PrimaryEnglishSelection
 import com.example.harleyapp.model.ScheduledReminder
 import com.example.harleyapp.model.WebsiteBookmarkSaveResult
 import com.example.harleyapp.model.WebsiteLibrary
@@ -104,6 +106,7 @@ import com.example.harleyapp.model.WechatReminderSettings
 import com.example.harleyapp.model.WechatReminderStatus
 import com.example.harleyapp.model.homeCarouselWebsites
 import com.example.harleyapp.model.normalizeWebsiteUrl
+import com.example.harleyapp.model.primaryEnglishWordsForSelection
 import com.example.harleyapp.notification.NotificationAlertChannels
 import com.example.harleyapp.notification.WechatReminderScheduler
 import com.example.harleyapp.notification.NotificationTestController
@@ -471,6 +474,9 @@ fun HarleyApp(
     val ebookRepository = remember {
         EbookRepository(applicationContext)
     }
+    val chineseGrowthRepository = remember {
+        ChineseGrowthRepository(applicationContext)
+    }
     val backupManager = remember {
         AppBackupManager(applicationContext)
     }
@@ -596,14 +602,21 @@ fun HarleyApp(
     val initialEnglishWords = remember {
         englishWordRepository.getWords()
     }
+    val initialEnglishSelection = remember {
+        englishWordRepository.getLearningSelection()
+    }
     var englishWords by remember {
         mutableStateOf(initialEnglishWords)
+    }
+    var englishLearningSelection by remember {
+        mutableStateOf(initialEnglishSelection)
     }
     var homeEnglishWordId by rememberSaveable {
         mutableStateOf(
             englishWordRepository.chooseNextWord(
                 words = initialEnglishWords,
-                previousWordId = null
+                previousWordId = null,
+                selection = initialEnglishSelection
             )?.id
         )
     }
@@ -704,12 +717,29 @@ fun HarleyApp(
             )
         }
     }
-    val homeEnglishWord = englishWords.firstOrNull { word ->
+    val homeEnglishScope = primaryEnglishWordsForSelection(
+        words = englishWords,
+        selection = englishLearningSelection
+    )
+    val homeEnglishWord = homeEnglishScope.firstOrNull { word ->
         word.id == homeEnglishWordId && word.learnedCount < ENGLISH_WORD_MASTERY_COUNT
     } ?: englishWordRepository.chooseNextWord(
         words = englishWords,
-        previousWordId = homeEnglishWordId
+        previousWordId = homeEnglishWordId,
+        selection = englishLearningSelection
     )
+    val saveEnglishLearningSelection: (PrimaryEnglishSelection) -> Boolean = { newSelection ->
+        val saved = englishWordRepository.saveLearningSelection(newSelection)
+        if (saved) {
+            englishLearningSelection = newSelection
+            homeEnglishWordId = englishWordRepository.chooseNextWord(
+                words = englishWords,
+                previousWordId = null,
+                selection = newSelection
+            )?.id
+        }
+        saved
+    }
     val markEnglishWordLearned: (String) -> Boolean = { wordId ->
         val saved = englishWordRepository.markLearned(wordId)
         if (saved) {
@@ -717,7 +747,8 @@ fun HarleyApp(
             englishWords = refreshedWords
             homeEnglishWordId = englishWordRepository.chooseNextWord(
                 words = refreshedWords,
-                previousWordId = wordId
+                previousWordId = wordId,
+                selection = englishLearningSelection
             )?.id
             companionProgress = companionRepository.claimTask(
                 task = CompanionTask.ENGLISH_LEARN,
@@ -733,7 +764,8 @@ fun HarleyApp(
             englishWords = refreshedWords
             homeEnglishWordId = englishWordRepository.chooseNextWord(
                 words = refreshedWords,
-                previousWordId = homeEnglishWordId
+                previousWordId = homeEnglishWordId,
+                selection = englishLearningSelection
             )?.id
         }
         saved
@@ -1153,10 +1185,15 @@ fun HarleyApp(
                             featureCenterPageName = FeatureCenterPage.EBOOKS.name
                             currentSectionName = AppSection.FEATURES.name
                         }
+
+                        HomeFeatureId.CHINESE_GROWTH -> {
+                            featureCenterPageName = FeatureCenterPage.CHINESE_GROWTH.name
+                            currentSectionName = AppSection.FEATURES.name
+                        }
                     }
                 },
                 englishWord = homeEnglishWord,
-                englishRemainingCount = englishWords.count { word ->
+                englishRemainingCount = homeEnglishScope.count { word ->
                     word.learnedCount < ENGLISH_WORD_MASTERY_COUNT
                 },
                 englishTtsState = englishTtsState,
@@ -1419,10 +1456,13 @@ fun HarleyApp(
                     selectedPackages = shortcutRepository.getSelectedPackages()
                     selectedHomeFeatures = homeFeatureRepository.getSelectedFeatures()
                     val restoredEnglishWords = englishWordRepository.getWords()
+                    val restoredEnglishSelection = englishWordRepository.getLearningSelection()
                     englishWords = restoredEnglishWords
+                    englishLearningSelection = restoredEnglishSelection
                     homeEnglishWordId = englishWordRepository.chooseNextWord(
                         words = restoredEnglishWords,
-                        previousWordId = null
+                        previousWordId = null,
+                        selection = restoredEnglishSelection
                     )?.id
 
                     val restoredWebsiteLibrary = websiteRepository.getLibrary()
@@ -1540,6 +1580,8 @@ fun HarleyApp(
                     currentSectionName = AppSection.BACKUP.name
                 },
                 englishWords = englishWords,
+                englishSelection = englishLearningSelection,
+                onEnglishSelectionChanged = saveEnglishLearningSelection,
                 englishTtsState = englishTtsState,
                 onSpeakEnglish = offlineEnglishTts::speak,
                 onMarkEnglishWordLearned = markEnglishWordLearned,
@@ -1548,6 +1590,7 @@ fun HarleyApp(
                 initialNotebookArticleId = searchNotebookArticleTargetId.ifBlank { null },
                 initialEbookId = searchEbookTargetId.ifBlank { null },
                 ebookRepository = ebookRepository,
+                chineseGrowthRepository = chineseGrowthRepository,
                 onEbookImmersiveChanged = { immersive ->
                     isEbookImmersive = immersive
                 },

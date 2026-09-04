@@ -215,6 +215,10 @@ fun ProfileScreen(
         }
 
         item {
+            ChargingEffectSettingsCard()
+        }
+
+        item {
             AppLockSettingsCard(repository = appLockRepository)
         }
 

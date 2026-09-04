@@ -1039,6 +1039,7 @@ class AppBackupManager(context: Context) {
         const val PREF_WEBSITE_TOOLS = "harley_website_tools"
         const val PREF_NOTEBOOK = "harley_notebook"
         const val DOCUMENT_ENGLISH_WORD_PROGRESS = "harley_english_words"
+        const val DOCUMENT_CHINESE_GROWTH = "harley_chinese_growth"
         const val PREF_WECHAT_REMINDER = "harley_wechat_message_reminder"
         const val PREF_WECHAT_LEGACY = "harley_wechat_auto_reply"
         const val PREF_CLEANUP = "harley_local_cleanup"
@@ -1074,7 +1075,8 @@ class AppBackupManager(context: Context) {
             PREF_WEBSITES,
             PREF_WEBSITE_TOOLS,
             PREF_NOTEBOOK,
-            DOCUMENT_ENGLISH_WORD_PROGRESS
+            DOCUMENT_ENGLISH_WORD_PROGRESS,
+            DOCUMENT_CHINESE_GROWTH
         )
 
         val EXCLUDED_KEYS = mapOf(

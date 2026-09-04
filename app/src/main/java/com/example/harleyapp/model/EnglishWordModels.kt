@@ -20,6 +20,7 @@ const val ENGLISH_WORD_MASTERY_COUNT = 3
  * @param exampleEn 可选英文例句，也是例句发音时交给TTS的文本。
  * @param exampleZh 可选英文例句中文翻译。
  * @param tags 中考、高考、四六级、牛津核心等词库标签。
+ * @param primaryPlacements 该词条所属的小学年级、册次和推荐顺序；不属于小学分册时为空。
  * @param learnedCount 用户已点击“学会”的次数，范围固定为0至3。
  */
 data class EnglishWord(
@@ -31,6 +32,7 @@ data class EnglishWord(
     val exampleEn: String = "",
     val exampleZh: String = "",
     val tags: List<String> = emptyList(),
+    val primaryPlacements: List<PrimaryEnglishPlacement> = emptyList(),
     val learnedCount: Int
 )
 

@@ -14,6 +14,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.setValue
 import androidx.core.view.WindowCompat
+import com.example.harleyapp.charging.ChargingEffectController
 import com.example.harleyapp.data.AppearanceRepository
 import com.example.harleyapp.data.AppLockRepository
 import com.example.harleyapp.data.CompanionRepository
@@ -55,6 +56,9 @@ class MainActivity : ComponentActivity() {
         NotificationAlertChannels.createAll(
             getSystemService(NotificationManager::class.java)
         )
+
+        // 用户已经开启充电动画时，正常进入App也补充恢复常驻服务，兼容厂商重启后未放行自启动的情况。
+        ChargingEffectController(applicationContext).ensureMonitoring()
 
         setContent {
             val systemDarkTheme = isSystemInDarkTheme()

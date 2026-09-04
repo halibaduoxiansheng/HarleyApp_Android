@@ -14,6 +14,12 @@
     <!-- 后台Alarm触发后短时播放用户选择的系统提示音，服务最多运行五秒并自动退出。 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <!-- 用户主动开启充电动画后，以特殊用途前台服务持续等待物理充电器连接事件。 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- 充电效果需要用户在系统页面单独允许显示在其他应用上层。 -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <!-- 插入充电器时允许短时充电Activity点亮完全息屏的手机。 -->
+    <uses-permission android:name="android.permission.TURN_SCREEN_ON" />
     <!-- OTA下载完成后仍由用户在Android系统安装界面确认，不执行静默安装。 -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <!-- Android 12及以上需要用户在系统页面单独允许，定时提醒才能避开较大的非精确时间窗口。 -->
@@ -74,6 +80,17 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!--
+            充电器接入后最多显示2.5秒，只展示系统公开电池数据；页面可覆盖锁屏但不会请求解锁设备。
+            excludeFromRecents避免短时视觉效果污染最近任务列表。
+        -->
+        <activity
+            android:name=".charging.ChargingEffectActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:theme="@style/Theme.HarleyApp.ChargingEffect" />
 
         <!--
             用户从健康数据共享授权页点击隐私政策时，显示本App读取步数的用途和本地处理方式。
@@ -137,6 +154,29 @@
             android:name=".notification.ReminderAlertPlaybackService"
             android:exported="false"
             android:foregroundServiceType="mediaPlayback" />
+
+        <!--
+            用户开启后常驻等待充电连接，必须持续显示低重要性通知；不采集位置、麦克风或其他App数据。
+        -->
+        <service
+            android:name=".charging.ChargingMonitorService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="User-enabled charger connection monitoring for a 2.5-second battery status effect" />
+        </service>
+
+        <!-- 手机重启或App升级后，仅在用户原本已经开启功能时恢复充电监控。 -->
+        <receiver
+            android:name=".charging.ChargingMonitorBootReceiver"
+            android:enabled="true"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
 
         <!-- 只接收本应用创建的显式Alarm广播，用于重复展示未查看微信消息提醒。 -->
         <receiver

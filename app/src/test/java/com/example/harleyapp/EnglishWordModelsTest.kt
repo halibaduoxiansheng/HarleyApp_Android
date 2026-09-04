@@ -3,7 +3,12 @@ package com.example.harleyapp
 import com.example.harleyapp.model.ENGLISH_WORD_ALL_STAGES
 import com.example.harleyapp.model.EnglishLearningStage
 import com.example.harleyapp.model.EnglishWord
+import com.example.harleyapp.model.PrimaryEnglishPlacement
+import com.example.harleyapp.model.PrimaryEnglishSelection
+import com.example.harleyapp.model.PrimarySchoolGrade
+import com.example.harleyapp.model.SchoolTerm
 import com.example.harleyapp.model.chooseNextEnglishWord
+import com.example.harleyapp.model.primaryEnglishWordsForSelection
 import com.example.harleyapp.model.resolveEnglishLearningExample
 import com.example.harleyapp.model.searchEnglishWords
 import org.junit.Assert.assertEquals
@@ -160,6 +165,55 @@ class EnglishWordModelsTest {
         assertEquals(false, example.isGenerated)
         assertEquals("She has the ability to learn quickly.", example.english)
         assertEquals("她有快速学习的能力。", example.chinese)
+    }
+
+    /**
+     * 年级推荐必须只保留当前册词条，并按照分册位置恢复顺序。
+     *
+     * @return 无返回值；跨册词混入或顺序错误时由JUnit报告失败。
+     */
+    @Test
+    fun primaryRecommendationFiltersAndSortsSelectedBook() {
+        val targetSelection = PrimaryEnglishSelection(
+            grade = PrimarySchoolGrade.GRADE_FOUR,
+            term = SchoolTerm.SECOND
+        )
+        val words = listOf(
+            testWord(id = "second", learnedCount = 0).copy(
+                primaryPlacements = listOf(
+                    PrimaryEnglishPlacement(
+                        grade = PrimarySchoolGrade.GRADE_FOUR,
+                        term = SchoolTerm.SECOND,
+                        orderInBook = 2,
+                        isOfficialPepSeries = true
+                    )
+                )
+            ),
+            testWord(id = "other", learnedCount = 0).copy(
+                primaryPlacements = listOf(
+                    PrimaryEnglishPlacement(
+                        grade = PrimarySchoolGrade.GRADE_FIVE,
+                        term = SchoolTerm.SECOND,
+                        orderInBook = 0,
+                        isOfficialPepSeries = true
+                    )
+                )
+            ),
+            testWord(id = "first", learnedCount = 0).copy(
+                primaryPlacements = listOf(
+                    PrimaryEnglishPlacement(
+                        grade = PrimarySchoolGrade.GRADE_FOUR,
+                        term = SchoolTerm.SECOND,
+                        orderInBook = 1,
+                        isOfficialPepSeries = true
+                    )
+                )
+            )
+        )
+
+        val result = primaryEnglishWordsForSelection(words, targetSelection)
+
+        assertEquals(listOf("first", "second"), result.map { word -> word.id })
     }
 
     /**

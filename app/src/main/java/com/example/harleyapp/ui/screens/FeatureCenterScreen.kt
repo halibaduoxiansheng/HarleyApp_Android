@@ -47,10 +47,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import com.example.harleyapp.model.HomeFeatureId
+import com.example.harleyapp.data.ChineseGrowthRepository
 import com.example.harleyapp.data.EbookRepository
 import com.example.harleyapp.model.EnglishWord
 import com.example.harleyapp.model.LocalCleanupResult
 import com.example.harleyapp.model.LocalCleanupStatus
+import com.example.harleyapp.model.PrimaryEnglishSelection
 import com.example.harleyapp.model.ScheduledReminder
 import com.example.harleyapp.model.WechatReminderSettings
 import com.example.harleyapp.model.WechatReminderStatus
@@ -73,7 +75,8 @@ enum class FeatureCenterPage {
     LOCAL_CLEANUP,
     ENGLISH_WORDS,
     NOTEBOOK,
-    EBOOKS
+    EBOOKS,
+    CHINESE_GROWTH
 }
 
 /**
@@ -95,6 +98,8 @@ enum class FeatureCenterPage {
  * @param onOpenSearch 打开全局本地搜索页面的回调。
  * @param onOpenBackup 打开跨手机本地备份页面的回调。
  * @param englishWords 已合并本机学习进度的完整离线单词列表。
+ * @param englishSelection 当前小学英语年级、册次和词库范围。
+ * @param onEnglishSelectionChanged 保存英语学习选择并刷新首页推荐的回调。
  * @param englishTtsState Android离线英语TTS当前状态。
  * @param onSpeakEnglish 朗读英文单词或例句的回调。
  * @param onMarkEnglishWordLearned 把指定单词学习次数增加一次的回调。
@@ -103,6 +108,7 @@ enum class FeatureCenterPage {
  * @param initialNotebookArticleId 全局搜索要求直接打开的记事本文章id。
  * @param initialEbookId 全局搜索要求直接打开的电子书id。
  * @param ebookRepository 电子书原文件、离线索引和阅读进度仓库。
+ * @param chineseGrowthRepository 语文年级选择、在线阅读和缓存仓库。
  * @param onEbookImmersiveChanged 电子书沉浸阅读状态变化回调，用于隐藏或恢复App底部导航栏。
  * @param onNotebookArticlePublished 新草稿首次正式发布成功后的伙伴成长回调。
  * @param onEbookReadingDuration 电子书阅读器前台有效阅读毫秒数回调。
@@ -150,6 +156,8 @@ fun FeatureCenterScreen(
     onOpenSearch: () -> Unit,
     onOpenBackup: () -> Unit,
     englishWords: List<EnglishWord>,
+    englishSelection: PrimaryEnglishSelection,
+    onEnglishSelectionChanged: (PrimaryEnglishSelection) -> Boolean,
     englishTtsState: OfflineEnglishTtsState,
     onSpeakEnglish: (String) -> Boolean,
     onMarkEnglishWordLearned: (String) -> Boolean,
@@ -158,6 +166,7 @@ fun FeatureCenterScreen(
     initialNotebookArticleId: String?,
     initialEbookId: String?,
     ebookRepository: EbookRepository,
+    chineseGrowthRepository: ChineseGrowthRepository,
     onEbookImmersiveChanged: (Boolean) -> Unit,
     onNotebookArticlePublished: () -> Unit,
     onEbookReadingDuration: (Long) -> Unit,
@@ -209,6 +218,9 @@ fun FeatureCenterScreen(
             },
             onOpenEnglishWords = {
                 onPageChanged(FeatureCenterPage.ENGLISH_WORDS)
+            },
+            onOpenChineseGrowth = {
+                onPageChanged(FeatureCenterPage.CHINESE_GROWTH)
             },
             onOpenWechatReminder = {
                 onPageChanged(FeatureCenterPage.WECHAT_REMINDER)
@@ -288,6 +300,8 @@ fun FeatureCenterScreen(
         FeatureCenterPage.ENGLISH_WORDS -> EnglishWordLearningScreen(
             modifier = modifier,
             words = englishWords,
+            selection = englishSelection,
+            onSelectionChanged = onEnglishSelectionChanged,
             ttsState = englishTtsState,
             onSpeakEnglish = onSpeakEnglish,
             onMarkLearned = onMarkEnglishWordLearned,
@@ -314,6 +328,12 @@ fun FeatureCenterScreen(
             onReadingDuration = onEbookReadingDuration,
             onBack = { onPageChanged(FeatureCenterPage.OVERVIEW) }
         )
+
+        FeatureCenterPage.CHINESE_GROWTH -> ChineseGrowthScreen(
+            modifier = modifier,
+            repository = chineseGrowthRepository,
+            onBack = { onPageChanged(FeatureCenterPage.OVERVIEW) }
+        )
     }
 }
 
@@ -336,6 +356,7 @@ fun FeatureCenterScreen(
  * @param onOpenNotebook 打开富内容记事本的回调。
  * @param onOpenEbooks 打开本地电子书书架的回调。
  * @param onOpenEnglishWords 打开离线英语单词学习页的回调。
+ * @param onOpenChineseGrowth 打开语文写作与阅读成长页的回调。
  *
  * @return 无返回值，直接输出功能入口网格。
  */
@@ -354,6 +375,7 @@ private fun FeatureCenterOverview(
     onOpenNotebook: () -> Unit,
     onOpenEbooks: () -> Unit,
     onOpenEnglishWords: () -> Unit,
+    onOpenChineseGrowth: () -> Unit,
     onOpenWechatReminder: () -> Unit,
     onOpenGeneralReminder: () -> Unit,
     onOpenLocalCleanup: () -> Unit
@@ -380,6 +402,7 @@ private fun FeatureCenterOverview(
         onOpenNotebook = onOpenNotebook,
         onOpenEbooks = onOpenEbooks,
         onOpenEnglishWords = onOpenEnglishWords,
+        onOpenChineseGrowth = onOpenChineseGrowth,
         onOpenWechatReminder = onOpenWechatReminder,
         onOpenGeneralReminder = onOpenGeneralReminder,
         onOpenLocalCleanup = onOpenLocalCleanup
@@ -536,6 +559,7 @@ private data class FeatureEntry(
  * @param onOpenNotebook 打开富内容记事本的回调。
  * @param onOpenEbooks 打开本地电子书书架的回调。
  * @param onOpenEnglishWords 打开离线英语单词学习页的回调。
+ * @param onOpenChineseGrowth 打开语文写作与阅读成长页的回调。
  * @param onOpenWechatReminder 打开微信消息提醒的回调。
  * @param onOpenGeneralReminder 打开通知提醒的回调。
  * @param onOpenLocalCleanup 打开手机清理的回调。
@@ -553,6 +577,7 @@ private fun featureCenterEntries(
     onOpenNotebook: () -> Unit,
     onOpenEbooks: () -> Unit,
     onOpenEnglishWords: () -> Unit,
+    onOpenChineseGrowth: () -> Unit,
     onOpenWechatReminder: () -> Unit,
     onOpenGeneralReminder: () -> Unit,
     onOpenLocalCleanup: () -> Unit
@@ -570,7 +595,8 @@ private fun featureCenterEntries(
         FeatureEntry(HomeFeatureId.LOCAL_CLEANUP, "清", "手机清理", "缓存统计与存储管理", onOpenLocalCleanup),
         FeatureEntry(HomeFeatureId.ENGLISH_WORDS, "英", "英语单词", "离线词库、例句与发音", onOpenEnglishWords),
         FeatureEntry(HomeFeatureId.NOTEBOOK, "记", "记事本", "富内容文章、查询与往期回顾", onOpenNotebook),
-        FeatureEntry(HomeFeatureId.EBOOKS, "书", "电子书", "导入书籍、多种翻页与阅读进度", onOpenEbooks)
+        FeatureEntry(HomeFeatureId.EBOOKS, "书", "电子书", "导入书籍、多种翻页与阅读进度", onOpenEbooks),
+        FeatureEntry(HomeFeatureId.CHINESE_GROWTH, "文", "语文成长", "分级写作训练与精选阅读", onOpenChineseGrowth)
     )
 }
 

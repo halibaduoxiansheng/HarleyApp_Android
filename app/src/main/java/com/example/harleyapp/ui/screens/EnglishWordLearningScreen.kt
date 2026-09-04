@@ -28,6 +28,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -41,43 +42,52 @@ import com.example.harleyapp.model.ENGLISH_WORD_ALL_STAGES
 import com.example.harleyapp.model.ENGLISH_WORD_MASTERY_COUNT
 import com.example.harleyapp.model.EnglishLearningStage
 import com.example.harleyapp.model.EnglishWord
+import com.example.harleyapp.model.EnglishWordLibraryMode
+import com.example.harleyapp.model.PrimaryEnglishSelection
+import com.example.harleyapp.model.PrimarySchoolGrade
+import com.example.harleyapp.model.SchoolTerm
+import com.example.harleyapp.model.primaryEnglishWordsForSelection
 import com.example.harleyapp.model.resolveEnglishLearningExample
 import com.example.harleyapp.model.searchEnglishWords
 import com.example.harleyapp.system.OfflineEnglishTtsState
 
 /**
- * 显示5000词完全离线学习列表、进度分栏、模糊搜索和单词独立详情页。
+ * 显示小学年级分册推荐、5000+词完整离线列表、进度分栏、搜索和单词独立详情页。
  *
  * 使用方法：
- * 功能中心进入英语学习功能时调用。页面默认选择“全部”，用户输入英文前缀、英文片段或中文
- * 释义后会立即筛选，例如输入“goo”会推荐“good”；点击任意结果进入该单词独立学习页。
- * 详情页可以朗读单词、朗读已有例句、增加学习次数或重新开始学习。
+ * 功能中心进入英语学习功能时调用。默认显示用户上次保存的年级和册次，一、二年级明确标为
+ * 启蒙词，三至六年级显示人教PEP（三年级起点）整理词；用户仍可切换到完整词库。输入英文
+ * 前缀、英文片段或中文释义后会立即筛选，点击结果进入独立学习页。
  *
  * @param words 已合并本机进度的完整离线单词列表。
+ * @param selection 用户当前年级、册次和词库范围。
+ * @param onSelectionChanged 保存新选择并刷新首页推荐的回调，成功返回true。
  * @param ttsState Android离线英语TTS当前状态。
  * @param onSpeakEnglish 提交英文朗读的回调，成功返回true。
  * @param onMarkLearned 把指定单词学习次数增加一次的回调，保存成功返回true。
  * @param onResetWord 把指定单词恢复到未学会分栏的回调，保存成功返回true。
- * @param initialWordId 从全局搜索跳入时需要直接打开的单词id；普通进入时传null。
- * @param onInitialWordConsumed 初始单词已处理后的回调，避免下次进入时重复打开旧目标。
  * @param onBack 返回功能中心概览的回调。
  * @param modifier 外部页面安全边距修饰器。
+ * @param initialWordId 从全局搜索跳入时需要直接打开的单词id；普通进入时传null。
+ * @param onInitialWordConsumed 初始单词已处理后的回调，避免下次进入时重复打开旧目标。
  * @return 无返回值，直接输出英语学习列表或当前单词详情页。
  */
 @Composable
 fun EnglishWordLearningScreen(
     words: List<EnglishWord>,
+    selection: PrimaryEnglishSelection,
+    onSelectionChanged: (PrimaryEnglishSelection) -> Boolean,
     ttsState: OfflineEnglishTtsState,
     onSpeakEnglish: (String) -> Boolean,
     onMarkLearned: (String) -> Boolean,
     onResetWord: (String) -> Boolean,
-    initialWordId: String? = null,
-    onInitialWordConsumed: () -> Unit = {},
     onBack: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    initialWordId: String? = null,
+    onInitialWordConsumed: () -> Unit = {}
 ) {
     var selectedStageCount by rememberSaveable {
-        mutableStateOf(ENGLISH_WORD_ALL_STAGES)
+        mutableIntStateOf(ENGLISH_WORD_ALL_STAGES)
     }
     var searchQuery by rememberSaveable {
         mutableStateOf("")
@@ -85,7 +95,24 @@ fun EnglishWordLearningScreen(
     var selectedWordId by rememberSaveable {
         mutableStateOf<String?>(null)
     }
+    var selectionMessage by rememberSaveable {
+        mutableStateOf<String?>(null)
+    }
     val selectedWord = words.firstOrNull { word -> word.id == selectedWordId }
+
+    /**
+     * 尝试保存一个新的筛选选择，失败时保留旧状态并给出提示。
+     *
+     * @param newSelection 用户刚点击形成的新选择。
+     * @return 无返回值，结果通过上层状态和[selectionMessage]展示。
+     */
+    fun requestSelection(newSelection: PrimaryEnglishSelection) {
+        selectionMessage = if (onSelectionChanged(newSelection)) {
+            null
+        } else {
+            "选择保存失败，请稍后重试"
+        }
+    }
 
     // 全局搜索结果只消费一次；先保存有效词条id，再通知宿主清除一次性跳转参数。
     LaunchedEffect(initialWordId, words) {
@@ -119,9 +146,16 @@ fun EnglishWordLearningScreen(
         return
     }
 
-    val displayedWords = remember(words, selectedStageCount, searchQuery) {
+    val scopedWords = remember(words, selection) {
+        if (selection.mode == EnglishWordLibraryMode.FULL_LIBRARY) {
+            words
+        } else {
+            primaryEnglishWordsForSelection(words, selection)
+        }
+    }
+    val displayedWords = remember(scopedWords, selectedStageCount, searchQuery) {
         searchEnglishWords(
-            words = words,
+            words = scopedWords,
             query = searchQuery,
             learnedCount = selectedStageCount
         )
@@ -136,9 +170,89 @@ fun EnglishWordLearningScreen(
     ) {
         EnglishWordPageHeader(
             title = "英语单词",
-            subtitle = "5000词离线词库 · 点击单词进入独立学习页",
+            subtitle = "按年级推荐 · 5000+词离线词库",
             onBack = onBack
         )
+
+        Text(
+            modifier = Modifier.padding(start = 20.dp, top = 12.dp, end = 20.dp),
+            text = "词库范围",
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.Bold
+        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 20.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            EnglishWordLibraryMode.entries.forEach { mode ->
+                FilterChip(
+                    selected = selection.mode == mode,
+                    onClick = {
+                        requestSelection(selection.copy(mode = mode))
+                    },
+                    label = { Text(text = mode.displayName) }
+                )
+            }
+        }
+
+        if (selection.mode == EnglishWordLibraryMode.GRADE_RECOMMENDED) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 20.dp, vertical = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                PrimarySchoolGrade.entries.forEach { grade ->
+                    FilterChip(
+                        selected = selection.grade == grade,
+                        onClick = {
+                            requestSelection(selection.copy(grade = grade))
+                        },
+                        label = { Text(text = grade.displayName) }
+                    )
+                }
+            }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 20.dp, vertical = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                SchoolTerm.entries.forEach { term ->
+                    FilterChip(
+                        selected = selection.term == term,
+                        onClick = {
+                            requestSelection(selection.copy(term = term))
+                        },
+                        label = { Text(text = term.displayName) }
+                    )
+                }
+            }
+            Text(
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 2.dp),
+                text = if (selection.grade.gradeNumber <= 2) {
+                    "${selection.grade.displayName}${selection.term.displayName}为启蒙推荐，共${scopedWords.size}词"
+                } else {
+                    "${selection.grade.displayName}${selection.term.displayName} · 人教PEP（三年级起点）整理，共${scopedWords.size}词"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+
+        selectionMessage?.let { message ->
+            Text(
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 2.dp),
+                text = message,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error
+            )
+        }
 
         OutlinedTextField(
             modifier = Modifier
@@ -170,11 +284,11 @@ fun EnglishWordLearningScreen(
             FilterChip(
                 selected = selectedStageCount == ENGLISH_WORD_ALL_STAGES,
                 onClick = { selectedStageCount = ENGLISH_WORD_ALL_STAGES },
-                label = { Text(text = "全部 ${words.size}") }
+                label = { Text(text = "全部 ${scopedWords.size}") }
             )
 
             EnglishLearningStage.entries.forEach { stage ->
-                val stageWordCount = words.count { word ->
+                val stageWordCount = scopedWords.count { word ->
                     word.learnedCount == stage.learnedCount
                 }
                 FilterChip(
