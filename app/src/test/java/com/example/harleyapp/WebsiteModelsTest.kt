@@ -8,12 +8,17 @@ import com.example.harleyapp.model.resolveDefaultWebsiteId
 import com.example.harleyapp.model.WebsiteFolder
 import com.example.harleyapp.model.WebsiteLibrary
 import com.example.harleyapp.model.WebsiteShortcut
+import com.example.harleyapp.model.BrowserBookmarkNodeSnapshot
+import com.example.harleyapp.model.EDGE_BROWSER_PACKAGE_NAME
+import com.example.harleyapp.model.GOOGLE_APP_PACKAGE_NAME
 import com.example.harleyapp.model.canPlaceWebsiteFolder
 import com.example.harleyapp.model.formatWebsiteThemeColor
 import com.example.harleyapp.model.homeCarouselWebsites
 import com.example.harleyapp.model.isValidWebsiteBackgroundFileName
 import com.example.harleyapp.model.moveWebsiteNodesToFolder
 import com.example.harleyapp.model.parseWebsiteThemeColor
+import com.example.harleyapp.model.resolveBrowserBookmarkPage
+import com.example.harleyapp.model.resolveSharedBrowserPage
 import com.example.harleyapp.model.websiteFolderPath
 import com.example.harleyapp.model.websiteMatchesQuery
 import org.junit.Assert.assertFalse
@@ -29,6 +34,133 @@ import org.junit.Test
  * 在项目根目录执行gradlew testDebugUnitTest，由JUnit自动运行全部测试。
  */
 class WebsiteModelsTest {
+
+    /**
+     * 验证Edge地址栏省略HTTPS时仍能保存完整路径，并优先使用网页标题。
+     *
+     * @return 无返回值；网址、查询参数或标题丢失时由JUnit报告失败。
+     */
+    @Test
+    fun edgeAddressBarResolvesCurrentPageBookmark() {
+        val page = resolveBrowserBookmarkPage(
+            packageName = EDGE_BROWSER_PACKAGE_NAME,
+            nodes = listOf(
+                BrowserBookmarkNodeSnapshot(
+                    resourceId = "com.microsoft.emmx:id/url_bar",
+                    className = "android.widget.EditText",
+                    text = "example.com/news?id=7"
+                ),
+                BrowserBookmarkNodeSnapshot(
+                    className = "android.widget.TextView",
+                    text = "今日新闻",
+                    insideWebView = true
+                )
+            )
+        )
+
+        assertEquals("https://example.com/news?id=7", page?.url)
+        assertEquals("今日新闻", page?.title)
+    }
+
+    /**
+     * 验证Google App地址栏能够读取明确HTTPS网址，正文中的其他链接不会抢占当前页。
+     *
+     * @return 无返回值；选中正文链接或错误标题时由JUnit报告失败。
+     */
+    @Test
+    fun googleAppAddressBarWinsOverPageLinks() {
+        val page = resolveBrowserBookmarkPage(
+            packageName = GOOGLE_APP_PACKAGE_NAME,
+            nodes = listOf(
+                BrowserBookmarkNodeSnapshot(
+                    resourceId = "com.google.android.googlequicksearchbox:id/url_bar",
+                    text = "https://developer.android.com/guide"
+                ),
+                BrowserBookmarkNodeSnapshot(
+                    text = "https://unrelated.example.com",
+                    insideWebView = true
+                )
+            )
+        )
+
+        assertEquals("https://developer.android.com/guide", page?.url)
+        assertEquals("developer.android.com", page?.title)
+    }
+
+    /**
+     * 验证通用浏览器地址栏可以作为厂商浏览器兜底，并拒绝搜索词和内部页面。
+     *
+     * @return 无返回值；普通搜索词被误收藏或合法厂商地址栏无法识别时由JUnit报告失败。
+     */
+    @Test
+    fun genericBrowserResolverRejectsSearchTerms() {
+        val genericPage = resolveBrowserBookmarkPage(
+            packageName = "com.vendor.browser",
+            nodes = listOf(
+                BrowserBookmarkNodeSnapshot(
+                    resourceId = "com.vendor.browser:id/address_bar_text",
+                    text = "www.example.org/articles/1"
+                )
+            )
+        )
+
+        assertEquals("https://www.example.org/articles/1", genericPage?.url)
+        assertNull(
+            resolveBrowserBookmarkPage(
+                packageName = EDGE_BROWSER_PACKAGE_NAME,
+                nodes = listOf(
+                    BrowserBookmarkNodeSnapshot(
+                        resourceId = "com.microsoft.emmx:id/url_bar",
+                        text = "今天有什么新闻"
+                    )
+                )
+            )
+        )
+        assertNull(
+            resolveBrowserBookmarkPage(
+                packageName = EDGE_BROWSER_PACKAGE_NAME,
+                nodes = listOf(
+                    BrowserBookmarkNodeSnapshot(
+                        resourceId = "com.microsoft.emmx:id/url_bar",
+                        text = "edge://newtab"
+                    )
+                )
+            )
+        )
+    }
+
+    /**
+     * 验证系统分享接收器完整保留路径、查询参数和片段，并优先采用浏览器给出的标题。
+     *
+     * @return 无返回值；完整网址或页面标题丢失时由JUnit报告失败。
+     */
+    @Test
+    fun sharedBrowserPageKeepsExactUrlAndTitle() {
+        val page = resolveSharedBrowserPage(
+            sharedText = "https://example.com/harley-test/path?item=7#saved",
+            sharedTitle = "测试文章"
+        )
+
+        assertEquals("https://example.com/harley-test/path?item=7#saved", page?.url)
+        assertEquals("测试文章", page?.title)
+    }
+
+    /**
+     * 验证带说明文字的浏览器分享仍能提取HTTP网址，同时拒绝内部协议和普通文字。
+     *
+     * @return 无返回值；错误内容被收藏或有效网址无法提取时由JUnit报告失败。
+     */
+    @Test
+    fun sharedBrowserPageExtractsOnlyWebUrls() {
+        val page = resolveSharedBrowserPage(
+            sharedText = "推荐页面：https://developer.android.com/guide。"
+        )
+
+        assertEquals("https://developer.android.com/guide", page?.url)
+        assertEquals("developer.android.com", page?.title)
+        assertNull(resolveSharedBrowserPage("edge://newtab"))
+        assertNull(resolveSharedBrowserPage("今天有什么新闻"))
+    }
 
     /**
      * 验证新安装不再自动写入开发者网站、搜书网站或其他代码内置收藏。

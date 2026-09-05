@@ -8,4 +8,7 @@
     <string name="app_name">Harley生活助手</string>
     <string name="wechat_notification_service_name">微信通知助手</string>
     <string name="wechat_notification_service_description">用于本机微信支付自动记账，以及按用户设定的间隔提醒仍保留在通知栏中的普通微信消息。</string>
+    <string name="browser_bookmark_accessibility_service_name">浏览器一键收藏</string>
+    <string name="browser_bookmark_accessibility_service_description">仅在用户点击悬浮球后操作浏览器分享入口；未识别到入口时只读取正文外地址栏，把网页保存到HarleyApp本机收藏。</string>
+    <string name="browser_bookmark_share_target_name">收藏到HarleyApp</string>
 </resources>

@@ -219,6 +219,10 @@ fun ProfileScreen(
         }
 
         item {
+            BrowserBookmarkSettingsCard()
+        }
+
+        item {
             AppLockSettingsCard(repository = appLockRepository)
         }
 

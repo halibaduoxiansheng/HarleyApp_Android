@@ -14,6 +14,20 @@
     <uses-permission
         android:name="android.permission.PACKAGE_USAGE_STATS"
         tools:ignore="ProtectedPermissions" />
+    <!--
+        用户主动进入“文件空间”并在系统特殊权限页确认后，才扫描共享存储中的文件名、大小、
+        修改时间和重复内容摘要；删除与移动仍需App内二次确认，不访问其他App私有数据库。
+    -->
+    <uses-permission
+        android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage" />
+    <!-- Android 10及以下兼容共享存储读取和用户确认后的文件整理。 -->
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- 允许高重要性提醒渠道在用户未关闭系统或渠道振动时提供振动反馈。 -->
     <uses-permission android:name="android.permission.VIBRATE" />
@@ -61,6 +75,13 @@
         <intent>
             <action android:name="android.intent.action.TTS_SERVICE" />
         </intent>
+
+        <!-- 只查询能够处理HTTPS网页的浏览器，用于决定收藏悬浮球是否显示。 -->
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.BROWSABLE" />
+            <data android:scheme="https" />
+        </intent>
     </queries>
 
     <application
@@ -84,6 +105,26 @@
                 <action android:name="android.intent.action.MAIN" />
 
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+            浏览器系统分享的完整网页地址通过透明短时Activity写入现有网站收藏；只接受用户主动
+            选择本目标后的text/plain分享，不读取浏览器历史，也不接收文件或图片。
+        -->
+        <activity
+            android:name=".browser.BrowserBookmarkShareActivity"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:label="@string/browser_bookmark_share_target_name"
+            android:noHistory="true"
+            android:theme="@style/Theme.HarleyApp.BrowserBookmarkShare">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+
+                <data android:mimeType="text/plain" />
             </intent-filter>
         </activity>
 
@@ -150,6 +191,24 @@
             <intent-filter>
                 <action android:name="android.service.notification.NotificationListenerService" />
             </intent-filter>
+        </service>
+
+        <!--
+            用户主动开启后，仅在浏览器前台显示一键收藏悬浮球；只有用户点击时才操作浏览器的
+            分享入口并选择本App接收完整网址。兜底只读取正文外地址栏，不读取密码或网页正文、
+            不记录连续浏览历史，也不上传收藏数据。
+        -->
+        <service
+            android:name=".browser.BrowserBookmarkAccessibilityService"
+            android:exported="true"
+            android:label="@string/browser_bookmark_accessibility_service_name"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/browser_bookmark_accessibility_service" />
         </service>
 
         <!--

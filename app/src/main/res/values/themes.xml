@@ -3,6 +3,19 @@
 
     <style name="Theme.HarleyApp" parent="android:Theme.Material.Light.NoActionBar" />
 
+    <!--
+        浏览器分享接收页不展示独立界面，只在原浏览器上方短暂处理完整网址并用Toast反馈结果。
+        透明、无预览和无切换动画可避免用户点击一键收藏时看到白屏闪烁。
+    -->
+    <style name="Theme.HarleyApp.BrowserBookmarkShare" parent="android:style/Theme.Translucent.NoTitleBar">
+        <item name="android:backgroundDimEnabled">false</item>
+        <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowDisablePreview">true</item>
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowNoTitle">true</item>
+    </style>
+
     <!-- 独立深色主题避免充电Activity创建瞬间继承主界面浅色背景而闪白。 -->
     <style name="Theme.HarleyApp.ChargingEffect" parent="android:Theme.Material.NoActionBar">
         <item name="android:windowActionModeOverlay">true</item>

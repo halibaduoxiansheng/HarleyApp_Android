@@ -41,7 +41,7 @@ class ReminderNotificationDeliveryTest {
                     id = 0L,
                     content = TEST_REMINDER_CONTENT,
                     nextTriggerAtMillis = System.currentTimeMillis() + TRIGGER_DELAY_MILLIS,
-                    repeatIntervalDays = 0
+                    repeatIntervalValue = 0
                 )
             )
             assertNotNull(savedReminder)

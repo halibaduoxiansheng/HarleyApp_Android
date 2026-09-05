@@ -44,7 +44,7 @@ class ReminderRepositoryCrudTest {
                     id = 0L,
                     content = "  $TEST_CONTENT_PREFIX 新增  ",
                     nextTriggerAtMillis = originalTriggerAtMillis,
-                    repeatIntervalDays = 2
+                    repeatIntervalValue = 2
                 )
             )
 
@@ -59,7 +59,7 @@ class ReminderRepositoryCrudTest {
             val edited = created.copy(
                 content = "$TEST_CONTENT_PREFIX 已修改",
                 nextTriggerAtMillis = originalTriggerAtMillis + ONE_DAY_MILLIS,
-                repeatIntervalDays = 5
+                repeatIntervalValue = 5
             )
             val savedEdit = repository.upsertReminder(edited)
             assertEquals(edited, savedEdit)

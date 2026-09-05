@@ -66,6 +66,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.example.harleyapp.backup.AppBackupManager
 import com.example.harleyapp.data.ChineseGrowthRepository
+import com.example.harleyapp.data.BreathHoldRepository
 import com.example.harleyapp.data.CompanionRepository
 import com.example.harleyapp.data.DeveloperModeRepository
 import com.example.harleyapp.data.EnglishWordRepository
@@ -81,6 +82,7 @@ import com.example.harleyapp.data.ReminderRepository
 import com.example.harleyapp.data.ShortcutRepository
 import com.example.harleyapp.data.WebsiteRepository
 import com.example.harleyapp.data.WebsiteCardBackgroundStore
+import com.example.harleyapp.data.WebsiteLibraryChangeNotifier
 import com.example.harleyapp.data.WechatBillImporter
 import com.example.harleyapp.data.WechatReminderRepository
 import com.example.harleyapp.model.CompanionCategory
@@ -115,6 +117,7 @@ import com.example.harleyapp.notification.ReminderSoundRepository
 import com.example.harleyapp.notification.ReminderSoundTarget
 import com.example.harleyapp.reminder.ReminderScheduler
 import com.example.harleyapp.system.DeviceMonitor
+import com.example.harleyapp.system.AppUsageController
 import com.example.harleyapp.system.ExactAlarmAccessController
 import com.example.harleyapp.system.HotTopicLauncher
 import com.example.harleyapp.system.InstalledAppsRepository
@@ -125,6 +128,9 @@ import com.example.harleyapp.system.NotificationSystemSettingsController
 import com.example.harleyapp.system.OfflineEnglishTts
 import com.example.harleyapp.system.OfflineEnglishTtsState
 import com.example.harleyapp.system.SystemStorageController
+import com.example.harleyapp.system.StorageManagementController
+import com.example.harleyapp.ui.screens.AppUsageScreen
+import com.example.harleyapp.ui.screens.BreathHoldGameScreen
 import com.example.harleyapp.ui.screens.FitnessScreen
 import com.example.harleyapp.ui.screens.BackupScreen
 import com.example.harleyapp.ui.screens.FeatureCenterPage
@@ -135,6 +141,7 @@ import com.example.harleyapp.ui.screens.GlobalSearchScreen
 import com.example.harleyapp.ui.screens.HotTopicsScreen
 import com.example.harleyapp.ui.screens.LedgerScreen
 import com.example.harleyapp.ui.screens.MobileDataUsageScreen
+import com.example.harleyapp.ui.screens.StorageManagerScreen
 import com.example.harleyapp.ui.screens.ProfileScreen
 import com.example.harleyapp.ui.screens.ReminderSoundPickerDialog
 import com.example.harleyapp.ui.screens.TodayOverviewScreen
@@ -149,9 +156,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.first
-import java.net.URI
 import java.time.LocalDate
-import java.util.UUID
 
 /**
  * 应用一级页面和卡片详情页的统一导航目标。
@@ -173,6 +178,9 @@ private enum class AppSection(
     TODAY("今日总览", "今", showInBottomNavigation = false),
     HOT_TOPICS("每日热点", "热", showInBottomNavigation = false),
     MOBILE_DATA("手机流量", "流", showInBottomNavigation = false),
+    APP_USAGE("应用使用", "用", showInBottomNavigation = false),
+    STORAGE_MANAGER("文件空间", "盘", showInBottomNavigation = false),
+    BREATH_HOLD("深海憋气", "息", showInBottomNavigation = false),
     FEATURES("功能", "功"),
     SEARCH("全局搜索", "搜", showInBottomNavigation = false),
     BACKUP("本地备份", "备", showInBottomNavigation = false),
@@ -477,6 +485,9 @@ fun HarleyApp(
     val chineseGrowthRepository = remember {
         ChineseGrowthRepository(applicationContext)
     }
+    val breathHoldRepository = remember {
+        BreathHoldRepository(applicationContext)
+    }
     val backupManager = remember {
         AppBackupManager(applicationContext)
     }
@@ -513,6 +524,12 @@ fun HarleyApp(
     }
     val mobileDataUsageController = remember {
         MobileDataUsageController(applicationContext)
+    }
+    val appUsageController = remember {
+        AppUsageController(applicationContext)
+    }
+    val storageManagementController = remember {
+        StorageManagementController(applicationContext)
     }
     val notificationAccessController = remember {
         NotificationAccessController(applicationContext)
@@ -629,6 +646,20 @@ fun HarleyApp(
     }
     var activeWebsiteId by rememberSaveable {
         mutableStateOf(defaultWebsiteId ?: websites.firstOrNull()?.id)
+    }
+
+    // 浏览器悬浮球可能在Activity仍留在后台时写入收藏；收到事件后立即刷新内存状态，返回App无需重启。
+    LaunchedEffect(websiteRepository) {
+        WebsiteLibraryChangeNotifier.changes.collect {
+            val refreshedLibrary = websiteRepository.getLibrary()
+            websiteLibrary = refreshedLibrary
+            defaultWebsiteId = websiteRepository.getDefaultWebsiteId(
+                refreshedLibrary.websites
+            )
+            if (activeWebsiteId == null) {
+                activeWebsiteId = defaultWebsiteId ?: refreshedLibrary.websites.firstOrNull()?.id
+            }
+        }
     }
     var companionProgress by remember {
         mutableStateOf(
@@ -1151,6 +1182,21 @@ fun HarleyApp(
                             currentSectionName = AppSection.MOBILE_DATA.name
                         }
 
+                        HomeFeatureId.APP_USAGE -> {
+                            detailReturnSectionName = AppSection.HOME.name
+                            currentSectionName = AppSection.APP_USAGE.name
+                        }
+
+                        HomeFeatureId.STORAGE_MANAGER -> {
+                            detailReturnSectionName = AppSection.HOME.name
+                            currentSectionName = AppSection.STORAGE_MANAGER.name
+                        }
+
+                        HomeFeatureId.BREATH_HOLD -> {
+                            detailReturnSectionName = AppSection.HOME.name
+                            currentSectionName = AppSection.BREATH_HOLD.name
+                        }
+
                         HomeFeatureId.WECHAT_REMINDER -> {
                             featureCenterPageName = FeatureCenterPage.WECHAT_REMINDER.name
                             currentSectionName = AppSection.FEATURES.name
@@ -1543,6 +1589,30 @@ fun HarleyApp(
                 }
             )
 
+            AppSection.APP_USAGE -> AppUsageScreen(
+                modifier = Modifier.padding(innerPadding),
+                controller = appUsageController,
+                onBack = {
+                    currentSectionName = detailReturnSectionName
+                }
+            )
+
+            AppSection.STORAGE_MANAGER -> StorageManagerScreen(
+                modifier = Modifier.padding(innerPadding),
+                controller = storageManagementController,
+                onBack = {
+                    currentSectionName = detailReturnSectionName
+                }
+            )
+
+            AppSection.BREATH_HOLD -> BreathHoldGameScreen(
+                modifier = Modifier.padding(innerPadding),
+                repository = breathHoldRepository,
+                onBack = {
+                    currentSectionName = detailReturnSectionName
+                }
+            )
+
             AppSection.FEATURES -> FeatureCenterScreen(
                 modifier = Modifier.padding(innerPadding),
                 page = featureCenterPage,
@@ -1576,6 +1646,18 @@ fun HarleyApp(
                 onOpenMobileData = {
                     detailReturnSectionName = AppSection.FEATURES.name
                     currentSectionName = AppSection.MOBILE_DATA.name
+                },
+                onOpenAppUsage = {
+                    detailReturnSectionName = AppSection.FEATURES.name
+                    currentSectionName = AppSection.APP_USAGE.name
+                },
+                onOpenStorageManager = {
+                    detailReturnSectionName = AppSection.FEATURES.name
+                    currentSectionName = AppSection.STORAGE_MANAGER.name
+                },
+                onOpenBreathHold = {
+                    detailReturnSectionName = AppSection.FEATURES.name
+                    currentSectionName = AppSection.BREATH_HOLD.name
                 },
                 onOpenToday = {
                     detailReturnSectionName = AppSection.FEATURES.name
@@ -1906,57 +1988,20 @@ fun HarleyApp(
                     }
                 },
                 onBookmarkCurrentPage = bookmarkCurrentPage@ { pageTitle, pageUrl ->
-                    val normalizedUrl = normalizeWebsiteUrl(pageUrl)
-                        ?: return@bookmarkCurrentPage WebsiteBookmarkSaveResult.INVALID_URL
-                    if (websites.any { savedWebsite ->
-                            normalizeWebsiteUrl(savedWebsite.url) == normalizedUrl
-                        }
-                    ) {
-                        return@bookmarkCurrentPage WebsiteBookmarkSaveResult.ALREADY_SAVED
-                    }
-
-                    val normalizedTitle = pageTitle.trim()
-                        .take(MAX_SCRIPT_BOOKMARK_TITLE_LENGTH)
-                        .ifBlank {
-                            runCatching { URI(normalizedUrl).host }
-                                .getOrNull()
-                                .orEmpty()
-                                .ifBlank { "未命名网站" }
-                        }
-                    val nextRootOrder = (
-                        websiteLibrary.folders
-                            .filter { folder -> folder.parentId == null }
-                            .map { folder -> folder.sortOrder } +
-                            websites
-                                .filter { savedWebsite -> savedWebsite.folderId == null }
-                                .map { savedWebsite -> savedWebsite.sortOrder }
-                        ).maxOrNull()?.plus(10) ?: 0
-                    val bookmarkedWebsite = WebsiteShortcut(
-                        id = UUID.randomUUID().toString(),
-                        title = normalizedTitle,
-                        url = normalizedUrl,
-                        folderId = null,
-                        showOnHome = false,
-                        sortOrder = nextRootOrder
-                    )
-                    val updatedLibrary = websiteLibrary.copy(
-                        websites = websites + bookmarkedWebsite
-                    )
-                    if (!websiteRepository.saveLibrary(updatedLibrary)) {
-                        return@bookmarkCurrentPage WebsiteBookmarkSaveResult.SAVE_FAILED
-                    }
-
-                    websiteLibrary = updatedLibrary
-                    if (defaultWebsiteId == null) {
-                        val defaultSaved = websiteRepository.setDefaultWebsiteId(
-                            websiteId = bookmarkedWebsite.id,
-                            websites = updatedLibrary.websites
+                    val result = websiteRepository.saveBookmarkedPage(pageTitle, pageUrl)
+                    if (result == WebsiteBookmarkSaveResult.SAVED) {
+                        val refreshedLibrary = websiteRepository.getLibrary()
+                        websiteLibrary = refreshedLibrary
+                        defaultWebsiteId = websiteRepository.getDefaultWebsiteId(
+                            refreshedLibrary.websites
                         )
-                        if (defaultSaved) {
-                            defaultWebsiteId = bookmarkedWebsite.id
+                        if (activeWebsiteId == null) {
+                            activeWebsiteId = defaultWebsiteId ?: refreshedLibrary.websites
+                                .firstOrNull()
+                                ?.id
                         }
                     }
-                    WebsiteBookmarkSaveResult.SAVED
+                    result
                 },
                 onManageWebsites = {
                     detailReturnSectionName = AppSection.WEBSITE.name
@@ -2154,6 +2199,3 @@ private val PROJECT_SOURCE_WEBSITE = WebsiteShortcut(
     showOnHome = false,
     sortOrder = Int.MAX_VALUE
 )
-
-/** 脚本收藏网页标题的最大长度，避免异常网页标题撑大收藏卡片和备份文件。 */
-private const val MAX_SCRIPT_BOOKMARK_TITLE_LENGTH = 80

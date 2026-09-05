@@ -4,6 +4,8 @@ import android.content.Context
 import android.util.Log
 import com.example.harleyapp.data.local.RoomBackedPreferences
 import com.example.harleyapp.model.MAX_WEBSITE_FOLDER_DEPTH
+import com.example.harleyapp.model.MAX_BROWSER_BOOKMARK_TITLE_LENGTH
+import com.example.harleyapp.model.WebsiteBookmarkSaveResult
 import com.example.harleyapp.model.WebsiteFolder
 import com.example.harleyapp.model.WebsiteLibrary
 import com.example.harleyapp.model.WebsitePalette
@@ -15,6 +17,8 @@ import com.example.harleyapp.model.normalizeWebsiteThemeColor
 import com.example.harleyapp.model.resolveDefaultWebsiteId
 import org.json.JSONArray
 import org.json.JSONObject
+import java.net.URI
+import java.util.UUID
 
 /**
  * 使用Room文档保存首页网站轮播列表，同时保留SharedPreferences兼容副本。
@@ -208,6 +212,77 @@ class WebsiteRepository(context: Context) {
         }
 
         return success
+    }
+
+    /**
+     * 把App内WebView或外部浏览器识别出的当前网页追加到现有网站收藏。
+     *
+     * 使用方法：
+     * 调用方传入当前页面标题和地址即可。本函数统一完成HTTP/HTTPS校验、重复网址判断、标题
+     * 截断、根目录排序、默认不加入首页以及首次收藏的默认网站设置。无障碍悬浮球与App内
+     * “收藏当前页”必须共用本函数，避免两条入口产生不同的数据规则。
+     *
+     * @param pageTitle 浏览器公开的页面标题；为空时自动使用网址域名。
+     * @param pageUrl 浏览器公开的当前页地址，只接受HTTP或HTTPS。
+     *
+     * @return [WebsiteBookmarkSaveResult.SAVED]表示已写入；其余状态分别表示重复、网址无效或
+     * 本地保存失败。
+     */
+    fun saveBookmarkedPage(
+        pageTitle: String,
+        pageUrl: String
+    ): WebsiteBookmarkSaveResult = synchronized(BOOKMARK_WRITE_LOCK) {
+        val normalizedUrl = normalizeWebsiteUrl(pageUrl)
+            ?: return@synchronized WebsiteBookmarkSaveResult.INVALID_URL
+        val library = getLibrary()
+        if (library.websites.any { website ->
+                normalizeWebsiteUrl(website.url) == normalizedUrl
+            }
+        ) {
+            return@synchronized WebsiteBookmarkSaveResult.ALREADY_SAVED
+        }
+
+        val normalizedTitle = pageTitle.trim()
+            .take(MAX_BROWSER_BOOKMARK_TITLE_LENGTH)
+            .ifBlank {
+                runCatching { URI(normalizedUrl).host }
+                    .getOrNull()
+                    .orEmpty()
+                    .removePrefix("www.")
+                    .ifBlank { "未命名网站" }
+            }
+        val nextRootOrder = (
+            library.folders
+                .filter { folder -> folder.parentId == null }
+                .map { folder -> folder.sortOrder } +
+                library.websites
+                    .filter { website -> website.folderId == null }
+                    .map { website -> website.sortOrder }
+            ).maxOrNull()?.plus(ROOT_BOOKMARK_ORDER_STEP) ?: 0
+        val bookmark = WebsiteShortcut(
+            id = UUID.randomUUID().toString(),
+            title = normalizedTitle,
+            url = normalizedUrl,
+            folderId = null,
+            showOnHome = false,
+            sortOrder = nextRootOrder
+        )
+        val updatedLibrary = library.copy(
+            websites = library.websites + bookmark
+        )
+        if (!saveLibrary(updatedLibrary)) {
+            return@synchronized WebsiteBookmarkSaveResult.SAVE_FAILED
+        }
+
+        if (getDefaultWebsiteId(library.websites) == null) {
+            setDefaultWebsiteId(
+                websiteId = bookmark.id,
+                websites = updatedLibrary.websites
+            )
+        }
+
+        WebsiteLibraryChangeNotifier.notifyChanged()
+        WebsiteBookmarkSaveResult.SAVED
     }
 
     /**
@@ -453,6 +528,9 @@ class WebsiteRepository(context: Context) {
     }
 
     private companion object {
+        /** 同一进程内多个仓库实例追加收藏时共用的锁，避免同时点击造成后写覆盖先写。 */
+        val BOOKMARK_WRITE_LOCK = Any()
+
         const val TAG = "WebsiteRepository"
         const val PREFERENCE_NAME = "harley_websites"
         const val KEY_WEBSITES = "websites"
@@ -469,6 +547,7 @@ class WebsiteRepository(context: Context) {
         const val JSON_SORT_ORDER = "sort_order"
         const val JSON_NAME = "name"
         const val JSON_PARENT_ID = "parent_id"
+        const val ROOT_BOOKMARK_ORDER_STEP = 10
     }
 }
 

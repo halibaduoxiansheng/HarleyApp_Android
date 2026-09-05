@@ -139,6 +139,53 @@ class HarleyAppNavigationTest {
     }
 
     /**
+     * 向上滑动当前页面，供功能中心查找屏幕下方的新入口。
+     *
+     * 使用方法：
+     * 仅在已确认处于功能中心等只读列表页面时调用。滑动坐标根据当前设备像素动态计算，不点击卡片，
+     * 也不修改任何业务数据。
+     *
+     * @return 无返回值；Shell命令完成后短暂等待Compose列表稳定。
+     */
+    private fun swipePageUp() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val displayMetrics = instrumentation.targetContext.resources.displayMetrics
+        val centerX = displayMetrics.widthPixels / 2
+        val startY = (displayMetrics.heightPixels * 0.78f).toInt()
+        val endY = (displayMetrics.heightPixels * 0.28f).toInt()
+        val commandOutput = instrumentation.uiAutomation.executeShellCommand(
+            "input swipe $centerX $startY $centerX $endY 420"
+        )
+        ParcelFileDescriptor.AutoCloseInputStream(commandOutput).use { inputStream ->
+            inputStream.readBytes()
+        }
+        SystemClock.sleep(600L)
+    }
+
+    /**
+     * 在可滚动页面中查找固定文字，未找到时最多向上滑动六次。
+     *
+     * 使用方法：
+     * 功能中心新入口位于旧用户保存顺序的末尾时，调用本函数确保测试不依赖具体屏幕高度。
+     *
+     * @param label 需要完整匹配的固定页面文字。
+     * @return 找到的无障碍节点；六次滑动后仍不存在时由最终waitForNode给出明确失败。
+     */
+    private fun scrollUntilNode(label: String): AccessibilityNodeInfo {
+        val uiAutomation = InstrumentationRegistry.getInstrumentation().uiAutomation
+        repeat(6) {
+            val matchedNode = uiAutomation.rootInActiveWindow?.let { rootNode ->
+                findNodeByLabel(rootNode, label)
+            }
+            if (matchedNode != null) {
+                return matchedNode
+            }
+            swipePageUp()
+        }
+        return waitForNode(label, timeoutMs = 2_000L)
+    }
+
+    /**
      * 验证记账可从功能中心进入，新增账目对话框和返回入口均正常。
      *
      * @return 无返回值；任一关键界面缺失时由测试框架报告失败。
@@ -210,5 +257,45 @@ class HarleyAppNavigationTest {
         waitForNode("微信未查看消息提醒")
         clickNode("← 功能中心")
         waitForNode("功能中心")
+    }
+
+    /**
+     * 验证应用使用、文件空间和深海憋气均可从功能中心进入，并保持无数据污染。
+     *
+     * 使用方法：
+     * 测试只检查固定标题和文件授权说明；憋气确认后在三秒倒计时阶段取消，不进入正式计时、不保存历史；
+     * 文件空间不授予特殊权限、不扫描、不移动也不删除用户文件。
+     *
+     * @return 无返回值；任一入口、标题或安全确认缺失时由测试框架报告失败。
+     */
+    @Test
+    fun personalPhoneToolsNavigationWorksWithoutChangingUserData() {
+        launchMainActivity()
+
+        clickNode("功能")
+        waitForNode("功能中心")
+        scrollUntilNode("应用使用")
+        clickNode("应用使用")
+        waitForNode("看见时间去了哪里")
+        waitForNode("最近7天趋势")
+        clickNode("‹ 返回")
+
+        waitForNode("功能中心")
+        scrollUntilNode("文件空间")
+        clickNode("文件空间")
+        waitForNode("看清占用，再决定整理")
+        waitForNode("需要文件管理权限")
+        clickNode("‹ 返回")
+
+        waitForNode("功能中心")
+        scrollUntilNode("深海憋气")
+        clickNode("深海憋气")
+        waitForNode("沉入安静的蓝色")
+        clickNode("开始憋气")
+        waitForNode("先确认安全环境")
+        clickNode("我已坐稳，开始倒计时")
+        waitForNode("倒计时结束后开始计时")
+        clickNode("取消")
+        waitForNode("沉入安静的蓝色")
     }
 }

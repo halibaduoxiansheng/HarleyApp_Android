@@ -95,6 +95,9 @@ enum class FeatureCenterPage {
  * @param onOpenFitness 打开原有完整运动页面的回调。
  * @param onOpenHotTopics 打开每日热点完整页面的回调。
  * @param onOpenMobileData 打开手机流量统计页面的回调。
+ * @param onOpenAppUsage 打开应用使用统计页面的回调。
+ * @param onOpenStorageManager 打开文件空间管理页面的回调。
+ * @param onOpenBreathHold 打开深海憋气计时页面的回调。
  * @param onOpenToday 打开今日总览页面的回调。
  * @param onOpenSearch 打开全局本地搜索页面的回调。
  * @param onOpenBackup 打开跨手机本地备份页面的回调。
@@ -153,6 +156,9 @@ fun FeatureCenterScreen(
     onOpenFitness: () -> Unit,
     onOpenHotTopics: () -> Unit,
     onOpenMobileData: () -> Unit,
+    onOpenAppUsage: () -> Unit,
+    onOpenStorageManager: () -> Unit,
+    onOpenBreathHold: () -> Unit,
     onOpenToday: () -> Unit,
     onOpenSearch: () -> Unit,
     onOpenBackup: () -> Unit,
@@ -208,6 +214,9 @@ fun FeatureCenterScreen(
             onOpenFitness = onOpenFitness,
             onOpenHotTopics = onOpenHotTopics,
             onOpenMobileData = onOpenMobileData,
+            onOpenAppUsage = onOpenAppUsage,
+            onOpenStorageManager = onOpenStorageManager,
+            onOpenBreathHold = onOpenBreathHold,
             onOpenToday = onOpenToday,
             onOpenSearch = onOpenSearch,
             onOpenBackup = onOpenBackup,
@@ -356,6 +365,9 @@ fun FeatureCenterScreen(
  * @param onOpenFitness 打开运动功能的回调。
  * @param onOpenHotTopics 打开每日热点的回调。
  * @param onOpenMobileData 打开手机流量统计的回调。
+ * @param onOpenAppUsage 打开应用使用统计的回调。
+ * @param onOpenStorageManager 打开文件空间管理的回调。
+ * @param onOpenBreathHold 打开深海憋气计时的回调。
  * @param onOpenWechatReminder 打开微信消息提醒的回调。
  * @param onOpenGeneralReminder 打开普通通知提醒的回调。
  * @param onOpenLocalCleanup 打开手机清理的回调。
@@ -379,6 +391,9 @@ private fun FeatureCenterOverview(
     onOpenFitness: () -> Unit,
     onOpenHotTopics: () -> Unit,
     onOpenMobileData: () -> Unit,
+    onOpenAppUsage: () -> Unit,
+    onOpenStorageManager: () -> Unit,
+    onOpenBreathHold: () -> Unit,
     onOpenToday: () -> Unit,
     onOpenSearch: () -> Unit,
     onOpenBackup: () -> Unit,
@@ -407,6 +422,9 @@ private fun FeatureCenterOverview(
         onOpenFitness = onOpenFitness,
         onOpenHotTopics = onOpenHotTopics,
         onOpenMobileData = onOpenMobileData,
+        onOpenAppUsage = onOpenAppUsage,
+        onOpenStorageManager = onOpenStorageManager,
+        onOpenBreathHold = onOpenBreathHold,
         onOpenToday = onOpenToday,
         onOpenSearch = onOpenSearch,
         onOpenBackup = onOpenBackup,
@@ -565,6 +583,9 @@ private data class FeatureEntry(
  * @param onOpenFitness 打开运动功能的回调。
  * @param onOpenHotTopics 打开每日热点的回调。
  * @param onOpenMobileData 打开手机流量的回调。
+ * @param onOpenAppUsage 打开应用使用统计的回调。
+ * @param onOpenStorageManager 打开文件空间管理的回调。
+ * @param onOpenBreathHold 打开深海憋气计时的回调。
  * @param onOpenToday 打开今日总览的回调。
  * @param onOpenSearch 打开全局搜索的回调。
  * @param onOpenBackup 打开本地备份的回调。
@@ -584,6 +605,9 @@ private fun featureCenterEntries(
     onOpenFitness: () -> Unit,
     onOpenHotTopics: () -> Unit,
     onOpenMobileData: () -> Unit,
+    onOpenAppUsage: () -> Unit,
+    onOpenStorageManager: () -> Unit,
+    onOpenBreathHold: () -> Unit,
     onOpenToday: () -> Unit,
     onOpenSearch: () -> Unit,
     onOpenBackup: () -> Unit,
@@ -611,7 +635,10 @@ private fun featureCenterEntries(
         FeatureEntry(HomeFeatureId.NOTEBOOK, "记", "记事本", "富内容文章、查询与往期回顾", onOpenNotebook),
         FeatureEntry(HomeFeatureId.EBOOKS, "书", "电子书", "导入书籍、多种翻页与阅读进度", onOpenEbooks),
         FeatureEntry(HomeFeatureId.CHINESE_GROWTH, "文", "语文成长", "分级写作训练与精选阅读", onOpenChineseGrowth),
-        FeatureEntry(HomeFeatureId.QR_SCANNER, "码", "二维码扫描", "本地识别相机与相册二维码", onOpenQrScanner)
+        FeatureEntry(HomeFeatureId.QR_SCANNER, "码", "二维码扫描", "本地识别相机与相册二维码", onOpenQrScanner),
+        FeatureEntry(HomeFeatureId.APP_USAGE, "用", "应用使用", "时长、次数与七天趋势", onOpenAppUsage),
+        FeatureEntry(HomeFeatureId.STORAGE_MANAGER, "盘", "文件空间", "分类、重复与下载整理", onOpenStorageManager),
+        FeatureEntry(HomeFeatureId.BREATH_HOLD, "息", "深海憋气", "沉浸计时与本机记录", onOpenBreathHold)
     )
 }
 

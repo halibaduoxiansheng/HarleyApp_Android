@@ -22,7 +22,10 @@ enum class HomeFeatureId {
     NOTEBOOK,
     EBOOKS,
     CHINESE_GROWTH,
-    QR_SCANNER
+    QR_SCANNER,
+    APP_USAGE,
+    STORAGE_MANAGER,
+    BREATH_HOLD
 }
 
 /** 首次安装或旧版本升级时沿用首页原有的三个功能入口。 */

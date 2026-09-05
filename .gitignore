@@ -3,6 +3,7 @@
 /.idea/
 /.gradle/
 /.kotlin/
+/.android/
 /local.properties
 
 # 所有模块的Gradle构建输出和本地抓取文件。
