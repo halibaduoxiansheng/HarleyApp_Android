@@ -989,7 +989,7 @@ private fun EmptyWebsiteScreen(
  * @param onFindResult 页内查找位置和总数回调。
  * @param onDownloadRequested 网页下载公开直链、文件名响应头和MIME类型回调。
  *
- * @return 已完成安全设置并开始加载网站的WebView实例。
+ * @return 已完成安全设置，并会在首次获得有效布局尺寸后加载网站的WebView实例。
  */
 @SuppressLint("SetJavaScriptEnabled")
 private fun createWebsiteWebView(
@@ -1006,6 +1006,11 @@ private fun createWebsiteWebView(
     onDownloadRequested: (String, String, String) -> Unit
 ): WebView {
     return WebView(context).apply {
+        layoutParams = ViewGroup.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        )
+
         settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
@@ -1058,8 +1063,54 @@ private fun createWebsiteWebView(
                 )
             }
         }
-        loadUrl(initialUrl)
+
+        // 本WebView会先在remember中创建，再交给AndroidView挂载。必须等真实宽高就绪后再加载，
+        // 否则页面中的100vh和百分比高度可能按0计算，脚本虽已生成内容但整个内容区仍会被压扁。
+        loadUrlAfterFirstMeasuredLayout(initialUrl)
     }
+}
+
+/**
+ * 等待WebView首次获得非零布局尺寸后加载入口网址。
+ *
+ * 使用方法：
+ * WebView完成设置、WebViewClient和WebChromeClient配置后调用本函数。若View已经挂载并具有有效宽高，
+ * 会立即加载；否则监听布局变化，在首次取得有效宽高时移除监听并加载一次。
+ *
+ * @param initialUrl 首次需要加载的完整HTTP或HTTPS网址。
+ *
+ * @return 无返回值；网址会在WebView具备有效视口后异步加载。
+ */
+private fun WebView.loadUrlAfterFirstMeasuredLayout(initialUrl: String) {
+    if (isAttachedToWindow && width > 0 && height > 0) {
+        loadUrl(initialUrl)
+        return
+    }
+
+    addOnLayoutChangeListener(
+        object : View.OnLayoutChangeListener {
+            override fun onLayoutChange(
+                view: View,
+                left: Int,
+                top: Int,
+                right: Int,
+                bottom: Int,
+                oldLeft: Int,
+                oldTop: Int,
+                oldRight: Int,
+                oldBottom: Int
+            ) {
+                val measuredWidth = right - left
+                val measuredHeight = bottom - top
+                if (!view.isAttachedToWindow || measuredWidth <= 0 || measuredHeight <= 0) {
+                    return
+                }
+
+                view.removeOnLayoutChangeListener(this)
+                (view as WebView).loadUrl(initialUrl)
+            }
+        }
+    )
 }
 
 /**
