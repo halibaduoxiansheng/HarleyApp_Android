@@ -35,6 +35,7 @@ import com.example.harleyapp.model.MAX_WEBSITE_PLAYBACK_RATE
 import com.example.harleyapp.model.MIN_NIGHT_OVERLAY_ALPHA
 import com.example.harleyapp.model.MIN_TEXT_ZOOM_PERCENT
 import com.example.harleyapp.model.MIN_WEBSITE_PLAYBACK_RATE
+import com.example.harleyapp.model.WEBSITE_MEDIA_SEEK_STEP_SECONDS
 import com.example.harleyapp.model.WEBSITE_PLAYBACK_RATE_STEP
 import com.example.harleyapp.model.WebsiteToolSettings
 import java.util.Locale
@@ -200,15 +201,15 @@ fun WebsiteToolboxDialog(
                         ) {
                             OutlinedButton(
                                 modifier = Modifier.weight(1f),
-                                onClick = { onSeekBy(-10) }
+                                onClick = { onSeekBy(-WEBSITE_MEDIA_SEEK_STEP_SECONDS) }
                             ) {
-                                Text("快退10秒")
+                                Text("快退${WEBSITE_MEDIA_SEEK_STEP_SECONDS}秒")
                             }
                             OutlinedButton(
                                 modifier = Modifier.weight(1f),
-                                onClick = { onSeekBy(10) }
+                                onClick = { onSeekBy(WEBSITE_MEDIA_SEEK_STEP_SECONDS) }
                             ) {
-                                Text("快进10秒")
+                                Text("快进${WEBSITE_MEDIA_SEEK_STEP_SECONDS}秒")
                             }
                         }
                     }

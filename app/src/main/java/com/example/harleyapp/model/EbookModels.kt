@@ -115,6 +115,7 @@ data class EbookChapter(
  * @param lastReadAtMillis 最近阅读时间；尚未阅读为0。
  * @param currentPage 上次停留的零基页码。
  * @param currentTextOffset 文本书籍当前页在完整正文中的字符起点；PDF固定为0。
+ * @param currentPagePreview 文本书籍上次停留页的原文快照；阅读器下次打开时先直接显示该页，再在后台恢复完整分页。
  * @param pageCount 导入时计算的页数或文本估算页数，至少为1。
  * @param readingMode 上次选择的翻页模式。
  * @param fontScale 文本阅读字号倍率，限制在0.75至1.8。
@@ -143,6 +144,7 @@ data class EbookBook(
     val lastReadAtMillis: Long = 0L,
     val currentPage: Int = 0,
     val currentTextOffset: Int = 0,
+    val currentPagePreview: String = "",
     val pageCount: Int = 1,
     val readingMode: EbookReadingMode = EbookReadingMode.HORIZONTAL,
     val fontScale: Float = 1f,

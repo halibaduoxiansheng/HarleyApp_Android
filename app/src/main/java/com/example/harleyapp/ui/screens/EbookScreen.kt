@@ -168,6 +168,7 @@ private data class PendingEbookNoteDraft(
  * @param bookId 当前书籍稳定标识。
  * @param currentPage 当前零基页码。
  * @param currentTextOffset 文本书籍当前页在完整正文中的字符起点；PDF固定为0。
+ * @param currentPagePreview 文本书籍当前页原文快照，用于下次进入阅读器时立即显示。
  * @param pageCount 当前正文实际页数。
  * @param readingMode 当前翻页方式。
  * @param readingBackground 当前阅读背景。
@@ -179,6 +180,7 @@ private data class EbookReadingProgressSnapshot(
     val bookId: String,
     val currentPage: Int,
     val currentTextOffset: Int,
+    val currentPagePreview: String,
     val pageCount: Int,
     val readingMode: EbookReadingMode,
     val readingBackground: EbookReadingBackground,
@@ -239,6 +241,7 @@ fun EbookScreen(
     onBack: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
     var books by remember(repository) { mutableStateOf(repository.getBooks()) }
     var selectedBookId by rememberSaveable { mutableStateOf("") }
     var statusMessage by rememberSaveable { mutableStateOf("") }
@@ -280,6 +283,51 @@ fun EbookScreen(
                     )
                 } finally {
                     // 无论文件提供者、解析器还是存储操作发生何种异常，都必须结束页面转动状态。
+                    isImporting = false
+                    importProgress = null
+                }
+            }
+        }
+    }
+
+    val folderImportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { treeUri ->
+        if (treeUri != null) {
+            // 尽量保留目录读取权限，避免部分文档提供者在异步扫描期间过早回收授权；即使提供者不支持
+            // 持久授权，当前Activity授予的临时读取权限仍可继续完成这一次导入。
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    treeUri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            }.onFailure { error ->
+                Log.w(EBOOK_SCREEN_TAG, "Unable to persist ebook folder permission", error)
+            }
+            isImporting = true
+            importProgress = EbookImportProgress(0f, "正在扫描文件夹中的电子书…")
+            coroutineScope.launch {
+                try {
+                    val result = repository.importFromTreeUri(treeUri) { progress ->
+                        coroutineScope.launch {
+                            if (isImporting) importProgress = progress
+                        }
+                    }
+                    books = repository.getBooks()
+                    statusMessage = result.message
+                    feedbackDialogState = EbookFeedbackDialogState(
+                        success = result.importedCount > 0,
+                        message = result.message
+                    )
+                } catch (error: Throwable) {
+                    Log.e(EBOOK_SCREEN_TAG, "Unexpected ebook folder import failure", error)
+                    val message = "文件夹导入意外中断，请重新选择文件夹后再试"
+                    statusMessage = message
+                    feedbackDialogState = EbookFeedbackDialogState(
+                        success = false,
+                        message = message
+                    )
+                } finally {
                     isImporting = false
                     importProgress = null
                 }
@@ -346,6 +394,7 @@ fun EbookScreen(
                 statusMessage = statusMessage,
                 onBack = onBack,
                 onImport = { importLauncher.launch(arrayOf("*/*")) },
+                onImportFolder = { folderImportLauncher.launch(null) },
                 onOpenBook = { book -> selectedBookId = book.id },
                 onSetOnShelf = { book, isOnShelf ->
                     val saved = repository.setOnShelf(book.id, isOnShelf)
@@ -432,7 +481,8 @@ fun EbookScreen(
  * @param importProgress 当前文件导入的定量进度；准备内置书或更新封面时为空。
  * @param statusMessage 最近一次操作反馈。
  * @param onBack 返回功能中心回调。
- * @param onImport 打开系统文件选择器回调。
+ * @param onImport 打开系统单文件选择器回调。
+ * @param onImportFolder 打开系统文件夹选择器并批量导入回调。
  * @param onOpenBook 打开阅读器回调。
  * @param onSetOnShelf 把书籍加入或移出分页书架的回调。
  * @param onUpdateShelfSlots 保存书架绝对槽位的回调，槽位之间允许保留空白。
@@ -452,6 +502,7 @@ private fun EbookLibrary(
     statusMessage: String,
     onBack: () -> Unit,
     onImport: () -> Unit,
+    onImportFolder: () -> Unit,
     onOpenBook: (EbookBook) -> Unit,
     onSetOnShelf: (EbookBook, Boolean) -> Boolean,
     onUpdateShelfSlots: (Map<String, Int>) -> Boolean,
@@ -505,8 +556,24 @@ private fun EbookLibrary(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 TextButton(onClick = onBack) { Text("‹ 返回功能中心") }
                 Spacer(modifier = Modifier.weight(1f))
-                Button(enabled = !isImporting, onClick = onImport) {
-                    Text(if (isImporting) "正在导入…" else "＋ 导入书籍")
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                OutlinedButton(
+                    modifier = Modifier.weight(1f),
+                    enabled = !isImporting,
+                    onClick = onImport
+                ) {
+                    Text("＋ 导入单本")
+                }
+                Button(
+                    modifier = Modifier.weight(1f),
+                    enabled = !isImporting,
+                    onClick = onImportFolder
+                ) {
+                    Text(if (isImporting) "正在导入…" else "选择文件夹")
                 }
             }
             Text(
@@ -880,6 +947,7 @@ private fun EbookShelfPager(
             pagerState.scrollToPage(shelfPages.lastIndex.coerceAtLeast(0))
         }
     }
+
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         HorizontalPager(
             modifier = Modifier
@@ -1845,7 +1913,7 @@ private fun EbookReader(
     val latestImmersiveChanged by rememberUpdatedState(onImmersiveChanged)
     val latestReadingDuration by rememberUpdatedState(onReadingDuration)
     val readingStartedAtMillis = remember(book.id) { AtomicLong(0L) }
-    var readerViewportSize by remember(book.id) { mutableStateOf(IntSize.Zero) }
+    var paginationViewportSize by remember(book.id) { mutableStateOf(IntSize.Zero) }
     var extractedText by remember(book.id) { mutableStateOf("") }
     var textLoaded by remember(book.id) { mutableStateOf(book.format == EbookFormat.PDF) }
     var measuredTextPages by remember(book.id) {
@@ -2014,8 +2082,10 @@ private fun EbookReader(
     val pageVerticalInsetsPx = with(density) {
         (READER_TOP_TEXT_INSET + READER_BOTTOM_TEXT_INSET).roundToPx()
     }
-    val pageContentWidthPx = (readerViewportSize.width - pageHorizontalPaddingPx).coerceAtLeast(0)
-    val pageContentHeightPx = (readerViewportSize.height - pageVerticalInsetsPx).coerceAtLeast(0)
+    val pageContentWidthPx = (paginationViewportSize.width - pageHorizontalPaddingPx)
+        .coerceAtLeast(0)
+    val pageContentHeightPx = (paginationViewportSize.height - pageVerticalInsetsPx)
+        .coerceAtLeast(0)
 
     // 正文、字号、字体或可用区域变化后在后台重新排版。大体积MOBI不会阻塞Compose主线程。
     LaunchedEffect(
@@ -2046,7 +2116,8 @@ private fun EbookReader(
         }
 
         paginationProgress = 0f
-        paginationReady = false
+        // 已经有可读页面时继续展示旧分页，新的屏幕或字体排版只在后台替换，不能把正文重新切回等待页。
+        paginationReady = measuredTextPages.isNotEmpty()
         val fontSizePx = with(density) { (READER_BASE_FONT_SIZE_SP * fontScale).sp.toPx() }
         val lineHeightPx = with(density) { (READER_BASE_LINE_HEIGHT_SP * fontScale).sp.toPx() }
         val cacheSpec = EbookPaginationCacheSpec(
@@ -2095,6 +2166,8 @@ private fun EbookReader(
         measuredTextPages.map(EbookMeasuredTextPage::text)
     }
     val readerTextReady = textLoaded && (book.format == EbookFormat.PDF || paginationReady)
+    val readerDisplayReady = readerTextReady ||
+        (book.format != EbookFormat.PDF && book.currentPagePreview.isNotBlank())
     val chapters = remember(textPages, book.format) {
         if (book.format == EbookFormat.PDF) emptyList() else buildEbookTableOfContents(textPages)
     }
@@ -2160,6 +2233,11 @@ private fun EbookReader(
             bookId = book.id,
             currentPage = currentPage,
             currentTextOffset = if (book.format == EbookFormat.PDF) 0 else currentTextOffset,
+            currentPagePreview = if (book.format == EbookFormat.PDF) {
+                ""
+            } else {
+                measuredTextPages.getOrNull(currentPage)?.text ?: book.currentPagePreview
+            },
             pageCount = pageCount,
             readingMode = readingMode,
             readingBackground = readingBackground,
@@ -2179,6 +2257,7 @@ private fun EbookReader(
                         bookId = snapshot.bookId,
                         currentPage = snapshot.currentPage,
                         currentTextOffset = snapshot.currentTextOffset,
+                        currentPagePreview = snapshot.currentPagePreview,
                         pageCount = snapshot.pageCount,
                         readingMode = snapshot.readingMode,
                         readingBackground = snapshot.readingBackground,
@@ -2197,7 +2276,9 @@ private fun EbookReader(
     val originalPageText = if (book.format == EbookFormat.PDF) {
         ""
     } else {
-        textPages.getOrElse(currentPage) { "没有可显示的正文" }
+        textPages.getOrElse(currentPage) {
+            book.currentPagePreview.ifBlank { "没有可显示的正文" }
+        }
     }
     val displayedPageText = when (translationDisplayMode) {
         EbookTranslationDisplayMode.ORIGINAL -> originalPageText
@@ -2321,6 +2402,7 @@ private fun EbookReader(
                     bookId = book.id,
                     currentPage = currentPage,
                     currentTextOffset = if (book.format == EbookFormat.PDF) 0 else currentTextOffset,
+                    currentPagePreview = if (book.format == EbookFormat.PDF) "" else originalPageText,
                     pageCount = pageCount,
                     readingMode = readingMode,
                     readingBackground = readingBackground,
@@ -2339,10 +2421,16 @@ private fun EbookReader(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .onSizeChanged { size -> readerViewportSize = size }
+            .onSizeChanged { size ->
+                paginationViewportSize = resolveEbookPaginationViewportSize(
+                    previousSize = paginationViewportSize,
+                    measuredSize = size,
+                    retainHeightOnlyChange = !controlsVisible
+                )
+            }
             .background(readerPalette.background)
     ) {
-        if (!readerTextReady) {
+        if (!readerDisplayReady) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     if (textLoaded) {
@@ -3934,6 +4022,33 @@ internal fun resolveEbookReaderPageCount(
         !textLoaded -> savedPageCount
         else -> loadedTextPageCount
     }.coerceAtLeast(1)
+}
+
+/**
+ * 选择本次文本分页应使用的稳定阅读区域尺寸。
+ *
+ * 使用方法：
+ * 阅读器的onSizeChanged每次收到新尺寸后调用。普通模式或屏幕宽度改变时使用真实新尺寸；进入沉浸
+ * 模式仅隐藏外层底部导航，通常只会增加高度，此时继续沿用进入前的分页高度，让当前页立即保持可读，
+ * 不为一次工具栏显隐重新计算整本书。旋转屏幕会改变宽度，仍会触发必要的后台重新分页。
+ *
+ * @param previousSize 当前已经用于分页的稳定尺寸；首次测量时传[IntSize.Zero]。
+ * @param measuredSize Compose最新测得的阅读器完整像素尺寸。
+ * @param retainHeightOnlyChange true表示当前正在进入或处于沉浸模式，可忽略宽度不变的纯高度变化。
+ * @return 应保存并用于本次分页缓存身份的尺寸；非法新尺寸不会覆盖已有有效值。
+ */
+internal fun resolveEbookPaginationViewportSize(
+    previousSize: IntSize,
+    measuredSize: IntSize,
+    retainHeightOnlyChange: Boolean
+): IntSize {
+    if (measuredSize.width <= 0 || measuredSize.height <= 0) return previousSize
+    if (previousSize.width <= 0 || previousSize.height <= 0) return measuredSize
+    return if (retainHeightOnlyChange && measuredSize.width == previousSize.width) {
+        previousSize
+    } else {
+        measuredSize
+    }
 }
 
 /**

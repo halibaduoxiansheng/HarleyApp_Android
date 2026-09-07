@@ -7,6 +7,7 @@ import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import android.text.Html
 import android.util.AtomicFile
@@ -36,6 +37,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.nio.charset.Charset
 import java.security.MessageDigest
+import java.util.ArrayDeque
 import java.util.Locale
 import java.util.UUID
 import java.util.zip.ZipFile
@@ -65,6 +67,38 @@ data class EbookPaginationCacheSpec(
     val fontSizePx: Float,
     val lineHeightPx: Float,
     val fontFamily: EbookFontFamily
+)
+
+/**
+ * 一次文件夹批量导入的汇总结果。
+ *
+ * 使用方法：
+ * 页面通过[EbookRepository.importFromTreeUri]选择目录并等待结果，然后使用[success]决定反馈弹窗样式，
+ * 使用[message]向用户说明扫描和逐本导入结果。
+ *
+ * @param success 所有识别出的电子书是否均成功导入；部分成功仍为false，避免遗漏失败文件。
+ * @param discoveredCount 在所选文件夹及其子文件夹中识别出的受支持电子书数量。
+ * @param importedCount 实际成功登记到本地书库的数量。
+ * @param failedCount 解析、复制或登记失败的数量。
+ * @param message 可直接显示的中文汇总说明，部分失败时包含有限数量的失败文件名。
+ */
+data class EbookBatchImportResult(
+    val success: Boolean,
+    val discoveredCount: Int,
+    val importedCount: Int,
+    val failedCount: Int,
+    val message: String
+)
+
+/**
+ * 文件夹扫描阶段识别出的单个电子书文档。
+ *
+ * @param uri 可交给ContentResolver读取的文档Uri。
+ * @param displayName 系统文档提供者返回的文件名，用于格式判断、导入标题和进度显示。
+ */
+private data class EbookTreeDocument(
+    val uri: Uri,
+    val displayName: String
 )
 
 /**
@@ -267,6 +301,100 @@ class EbookRepository(context: Context) {
                 message = "无法读取所选文件，请检查文件权限后重试"
             )
         }
+    }
+
+    /**
+     * 扫描系统文件选择器授予的文件夹，并依次导入其中及其子文件夹里的全部受支持电子书。
+     *
+     * 使用方法：
+     * 页面通过ActivityResultContracts.OpenDocumentTree取得目录Uri后调用。扫描只访问用户明确授权的
+     * 文档树；每本书继续复用[importFromUri]的格式校验、大小限制、离线解析和失败清理逻辑。单本失败
+     * 不会中断后续文件，最终返回成功与失败统计。
+     *
+     * @param treeUri 用户授权的文档树Uri。
+     * @param onProgress 扫描和逐本导入进度回调；单本进度会换算为整个批次的0至1总进度。
+     * @return 批量导入汇总；未发现支持格式、目录权限失效或任一书籍失败时success为false。
+     */
+    suspend fun importFromTreeUri(
+        treeUri: Uri,
+        onProgress: (EbookImportProgress) -> Unit = {}
+    ): EbookBatchImportResult = withContext(Dispatchers.IO) {
+        reportImportProgress(onProgress, 0f, "正在扫描文件夹中的电子书…")
+        val documents = runCatching {
+            collectEbookDocumentsFromTree(treeUri)
+        }.getOrElse { error ->
+            Log.e(TAG, "Failed to scan ebook document tree", error)
+            return@withContext EbookBatchImportResult(
+                success = false,
+                discoveredCount = 0,
+                importedCount = 0,
+                failedCount = 0,
+                message = "无法读取所选文件夹，请重新选择并允许访问后再试"
+            )
+        }
+        if (documents.isEmpty()) {
+            return@withContext EbookBatchImportResult(
+                success = false,
+                discoveredCount = 0,
+                importedCount = 0,
+                failedCount = 0,
+                message = "所选文件夹及其子文件夹中没有找到支持的电子书"
+            )
+        }
+
+        var importedCount = 0
+        val failures = mutableListOf<String>()
+        documents.forEachIndexed { index, document ->
+            val itemNumber = index + 1
+            val result = importFromUri(document.uri) { itemProgress ->
+                val batchFraction = (
+                    index.toFloat() + itemProgress.overallFraction.coerceIn(0f, 1f)
+                ) / documents.size.toFloat()
+                reportImportProgress(
+                    onProgress = onProgress,
+                    overallFraction = batchFraction,
+                    message = "正在导入$itemNumber/${documents.size}：${document.displayName}\n" +
+                        itemProgress.message,
+                    completedUnits = itemNumber.toLong() - 1L,
+                    totalUnits = documents.size.toLong()
+                )
+            }
+            if (result.success) {
+                importedCount += 1
+            } else {
+                failures += "${document.displayName}：${result.message}"
+            }
+        }
+
+        val failedCount = failures.size
+        val message = if (failedCount == 0) {
+            "已从文件夹导入$importedCount 本电子书"
+        } else {
+            val visibleFailures = failures.take(MAX_BATCH_IMPORT_FAILURE_DETAILS)
+            buildString {
+                append("批量导入完成：成功")
+                append(importedCount)
+                append("本，失败")
+                append(failedCount)
+                append("本")
+                if (visibleFailures.isNotEmpty()) {
+                    append("。\n\n失败文件：\n")
+                    append(visibleFailures.joinToString(separator = "\n"))
+                }
+                if (failures.size > visibleFailures.size) {
+                    append("\n另有")
+                    append(failures.size - visibleFailures.size)
+                    append("个失败文件未展开")
+                }
+            }
+        }
+        EbookBatchImportResult(
+            success = failedCount == 0,
+            discoveredCount = documents.size,
+            importedCount = importedCount,
+            failedCount = failedCount,
+            message = message
+        )
     }
 
     /**
@@ -715,6 +843,7 @@ class EbookRepository(context: Context) {
      * @param bookId 目标书籍id。
      * @param currentPage 当前零基页码。
      * @param currentTextOffset 文本书籍当前页在完整正文中的字符起点；PDF传入0。
+     * @param currentPagePreview 文本书籍当前页原文；下次打开时先显示这份快照，PDF传入空字符串。
      * @param pageCount 阅读器实际分页总数。
      * @param readingMode 当前翻页模式。
      * @param fontScale 当前文本字号倍率。
@@ -726,6 +855,7 @@ class EbookRepository(context: Context) {
         bookId: String,
         currentPage: Int,
         currentTextOffset: Int,
+        currentPagePreview: String,
         pageCount: Int,
         readingMode: EbookReadingMode,
         fontScale: Float,
@@ -741,6 +871,8 @@ class EbookRepository(context: Context) {
                     book.copy(
                         currentPage = currentPage.coerceIn(0, safePageCount - 1),
                         currentTextOffset = currentTextOffset.coerceAtLeast(0),
+                        currentPagePreview = currentPagePreview
+                            .take(MAX_READING_PAGE_PREVIEW_CHARACTERS),
                         pageCount = safePageCount,
                         readingMode = readingMode,
                         fontScale = fontScale.coerceIn(MIN_FONT_SCALE, MAX_FONT_SCALE),
@@ -1111,6 +1243,79 @@ class EbookRepository(context: Context) {
         return MessageDigest.getInstance("SHA-256")
             .digest(value.toByteArray(Charsets.UTF_8))
             .joinToString(separator = "") { byte -> "%02x".format(byte.toInt() and 0xFF) }
+    }
+
+    /**
+     * 递归枚举用户授权文档树中的受支持电子书。
+     *
+     * 使用方法：
+     * 仅由[importFromTreeUri]在IO线程调用。函数使用DocumentsContract逐层查询目录，不拼接真实文件
+     * 路径，因此兼容本机存储、SD卡和其他实现Storage Access Framework的文档提供者。目录id会去重，
+     * 同时限制单次扫描总项目数，避免异常提供者制造循环或返回无限结果。
+     *
+     * @param treeUri ActivityResultContracts.OpenDocumentTree返回的授权目录Uri。
+     * @return 按文件名稳定排序的受支持电子书文档；没有匹配文件时返回空列表。
+     */
+    private fun collectEbookDocumentsFromTree(treeUri: Uri): List<EbookTreeDocument> {
+        val rootDocumentId = DocumentsContract.getTreeDocumentId(treeUri)
+        val pendingDirectoryIds = ArrayDeque<String>()
+        val visitedDirectoryIds = mutableSetOf<String>()
+        val documents = mutableListOf<EbookTreeDocument>()
+        pendingDirectoryIds.add(rootDocumentId)
+        visitedDirectoryIds.add(rootDocumentId)
+        var scannedDocumentCount = 0
+
+        while (pendingDirectoryIds.isNotEmpty()) {
+            val directoryId = pendingDirectoryIds.removeFirst()
+            val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(
+                treeUri,
+                directoryId
+            )
+            val cursor = applicationContext.contentResolver.query(
+                childrenUri,
+                arrayOf(
+                    DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                    DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                    DocumentsContract.Document.COLUMN_MIME_TYPE
+                ),
+                null,
+                null,
+                null
+            ) ?: error("Unable to query document tree")
+            cursor.use {
+                val idColumn = it.getColumnIndexOrThrow(
+                    DocumentsContract.Document.COLUMN_DOCUMENT_ID
+                )
+                val nameColumn = it.getColumnIndexOrThrow(
+                    DocumentsContract.Document.COLUMN_DISPLAY_NAME
+                )
+                val mimeTypeColumn = it.getColumnIndexOrThrow(
+                    DocumentsContract.Document.COLUMN_MIME_TYPE
+                )
+                while (it.moveToNext()) {
+                    scannedDocumentCount += 1
+                    require(scannedDocumentCount <= MAX_BATCH_IMPORT_SCANNED_DOCUMENTS) {
+                        "Document tree is too large"
+                    }
+                    val documentId = it.getString(idColumn).orEmpty()
+                    val displayName = it.getString(nameColumn).orEmpty()
+                    val mimeType = it.getString(mimeTypeColumn).orEmpty()
+                    if (documentId.isBlank()) continue
+
+                    if (mimeType == DocumentsContract.Document.MIME_TYPE_DIR) {
+                        if (visitedDirectoryIds.add(documentId)) {
+                            pendingDirectoryIds.add(documentId)
+                        }
+                    } else if (EbookFormat.fromFileName(displayName) != null) {
+                        documents += EbookTreeDocument(
+                            uri = DocumentsContract.buildDocumentUriUsingTree(treeUri, documentId),
+                            displayName = displayName
+                        )
+                    }
+                }
+            }
+        }
+        return documents.sortedBy { document -> document.displayName.lowercase(Locale.CHINA) }
     }
 
     /** @return Content Uri可读文件名，无法查询时返回稳定默认名。 */
@@ -1545,6 +1750,7 @@ class EbookRepository(context: Context) {
             put("lastReadAtMillis", book.lastReadAtMillis)
             put("currentPage", book.currentPage)
             put("currentTextOffset", book.currentTextOffset)
+            put("currentPagePreview", book.currentPagePreview)
             put("pageCount", book.pageCount)
             put("readingMode", book.readingMode.name)
             put("fontScale", book.fontScale.toDouble())
@@ -1595,6 +1801,8 @@ class EbookRepository(context: Context) {
                 currentPage = currentPage,
                 currentTextOffset = json.optInt("currentTextOffset", legacyTextOffset)
                     .coerceAtLeast(0),
+                currentPagePreview = json.optString("currentPagePreview")
+                    .take(MAX_READING_PAGE_PREVIEW_CHARACTERS),
                 pageCount = json.optInt("pageCount", 1).coerceAtLeast(1),
                 readingMode = readingMode,
                 fontScale = json.optDouble("fontScale", 1.0).toFloat()
@@ -1742,6 +1950,9 @@ class EbookRepository(context: Context) {
         const val DEFAULT_STARTER_SHELF_COUNT = 6
         const val MAX_EBOOK_BYTES = 250L * 1024L * 1024L
         const val MAX_EXTRACTED_TEXT_BYTES = 80L * 1024L * 1024L
+        const val MAX_READING_PAGE_PREVIEW_CHARACTERS = 20_000
+        const val MAX_BATCH_IMPORT_SCANNED_DOCUMENTS = 20_000
+        const val MAX_BATCH_IMPORT_FAILURE_DETAILS = 8
         const val PAGINATION_CACHE_MAGIC = 0x48455047
         const val PAGINATION_CACHE_VERSION = 1
         const val MAX_PAGINATION_MEMORY_CACHE_ENTRIES = 8

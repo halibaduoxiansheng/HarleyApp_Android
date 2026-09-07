@@ -72,6 +72,7 @@ import androidx.core.net.toUri
 import com.example.harleyapp.data.WebsiteToolRepository
 import com.example.harleyapp.model.EbookWebDownloadRequest
 import com.example.harleyapp.model.WebsiteBookmarkSaveResult
+import com.example.harleyapp.model.WEBSITE_MEDIA_SEEK_STEP_SECONDS
 import com.example.harleyapp.model.WebsiteShortcut
 import com.example.harleyapp.model.WebsiteToolSettings
 import com.example.harleyapp.web.WebsiteScriptController
@@ -551,20 +552,32 @@ fun WebsiteScreen(
                                     }
                                 )
                                 FullscreenToolButton(
-                                    text = "-10秒",
+                                    text = "-${WEBSITE_MEDIA_SEEK_STEP_SECONDS}秒",
                                     onClick = {
                                         revealFullscreenControls()
-                                        scriptController.seekBy(webView, -10) { count ->
-                                            toolMessage = mediaActionMessage(count, "已快退10秒")
+                                        scriptController.seekBy(
+                                            webView,
+                                            -WEBSITE_MEDIA_SEEK_STEP_SECONDS
+                                        ) { count ->
+                                            toolMessage = mediaActionMessage(
+                                                count,
+                                                "已快退${WEBSITE_MEDIA_SEEK_STEP_SECONDS}秒"
+                                            )
                                         }
                                     }
                                 )
                                 FullscreenToolButton(
-                                    text = "+10秒",
+                                    text = "+${WEBSITE_MEDIA_SEEK_STEP_SECONDS}秒",
                                     onClick = {
                                         revealFullscreenControls()
-                                        scriptController.seekBy(webView, 10) { count ->
-                                            toolMessage = mediaActionMessage(count, "已快进10秒")
+                                        scriptController.seekBy(
+                                            webView,
+                                            WEBSITE_MEDIA_SEEK_STEP_SECONDS
+                                        ) { count ->
+                                            toolMessage = mediaActionMessage(
+                                                count,
+                                                "已快进${WEBSITE_MEDIA_SEEK_STEP_SECONDS}秒"
+                                            )
                                         }
                                     }
                                 )
@@ -787,21 +800,33 @@ fun WebsiteScreen(
                     }
                     TextButton(
                         onClick = {
-                            scriptController.seekBy(webView, -10) { count ->
-                                toolMessage = mediaActionMessage(count, "已快退10秒")
+                            scriptController.seekBy(
+                                webView,
+                                -WEBSITE_MEDIA_SEEK_STEP_SECONDS
+                            ) { count ->
+                                toolMessage = mediaActionMessage(
+                                    count,
+                                    "已快退${WEBSITE_MEDIA_SEEK_STEP_SECONDS}秒"
+                                )
                             }
                         }
                     ) {
-                        Text(text = "-10秒")
+                        Text(text = "-${WEBSITE_MEDIA_SEEK_STEP_SECONDS}秒")
                     }
                     TextButton(
                         onClick = {
-                            scriptController.seekBy(webView, 10) { count ->
-                                toolMessage = mediaActionMessage(count, "已快进10秒")
+                            scriptController.seekBy(
+                                webView,
+                                WEBSITE_MEDIA_SEEK_STEP_SECONDS
+                            ) { count ->
+                                toolMessage = mediaActionMessage(
+                                    count,
+                                    "已快进${WEBSITE_MEDIA_SEEK_STEP_SECONDS}秒"
+                                )
                             }
                         }
                     ) {
-                        Text(text = "+10秒")
+                        Text(text = "+${WEBSITE_MEDIA_SEEK_STEP_SECONDS}秒")
                     }
                     TextButton(
                         onClick = {

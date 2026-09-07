@@ -1,5 +1,6 @@
 package com.example.harleyapp
 
+import androidx.compose.ui.unit.IntSize
 import com.example.harleyapp.data.APP_LOCK_RECOVERY_WAIT_MILLIS
 import com.example.harleyapp.data.AppLockState
 import com.example.harleyapp.data.normalizeEbookShelfSlots
@@ -21,6 +22,7 @@ import com.example.harleyapp.ui.screens.moveEbookShelfBookToSlot
 import com.example.harleyapp.ui.screens.normalizeEbookNoteSelection
 import com.example.harleyapp.ui.screens.paginateEbookText
 import com.example.harleyapp.ui.screens.resolveEbookReaderPageCount
+import com.example.harleyapp.ui.screens.resolveEbookPaginationViewportSize
 import com.example.harleyapp.ui.screens.restoreMeasuredEbookPagesFromBoundaries
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -98,6 +100,43 @@ class EbookModelsTest {
                 savedPageCount = 32,
                 textLoaded = true,
                 loadedTextPageCount = 1
+            )
+        )
+    }
+
+    /**
+     * 验证沉浸模式仅增加可用高度时沿用当前分页尺寸，而旋转屏幕改变宽度后仍采用新尺寸。
+     *
+     * @return 无返回值；沉浸切换触发无谓分页或横竖屏变化未更新尺寸时由JUnit报告失败。
+     */
+    @Test
+    fun ebookImmersiveModeRetainsPaginationUntilWidthChanges() {
+        val normalSize = IntSize(width = 1080, height = 2010)
+        val immersiveSize = IntSize(width = 1080, height = 2190)
+        val landscapeSize = IntSize(width = 2190, height = 950)
+
+        assertEquals(
+            normalSize,
+            resolveEbookPaginationViewportSize(
+                previousSize = IntSize.Zero,
+                measuredSize = normalSize,
+                retainHeightOnlyChange = false
+            )
+        )
+        assertEquals(
+            normalSize,
+            resolveEbookPaginationViewportSize(
+                previousSize = normalSize,
+                measuredSize = immersiveSize,
+                retainHeightOnlyChange = true
+            )
+        )
+        assertEquals(
+            landscapeSize,
+            resolveEbookPaginationViewportSize(
+                previousSize = normalSize,
+                measuredSize = landscapeSize,
+                retainHeightOnlyChange = true
             )
         )
     }
