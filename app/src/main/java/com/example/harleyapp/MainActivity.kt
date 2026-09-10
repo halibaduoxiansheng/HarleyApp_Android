@@ -20,6 +20,7 @@ import com.example.harleyapp.data.AppLockRepository
 import com.example.harleyapp.data.CompanionRepository
 import com.example.harleyapp.model.AppVisualTheme
 import com.example.harleyapp.notification.NotificationAlertChannels
+import com.example.harleyapp.system.EbookReadAloudService
 import com.example.harleyapp.ui.HarleyApp
 import com.example.harleyapp.ui.screens.AppUnlockScreen
 import com.example.harleyapp.ui.screens.HalibaduoStartupScreen
@@ -30,6 +31,9 @@ class MainActivity : ComponentActivity() {
 
     // 小组件既可能冷启动Activity，也可能把新Intent交给现有Activity，因此使用Compose状态统一驱动导航。
     private var openTodayRequest by mutableStateOf(false)
+
+    // 媒体通知可能冷启动或复用Activity；保存书籍id后交给Compose统一完成“功能→电子书→正文”导航。
+    private var openEbookRequestId by mutableStateOf("")
 
     /**
      * 创建应用主界面并启用沉浸式边到边显示。
@@ -48,6 +52,9 @@ class MainActivity : ComponentActivity() {
             com.example.harleyapp.widget.TodayWeatherWidgetProvider.EXTRA_OPEN_TODAY,
             false
         ) == true
+        openEbookRequestId = intent?.getStringExtra(
+            EbookReadAloudService.EXTRA_OPEN_BOOK_ID
+        ).orEmpty()
 
         // 让Compose自行处理状态栏、导航栏与内容区域之间的安全边距。
         enableEdgeToEdge()
@@ -136,6 +143,10 @@ class MainActivity : ComponentActivity() {
                         onOpenTodayRequestConsumed = {
                             openTodayRequest = false
                         },
+                        openEbookRequestId = openEbookRequestId,
+                        onOpenEbookRequestConsumed = {
+                            openEbookRequestId = ""
+                        },
                         onSetDarkTheme = { enabled ->
                             val saved = appearanceRepository.setDarkTheme(enabled)
                             if (saved) {
@@ -167,13 +178,13 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * 接收桌面小组件在Activity已经存在时发送的新导航请求。
+     * 接收桌面小组件或电子书媒体通知在Activity已经存在时发送的新导航请求。
      *
      * 使用方法：
      * 由Android系统在singleTop或CLEAR_TOP复用当前Activity时自动调用。函数读取小组件约定的
-     * 布尔参数，并通过Compose状态让现有界面进入“今日总览”。
+     * 布尔参数或媒体通知携带的书籍id，并通过Compose状态进入对应页面。
      *
-     * @param intent 系统交付的新Intent，可能包含打开今日总览的请求。
+     * @param intent 系统交付的新Intent，可能包含打开今日总览或正在朗读书籍的请求。
      *
      * @return 无返回值。
      */
@@ -187,5 +198,8 @@ class MainActivity : ComponentActivity() {
         ) {
             openTodayRequest = true
         }
+        intent.getStringExtra(EbookReadAloudService.EXTRA_OPEN_BOOK_ID)
+            ?.takeIf(String::isNotBlank)
+            ?.let { bookId -> openEbookRequestId = bookId }
     }
 }

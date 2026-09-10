@@ -1,8 +1,10 @@
 package com.example.harleyapp.ui.screens
 
+import android.Manifest
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Paint
 import android.graphics.Typeface
@@ -11,6 +13,7 @@ import android.text.Layout
 import android.text.StaticLayout
 import android.text.TextPaint
 import android.os.SystemClock
+import android.os.Build
 import android.provider.Settings
 import android.util.Log
 import androidx.activity.compose.BackHandler
@@ -42,6 +45,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -70,11 +74,13 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -86,6 +92,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -94,22 +101,31 @@ import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.OffsetMapping
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.TransformedText
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.zIndex
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.core.content.ContextCompat
 import com.example.harleyapp.data.EbookRepository
 import com.example.harleyapp.data.EbookNoteRepository
 import com.example.harleyapp.data.EbookPaginationCacheSpec
@@ -126,15 +142,31 @@ import com.example.harleyapp.model.EbookTranslationDirection
 import com.example.harleyapp.model.EbookTranslationDisplayMode
 import com.example.harleyapp.system.EbookOfflineTranslator
 import com.example.harleyapp.system.EbookReadAloudController
+import com.example.harleyapp.system.EbookReadAloudConfig
+import com.example.harleyapp.system.EbookReadAloudPage
+import com.example.harleyapp.system.EbookReadAloudPlayback
+import com.example.harleyapp.system.EbookReadAloudPlaybackStatus
+import com.example.harleyapp.system.EbookReadAloudProgressCallback
+import com.example.harleyapp.system.EbookReadAloudService
+import com.example.harleyapp.system.EbookReadAloudSnapshot
 import com.example.harleyapp.system.EbookReadAloudState
+import com.example.harleyapp.system.EbookSpeechTextRange
 import com.example.harleyapp.system.EbookTtsVoiceOption
 import com.example.harleyapp.system.EbookTranslationStage
+import com.example.harleyapp.system.DEFAULT_EBOOK_AUTO_PAGE_INTERVAL_SECONDS
+import com.example.harleyapp.system.MAX_EBOOK_AUTO_PAGE_INTERVAL_SECONDS
+import com.example.harleyapp.system.MIN_EBOOK_AUTO_PAGE_INTERVAL_SECONDS
 import com.example.harleyapp.system.detectEbookLanguageCode
+import com.example.harleyapp.system.resolveNextEbookAutomaticPage
+import com.example.harleyapp.system.shouldScheduleEbookTimedPageTurn
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Locale
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.absoluteValue
 import kotlin.math.roundToInt
@@ -167,7 +199,8 @@ private data class PendingEbookNoteDraft(
  *
  * @param bookId 当前书籍稳定标识。
  * @param currentPage 当前零基页码。
- * @param currentTextOffset 文本书籍当前页在完整正文中的字符起点；PDF固定为0。
+ * @param currentTextOffset 文本书籍当前可恢复词句在完整正文中的字符位置；普通翻页为页首，
+ * 后台原文朗读暂停时可精确到页内，PDF固定为0。
  * @param currentPagePreview 文本书籍当前页原文快照，用于下次进入阅读器时立即显示。
  * @param pageCount 当前正文实际页数。
  * @param readingMode 当前翻页方式。
@@ -201,6 +234,130 @@ internal data class EbookMeasuredTextPage(
     val startOffset: Int,
     val endOffset: Int
 )
+
+/**
+ * 把前台朗读服务的低频关键断点按顺序保存回电子书目录。
+ *
+ * 使用方法：
+ * 阅读页启动一次新服务会话时创建一个实例，并连同分页快照传给
+ * [EbookReadAloudPlayback.register]。服务切页、暂停或停止时会调用本实例；磁盘写入始终在单独
+ * IO线程串行执行，因此不会阻塞TTS、MediaSession或Compose主线程。停止回调排入队列后线程池
+ * 会自然关闭，已排队的最后一次保存仍会执行。
+ *
+ * @param repository 当前应用的电子书仓库。
+ * @param bookId 当前朗读书籍的稳定ID。
+ * @param pages 启动会话时与服务页码一一对应的原文分页快照。
+ * @param spokenTextUsesOriginal true表示服务朗读原文，可把页内断点换算为全文位置；朗读译文时
+ * 传false，只保存原文页首，避免把译文UTF-16索引错误套到原文。
+ */
+private class EbookReadAloudRepositoryProgressCallback(
+    private val repository: EbookRepository,
+    private val bookId: String,
+    private val pages: List<EbookMeasuredTextPage>,
+    private val spokenTextUsesOriginal: Boolean
+) : EbookReadAloudProgressCallback {
+
+    private val ioExecutor: ExecutorService = Executors.newSingleThreadExecutor { task ->
+        Thread(task, "ebook-read-aloud-progress").apply { isDaemon = true }
+    }
+    private var closed = false
+
+    /**
+     * 自动续读、通知栏翻页或阅读页跳转后保存新页位置。
+     *
+     * @param snapshot 服务完成页码切换后的权威状态。
+     * @return 无返回值；写入任务只排入后台队列。
+     */
+    override fun onPageChanged(snapshot: EbookReadAloudSnapshot) {
+        enqueueSave(snapshot, closeAfterSave = false)
+    }
+
+    /**
+     * 暂停后保存服务计算出的安全词句断点，供当前进程内继续及阅读页重建同步使用。
+     *
+     * @param snapshot 已回退到安全词首或句首的暂停状态。
+     * @return 无返回值；写入任务只排入后台队列。
+     */
+    override fun onPlaybackPaused(snapshot: EbookReadAloudSnapshot) {
+        enqueueSave(snapshot, closeAfterSave = false)
+    }
+
+    /**
+     * 显式停止或服务销毁时排入最后一个断点保存，并关闭本会话专用线程池。
+     *
+     * @param snapshot 服务释放资源前发布的最终状态。
+     * @return 无返回值；队列关闭后仍会完成已经接收的保存任务。
+     */
+    override fun onPlaybackStopped(snapshot: EbookReadAloudSnapshot) {
+        enqueueSave(snapshot, closeAfterSave = true)
+    }
+
+    /**
+     * 校验快照、换算原文绝对位置并按服务事件顺序提交磁盘保存。
+     *
+     * @param snapshot 待持久化的服务状态。
+     * @param closeAfterSave true表示这是会话最后一次回调，入队后不再接受新任务。
+     * @return 无返回值；书籍不匹配、页码无效或实例已关闭时安全忽略。
+     */
+    private fun enqueueSave(
+        snapshot: EbookReadAloudSnapshot,
+        closeAfterSave: Boolean
+    ) {
+        if (closed || snapshot.bookId != bookId) return
+        val page = pages.getOrNull(snapshot.currentPage) ?: return
+        val pageOffset = if (spokenTextUsesOriginal) {
+            snapshot.resumeOffset.coerceIn(0, page.text.length)
+        } else {
+            0
+        }
+        val absoluteOffset = (page.startOffset + pageOffset).coerceIn(
+            page.startOffset,
+            page.endOffset
+        )
+        val accepted = runCatching {
+            ioExecutor.execute {
+                if (
+                    !repository.saveBackgroundReadingPosition(
+                        bookId = bookId,
+                        currentPage = snapshot.currentPage,
+                        currentTextOffset = absoluteOffset,
+                        currentPagePreview = page.text,
+                        pageCount = pages.size
+                    )
+                ) {
+                    Log.w(EBOOK_SCREEN_TAG, "Failed to save background ebook playback progress")
+                }
+            }
+            true
+        }.onFailure { error ->
+            Log.e(EBOOK_SCREEN_TAG, "Failed to queue background ebook playback progress", error)
+        }.getOrDefault(false)
+
+        if (closeAfterSave) {
+            closed = true
+            ioExecutor.shutdown()
+        } else if (!accepted) {
+            Log.w(EBOOK_SCREEN_TAG, "Background ebook playback progress was not queued")
+        }
+    }
+}
+
+/**
+ * 判断系统是否允许显示电子书前台朗读的媒体通知。
+ *
+ * 使用方法：
+ * 启动朗读服务前调用。Android 13以下没有通知运行时权限，直接返回true；Android 13及以上
+ * 检查POST_NOTIFICATIONS。虽然系统可能允许无抽屉通知的前台服务继续运行，但本功能明确依赖
+ * 通知栏和锁屏按钮，因此未授权时先请求权限，不静默启动一个用户看不到控制入口的会话。
+ *
+ * @param context 用于查询权限的Android上下文。
+ * @return 能显示媒体通知返回true，否则返回false。
+ */
+private fun hasEbookReadAloudNotificationPermission(context: Context): Boolean {
+    return Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+        ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) ==
+        PackageManager.PERMISSION_GRANTED
+}
 
 /**
  * 电子书导入或封面操作需要显示的强提示。
@@ -892,8 +1049,9 @@ private fun EbookShelfSkinDialog(
  * 把用户选择的书按每页三十个可空槽位展示为可横向切换、可自由放置的多层书架。
  *
  * 使用方法：
- * 由[EbookLibrary]的“我的书架”分栏调用；用户右滑进入下一架，长按书脊可放到任意空槽，点击
- * “书架皮肤”切换整体外观。
+ * 由[EbookLibrary]的“我的书架”分栏调用；短按书脊打开书籍，长按后由书架根层统一接管拖动。
+ * 根层使用实际槽位在根布局中的边界计算落点，并单独绘制跟手浮层，因此外层列表偏移、不同屏幕
+ * 宽度和书架翻页动画都不会改变拖动基准。手指停留在左右边缘约450毫秒时切换相邻书架。
  *
  * @param books 已包含唯一绝对槽位的在架书籍。
  * @param shelfSkin 当前持久化书架皮肤。
@@ -915,7 +1073,16 @@ private fun EbookShelfPager(
     var positionedBooks by remember(books) { mutableStateOf(books.sortedBy(EbookBook::shelfSlot)) }
     var draggingBookId by remember { mutableStateOf<String?>(null) }
     var dragTargetSlot by remember { mutableStateOf<Int?>(null) }
+    var dragPointerInRoot by remember { mutableStateOf<Offset?>(null) }
+    var dragGrabOffsetInBook by remember { mutableStateOf(Offset.Zero) }
+    var draggedBookBoundsInRoot by remember { mutableStateOf<Rect?>(null) }
+    var shelfRootBoundsInRoot by remember { mutableStateOf(Rect.Zero) }
+    var edgePagingJob by remember { mutableStateOf<Job?>(null) }
+    var edgePagingDirection by remember { mutableIntStateOf(0) }
+    var edgePagingAnimationRunning by remember { mutableStateOf(false) }
     var showShelfSkinDialog by rememberSaveable { mutableStateOf(false) }
+    val shelfSlotBoundsBySlot = remember { mutableMapOf<Int, Rect>() }
+    val shelfBookBoundsById = remember { mutableMapOf<String, Rect>() }
     val shelfPages = remember(positionedBooks) { buildEbookShelfPages(positionedBooks) }
     if (shelfPages.isEmpty()) {
         Card(
@@ -942,78 +1109,263 @@ private fun EbookShelfPager(
 
     val pagerState = rememberPagerState(pageCount = { shelfPages.size })
     val shelfCoroutineScope = rememberCoroutineScope()
+    val shelfDensity = LocalDensity.current
+    val hapticFeedback = LocalHapticFeedback.current
+    val edgePagingWidthPx = with(shelfDensity) { EBOOK_SHELF_EDGE_PAGING_WIDTH.toPx() }
+    val dropTolerancePx = with(shelfDensity) { EBOOK_SHELF_DROP_TOLERANCE.toPx() }
+    val currentOnUpdateBookSlots by rememberUpdatedState(onUpdateBookSlots)
+
+    /**
+     * 停止尚未触发的边缘翻页等待。
+     *
+     * 使用方法：
+     * 手指离开边缘、拖动结束或组件销毁时调用。已经开始的翻页动画默认自然完成，避免页面停在
+     * 两页之间；组件销毁时传入[force]强制取消整个协程。
+     *
+     * @param force 是否连正在执行的翻页动画也立即取消。
+     * @return 无返回值。
+     */
+    fun stopShelfEdgePaging(force: Boolean) {
+        edgePagingDirection = 0
+        if (force || !edgePagingAnimationRunning) {
+            edgePagingJob?.cancel()
+            edgePagingJob = null
+        }
+    }
+
+    /**
+     * 清除一次拖动的全部界面状态，但不修改任何书籍槽位。
+     *
+     * 使用方法：
+     * 拖动正常结束并完成数据计算后调用，或在手势取消时直接调用。此函数只移除浮层、目标高亮
+     * 和抓取坐标，不调用持久化接口，因此取消手势不会误保存位置。
+     *
+     * @return 无返回值。
+     */
+    fun clearShelfDragState() {
+        draggingBookId = null
+        dragTargetSlot = null
+        dragPointerInRoot = null
+        dragGrabOffsetInBook = Offset.Zero
+        draggedBookBoundsInRoot = null
+    }
+
+    /**
+     * 根据当前手指位置维护唯一的边缘翻页任务。
+     *
+     * 使用方法：
+     * 每次有效拖动事件传入手指的根坐标。函数只有在手指进入可翻页方向的边缘区域后才创建任务；
+     * 同一方向已有等待任务时不会重复创建。等待结束后只翻一页，并用新页面的真实槽位边界重新
+     * 解析落点。继续跨页需要手指在边缘产生新的移动事件，避免一次停留连续失控翻过多页。
+     *
+     * @param pointerInRoot 当前手指相对于Compose根布局的坐标。
+     * @return 无返回值。
+     */
+    fun updateShelfEdgePaging(pointerInRoot: Offset) {
+        if (edgePagingAnimationRunning) return
+        val direction = resolveEbookShelfEdgePagingDirection(
+            pointerInRoot = pointerInRoot,
+            shelfBoundsInRoot = shelfRootBoundsInRoot,
+            currentPage = pagerState.currentPage,
+            pageCount = shelfPages.size,
+            edgeWidthPx = edgePagingWidthPx
+        )
+        if (direction == 0) {
+            stopShelfEdgePaging(force = false)
+            return
+        }
+        if (edgePagingDirection == direction && edgePagingJob?.isActive == true) return
+
+        edgePagingJob?.cancel()
+        edgePagingDirection = direction
+        edgePagingJob = shelfCoroutineScope.launch {
+            delay(EBOOK_SHELF_EDGE_PAGING_DWELL_MILLIS)
+            if (draggingBookId == null || edgePagingDirection != direction) return@launch
+
+            val sourcePage = pagerState.currentPage
+            val targetPage = (sourcePage + direction).coerceIn(0, shelfPages.lastIndex)
+            if (targetPage != sourcePage) {
+                edgePagingAnimationRunning = true
+                // 翻页期间旧页绝对槽号已经失效；新页边界未就绪时宁可不落槽，也不能跳回旧页。
+                dragTargetSlot = null
+                try {
+                    pagerState.animateScrollToPage(targetPage)
+                    val currentPointer = dragPointerInRoot
+                    if (draggingBookId != null) {
+                        dragTargetSlot = currentPointer?.let { pointer ->
+                            resolveEbookShelfTargetSlot(
+                                pointerInRoot = pointer,
+                                currentPage = targetPage,
+                                slotBoundsBySlot = shelfSlotBoundsBySlot,
+                                nearbyTolerancePx = dropTolerancePx
+                            )
+                        }
+                    }
+                } finally {
+                    edgePagingAnimationRunning = false
+                }
+            }
+            if (edgePagingDirection == direction) edgePagingDirection = 0
+            edgePagingJob = null
+        }
+    }
+
+    /**
+     * 结束当前拖动，并按手势结果决定是否更新和保存槽位。
+     *
+     * 使用方法：
+     * `onDragEnd`传入true，仅当最终目标与源槽不同才调用[moveEbookShelfBookToSlot]并保存；
+     * `onDragCancel`传入false，只清理状态。保存失败时恢复调用方最近一次传入的书架顺序。
+     *
+     * @param shouldSave 是否允许把本次目标槽位写入仓库。
+     * @return 无返回值。
+     */
+    fun finishShelfDrag(shouldSave: Boolean) {
+        if (shouldSave && edgePagingAnimationRunning) {
+            val runningPagingJob = edgePagingJob
+            shelfCoroutineScope.launch {
+                // 松手发生在跨架动画中时先等页面停稳，让动画完成后的真实槽位命中成为最终落点。
+                runningPagingJob?.join()
+                if (draggingBookId != null) finishShelfDrag(shouldSave = true)
+            }
+            return
+        }
+
+        val movedBookId = draggingBookId
+        val sourceSlot = positionedBooks.firstOrNull { book -> book.id == movedBookId }?.shelfSlot
+        val targetSlot = dragTargetSlot
+        stopShelfEdgePaging(force = false)
+        clearShelfDragState()
+
+        if (!shouldSave || movedBookId == null || sourceSlot == null || targetSlot == null) return
+        if (targetSlot == sourceSlot) return
+
+        val updatedBooks = moveEbookShelfBookToSlot(
+            books = positionedBooks,
+            bookId = movedBookId,
+            targetSlot = targetSlot
+        )
+        positionedBooks = updatedBooks
+        if (!currentOnUpdateBookSlots(updatedBooks.associate { book -> book.id to book.shelfSlot })) {
+            positionedBooks = books.sortedBy(EbookBook::shelfSlot)
+        }
+    }
+
     LaunchedEffect(shelfPages.size) {
         if (pagerState.currentPage > shelfPages.lastIndex) {
             pagerState.scrollToPage(shelfPages.lastIndex.coerceAtLeast(0))
         }
     }
+    DisposableEffect(Unit) {
+        onDispose { stopShelfEdgePaging(force = true) }
+    }
 
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        HorizontalPager(
+        Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(500.dp),
-            state = pagerState,
-            userScrollEnabled = draggingBookId == null,
-            beyondViewportPageCount = if (draggingBookId == null) 1 else shelfPages.lastIndex
-        ) { pageIndex ->
-            val pageOffset = (
-                (pagerState.currentPage - pageIndex) + pagerState.currentPageOffsetFraction
-                ).absoluteValue
-            EbookShelfPage(
-                modifier = Modifier.graphicsLayer {
-                    val scale = (1f - pageOffset * 0.04f).coerceIn(0.94f, 1f)
-                    scaleX = scale
-                    scaleY = scale
-                    alpha = (1f - pageOffset * 0.18f).coerceIn(0.72f, 1f)
-                },
-                books = shelfPages[pageIndex],
-                shelfNumber = pageIndex + 1,
-                shelfSkin = shelfSkin,
-                draggingBookId = draggingBookId,
-                dragTargetSlot = dragTargetSlot,
-                onOpenBook = onOpenBook,
-                onDragStarted = { bookId ->
-                    draggingBookId = bookId
-                    dragTargetSlot = positionedBooks.firstOrNull { book -> book.id == bookId }
-                        ?.shelfSlot
-                },
-                onMoveBookBy = { bookId, delta ->
-                    if (draggingBookId == bookId) {
-                        val currentTarget = dragTargetSlot
-                            ?: positionedBooks.firstOrNull { book -> book.id == bookId }?.shelfSlot
-                            ?: 0
-                        val targetSlot = (currentTarget + delta)
-                            .coerceIn(0, shelfPages.size * BOOKS_PER_SHELF_PAGE - 1)
-                        dragTargetSlot = targetSlot
-                        val targetPage = targetSlot / BOOKS_PER_SHELF_PAGE
-                        if (targetPage != pagerState.currentPage) {
-                            shelfCoroutineScope.launch { pagerState.animateScrollToPage(targetPage) }
-                        }
-                    }
-                },
-                onDragFinished = {
-                    val movedBookId = draggingBookId
-                    val sourceSlot = positionedBooks.firstOrNull { book ->
-                        book.id == movedBookId
-                    }?.shelfSlot
-                    val targetSlot = dragTargetSlot
-                    if (sourceSlot != null && targetSlot != null && targetSlot != sourceSlot) {
-                        positionedBooks = moveEbookShelfBookToSlot(
-                            books = positionedBooks,
-                            bookId = movedBookId.orEmpty(),
-                            targetSlot = targetSlot
-                        )
-                    }
-                    draggingBookId = null
-                    dragTargetSlot = null
-                    if (!onUpdateBookSlots(positionedBooks.associate { book ->
-                            book.id to book.shelfSlot
-                        })) {
-                        positionedBooks = books.sortedBy(EbookBook::shelfSlot)
-                    }
+                .height(500.dp)
+                .onGloballyPositioned { coordinates ->
+                    shelfRootBoundsInRoot = coordinates.boundsInRoot()
                 }
-            )
+                .pointerInput(books, shelfPages.size) {
+                    detectDragGesturesAfterLongPress(
+                        onDragStart = { startPosition ->
+                            val pointerInRoot = shelfRootBoundsInRoot.topLeft + startPosition
+                            val selectedBook = findEbookShelfBookAtPointer(
+                                pointerInRoot = pointerInRoot,
+                                currentPage = pagerState.currentPage,
+                                books = positionedBooks,
+                                bookBoundsById = shelfBookBoundsById
+                            )
+                            val selectedBounds = selectedBook?.let { book ->
+                                shelfBookBoundsById[book.id]
+                            }
+                            if (selectedBook != null && selectedBounds != null) {
+                                edgePagingJob?.cancel()
+                                edgePagingJob = null
+                                edgePagingDirection = 0
+                                draggingBookId = selectedBook.id
+                                dragTargetSlot = selectedBook.shelfSlot
+                                dragPointerInRoot = pointerInRoot
+                                dragGrabOffsetInBook = pointerInRoot - selectedBounds.topLeft
+                                draggedBookBoundsInRoot = selectedBounds
+                                hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
+                            }
+                        },
+                        onDrag = { change, _ ->
+                            if (draggingBookId != null) {
+                                change.consume()
+                                val pointerInRoot = shelfRootBoundsInRoot.topLeft + change.position
+                                dragPointerInRoot = pointerInRoot
+                                dragTargetSlot = resolveEbookShelfTargetSlot(
+                                    pointerInRoot = pointerInRoot,
+                                    currentPage = pagerState.currentPage,
+                                    slotBoundsBySlot = shelfSlotBoundsBySlot,
+                                    nearbyTolerancePx = dropTolerancePx
+                                )
+                                updateShelfEdgePaging(pointerInRoot)
+                            }
+                        },
+                        onDragEnd = { finishShelfDrag(shouldSave = true) },
+                        onDragCancel = { finishShelfDrag(shouldSave = false) }
+                    )
+                }
+        ) {
+            HorizontalPager(
+                modifier = Modifier.fillMaxSize(),
+                state = pagerState,
+                userScrollEnabled = draggingBookId == null,
+                beyondViewportPageCount = 1
+            ) { pageIndex ->
+                val pageOffset = (
+                    (pagerState.currentPage - pageIndex) + pagerState.currentPageOffsetFraction
+                    ).absoluteValue
+                EbookShelfPage(
+                    modifier = Modifier.graphicsLayer {
+                        val scale = (1f - pageOffset * 0.04f).coerceIn(0.94f, 1f)
+                        scaleX = scale
+                        scaleY = scale
+                        alpha = (1f - pageOffset * 0.18f).coerceIn(0.72f, 1f)
+                    },
+                    books = shelfPages[pageIndex],
+                    shelfNumber = pageIndex + 1,
+                    shelfSkin = shelfSkin,
+                    draggingBookId = draggingBookId,
+                    dragTargetSlot = dragTargetSlot,
+                    onOpenBook = onOpenBook,
+                    onSlotBoundsChanged = { slot, bounds ->
+                        shelfSlotBoundsBySlot[slot] = bounds
+                    },
+                    onBookBoundsChanged = { bookId, bounds ->
+                        shelfBookBoundsById[bookId] = bounds
+                    }
+                )
+            }
+
+            val draggedBook = positionedBooks.firstOrNull { book -> book.id == draggingBookId }
+            val currentPointer = dragPointerInRoot
+            val originalBookBounds = draggedBookBoundsInRoot
+            if (draggedBook != null && currentPointer != null && originalBookBounds != null) {
+                val overlayTopLeftInRoot = currentPointer - dragGrabOffsetInBook
+                val overlayTopLeftInShelf = overlayTopLeftInRoot - shelfRootBoundsInRoot.topLeft
+                val overlayWidth = with(shelfDensity) { originalBookBounds.width.toDp() }
+                val overlayHeight = with(shelfDensity) { originalBookBounds.height.toDp() }
+                EbookShelfBookVisual(
+                    modifier = Modifier
+                        .offset {
+                            IntOffset(
+                                x = overlayTopLeftInShelf.x.roundToInt(),
+                                y = overlayTopLeftInShelf.y.roundToInt()
+                            )
+                        }
+                        .size(width = overlayWidth, height = overlayHeight)
+                        .zIndex(EBOOK_SHELF_DRAG_OVERLAY_Z_INDEX),
+                    book = draggedBook,
+                    isLifted = true,
+                    isDropTarget = false
+                )
+            }
         }
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -1035,14 +1387,17 @@ private fun EbookShelfPager(
             }
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
+            // 委托状态先稳定为局部值，既保证同一帧提示一致，也允许Kotlin安全收窄为非空槽位。
+            val currentDragTargetSlot = dragTargetSlot
             Text(
                 modifier = Modifier.weight(1f),
                 text = when {
-                    draggingBookId != null -> {
-                        val target = dragTargetSlot ?: 0
+                    draggingBookId != null && currentDragTargetSlot != null -> {
+                        val target = currentDragTargetSlot
                         "正在移动到第${target / BOOKS_PER_SHELF_PAGE + 1}架" +
                             "第${target % BOOKS_PER_SHELF_PAGE + 1}位 · 松手保存"
                     }
+                    draggingBookId != null -> "当前位置不可放置 · 松手取消移动"
                     shelfPages.size > 1 -> "左右滑动切换书架 · 长按可放到任意空位"
                     else -> "长按书脊可放到当前书架任意空位"
                 },
@@ -1078,9 +1433,8 @@ private fun EbookShelfPager(
  * @param draggingBookId 正在拖动的书籍id；没有拖动时为null。
  * @param dragTargetSlot 当前目标绝对槽位；没有拖动时为null。
  * @param onOpenBook 点击书脊打开阅读器的回调。
- * @param onDragStarted 长按开始回调。
- * @param onMoveBookBy 横向或纵向跨槽移动回调。
- * @param onDragFinished 松手或取消后的保存回调。
+ * @param onSlotBoundsChanged 槽位完成布局后上报绝对槽位及其根坐标边界的回调。
+ * @param onBookBoundsChanged 书脊完成布局后上报书籍id及其根坐标边界的回调。
  * @param modifier 外部页面变换修饰器。
  * @return 无返回值，直接绘制当前书架页。
  */
@@ -1092,9 +1446,8 @@ private fun EbookShelfPage(
     draggingBookId: String?,
     dragTargetSlot: Int?,
     onOpenBook: (EbookBook) -> Unit,
-    onDragStarted: (String) -> Unit,
-    onMoveBookBy: (String, Int) -> Unit,
-    onDragFinished: () -> Unit,
+    onSlotBoundsChanged: (Int, Rect) -> Unit,
+    onBookBoundsChanged: (String, Rect) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val shelfPalette = ebookShelfPalette(shelfSkin)
@@ -1160,22 +1513,43 @@ private fun EbookShelfPage(
                                 val localSlot = rowIndex * BOOKS_PER_SHELF_ROW + columnIndex
                                 val absoluteSlot = (shelfNumber - 1) * BOOKS_PER_SHELF_PAGE + localSlot
                                 val book = books.getOrNull(localSlot)
-                                if (book != null) {
-                                    EbookShelfBook(
-                                        modifier = Modifier.width(spineWidth),
-                                        book = book,
-                                        isDragging = draggingBookId == book.id,
-                                        isDropTarget = dragTargetSlot == absoluteSlot,
-                                        onOpen = { onOpenBook(book) },
-                                        onDragStarted = { onDragStarted(book.id) },
-                                        onMoveBy = { delta -> onMoveBookBy(book.id, delta) },
-                                        onDragFinished = onDragFinished
-                                    )
-                                } else {
-                                    EbookEmptyShelfSlot(
-                                        modifier = Modifier.width(spineWidth),
-                                        isDropTarget = dragTargetSlot == absoluteSlot
-                                    )
+                                Box(
+                                    modifier = Modifier
+                                        .width(spineWidth)
+                                        .fillMaxHeight()
+                                        .onGloballyPositioned { coordinates ->
+                                            onSlotBoundsChanged(
+                                                absoluteSlot,
+                                                coordinates.boundsInRoot()
+                                            )
+                                        },
+                                    contentAlignment = Alignment.BottomCenter
+                                ) {
+                                    if (book != null) {
+                                        val isDraggedSource = draggingBookId == book.id
+                                        EbookShelfBook(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            book = book,
+                                            isSourceHidden = isDraggedSource,
+                                            isDropTarget = dragTargetSlot == absoluteSlot,
+                                            onOpen = { onOpenBook(book) },
+                                            onBoundsChanged = { bounds ->
+                                                onBookBoundsChanged(book.id, bounds)
+                                            }
+                                        )
+                                        if (isDraggedSource) {
+                                            // 源书脊只隐藏绘制而不移除布局，槽位尺寸和命中边界在拖动中保持稳定。
+                                            EbookEmptyShelfSlot(
+                                                modifier = Modifier.fillMaxSize(),
+                                                isDropTarget = dragTargetSlot == absoluteSlot
+                                            )
+                                        }
+                                    } else {
+                                        EbookEmptyShelfSlot(
+                                            modifier = Modifier.fillMaxSize(),
+                                            isDropTarget = dragTargetSlot == absoluteSlot
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -1250,47 +1624,79 @@ private fun EbookEmptyShelfSlot(
 }
 
 /**
- * 显示一册可点击、可长按拖动且带圆形阅读进度的真实窄书脊。
+ * 在固定书架槽中显示一册可点击的真实窄书脊，并把实际书脊边界上报给根层手势。
  *
  * 使用方法：
- * 短按调用[onOpen]继续阅读；长按触发震动后，横向拖过一个书脊宽度会移动一个位置，纵向拖动
- * 会跨一层书架移动十个位置。拖动期间由父级禁用书架翻页，松手通过[onDragFinished]统一保存。
+ * [EbookShelfPage]在每个有书的完整槽位中调用。普通状态允许短按打开；根层确认这本书进入拖动后，
+ * [isSourceHidden]设为true，只隐藏书脊绘制但保留原尺寸和边界，避免源槽坍缩或重新排版。长按和
+ * 拖动不在本函数内处理，统一由[EbookShelfPager]使用同一根坐标系完成。
  *
  * @param book 当前书籍及其阅读进度。
- * @param isDragging 当前书脊是否正在被用户拖动。
- * @param isDropTarget 当前拖动目标是否指向本书所在槽位。
- * @param onOpen 短按打开书籍的回调。
- * @param onDragStarted 长按开始拖动的回调。
- * @param onMoveBy 相对移动位置回调；正数向后，负数向前。
- * @param onDragFinished 松手或手势取消后的保存回调。
- * @param modifier 外部传入的书脊宽度修饰器。
- * @return 无返回值，直接绘制书脊。
+ * @param isSourceHidden 是否隐藏正在拖动的源书脊视觉并禁用短按。
+ * @param isDropTarget 当前槽位是否为拖动落点；为true时显示金色边框。
+ * @param onOpen 普通短按打开书籍的回调。
+ * @param onBoundsChanged 书脊布局完成后上报根坐标边界的回调。
+ * @param modifier 父级传入的书脊宽度修饰器。
+ * @return 无返回值，直接绘制书脊或保留不可见的源书脊占位。
  */
 @Composable
 private fun EbookShelfBook(
     book: EbookBook,
-    isDragging: Boolean,
+    isSourceHidden: Boolean,
     isDropTarget: Boolean,
     onOpen: () -> Unit,
-    onDragStarted: () -> Unit,
-    onMoveBy: (Int) -> Unit,
-    onDragFinished: () -> Unit,
+    onBoundsChanged: (Rect) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val hapticFeedback = LocalHapticFeedback.current
-    val density = LocalDensity.current
-    val horizontalThreshold = with(density) { BOOK_DRAG_HORIZONTAL_THRESHOLD.toPx() }
-    val verticalThreshold = with(density) { BOOK_DRAG_VERTICAL_THRESHOLD.toPx() }
-    val currentOnMoveBy by rememberUpdatedState(onMoveBy)
-    val currentOnDragStarted by rememberUpdatedState(onDragStarted)
-    val currentOnDragFinished by rememberUpdatedState(onDragFinished)
-    var dragOffset by remember(book.id) { mutableStateOf(Offset.Zero) }
-    var dragStepAccumulator by remember(book.id) { mutableStateOf(Offset.Zero) }
+    val stableHash = book.id.hashCode().let { value ->
+        if (value == Int.MIN_VALUE) 0 else kotlin.math.abs(value)
+    }
+    val heightFraction = 0.78f + (stableHash % 15) / 100f
+    Box(
+        modifier = modifier
+            .fillMaxHeight(heightFraction)
+            .onGloballyPositioned { coordinates ->
+                onBoundsChanged(coordinates.boundsInRoot())
+            }
+            .clickable(enabled = !isSourceHidden, onClick = onOpen)
+    ) {
+        EbookShelfBookVisual(
+            modifier = Modifier.fillMaxSize(),
+            book = book,
+            isLifted = false,
+            isDropTarget = isDropTarget,
+            isVisible = !isSourceHidden
+        )
+    }
+}
+
+/**
+ * 绘制可复用的书脊外观，供槽位中的原书和根层拖动浮层共同使用。
+ *
+ * 使用方法：
+ * [EbookShelfBook]传入`isLifted=false`绘制静态书脊；[EbookShelfPager]创建跟手浮层时传入
+ * `isLifted=true`，让书脊取消轻微倾斜并增加缩放和阴影。调用方必须提供明确尺寸，本函数不参与
+ * 槽位测量，也不安装点击或拖动手势。
+ *
+ * @param book 需要绘制标题、颜色和阅读进度的书籍。
+ * @param isLifted 是否使用拖动浮层的抬起视觉效果。
+ * @param isDropTarget 是否绘制当前占用槽的落点边框。
+ * @param isVisible 是否实际绘制书脊；false时保留布局尺寸但完全透明。
+ * @param modifier 调用方提供的确定尺寸、位置和层级修饰器。
+ * @return 无返回值，直接绘制书脊外观。
+ */
+@Composable
+private fun EbookShelfBookVisual(
+    book: EbookBook,
+    isLifted: Boolean,
+    isDropTarget: Boolean,
+    modifier: Modifier = Modifier,
+    isVisible: Boolean = true
+) {
     val stableHash = book.id.hashCode().let { value ->
         if (value == Int.MIN_VALUE) 0 else kotlin.math.abs(value)
     }
     val spineColor = resolveEbookSpineColor(book)
-    val heightFraction = 0.78f + (stableHash % 15) / 100f
     val verticalTitle = book.title.take(MAX_SPINE_TITLE_CHARACTERS)
         .toCharArray()
         .joinToString(separator = "\n")
@@ -1301,66 +1707,19 @@ private fun EbookShelfBook(
     }.coerceIn(0f, 1f)
     Card(
         modifier = modifier
-            .fillMaxHeight(heightFraction)
-            .zIndex(if (isDragging) 2f else 0f)
+            .zIndex(if (isLifted) 2f else 0f)
             .graphicsLayer {
-                rotationZ = if (isDragging) 0f else ((stableHash % 5) - 2) * 0.35f
-                translationX = dragOffset.x
-                translationY = dragOffset.y
-                scaleX = if (isDragging) 1.08f else 1f
-                scaleY = if (isDragging) 1.04f else 1f
-                shadowElevation = if (isDragging) 18f else 0f
+                alpha = if (isVisible) 1f else 0f
+                rotationZ = if (isLifted) 0f else ((stableHash % 5) - 2) * 0.35f
+                scaleX = if (isLifted) 1.08f else 1f
+                scaleY = if (isLifted) 1.04f else 1f
+                shadowElevation = if (isLifted) 18f else 0f
             }
-            .clickable(onClick = onOpen)
             .border(
                 width = if (isDropTarget) 2.dp else 0.dp,
                 color = if (isDropTarget) Color(0xFFFFD88A) else Color.Transparent,
                 shape = RoundedCornerShape(topStart = 3.dp, topEnd = 5.dp)
-            )
-            .pointerInput(book.id) {
-                detectDragGesturesAfterLongPress(
-                    onDragStart = {
-                        dragOffset = Offset.Zero
-                        dragStepAccumulator = Offset.Zero
-                        hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
-                        currentOnDragStarted()
-                    },
-                    onDrag = { change, dragAmount ->
-                        change.consume()
-                        dragOffset += dragAmount
-                        var nextAccumulator = dragStepAccumulator + dragAmount
-                        if (
-                            nextAccumulator.y.absoluteValue >= verticalThreshold &&
-                            nextAccumulator.y.absoluteValue > nextAccumulator.x.absoluteValue
-                        ) {
-                            val direction = if (nextAccumulator.y > 0f) 1 else -1
-                            currentOnMoveBy(direction * BOOKS_PER_SHELF_ROW)
-                            nextAccumulator = Offset(
-                                nextAccumulator.x,
-                                nextAccumulator.y - direction * verticalThreshold
-                            )
-                        } else if (nextAccumulator.x.absoluteValue >= horizontalThreshold) {
-                            val direction = if (nextAccumulator.x > 0f) 1 else -1
-                            currentOnMoveBy(direction)
-                            nextAccumulator = Offset(
-                                nextAccumulator.x - direction * horizontalThreshold,
-                                nextAccumulator.y
-                            )
-                        }
-                        dragStepAccumulator = nextAccumulator
-                    },
-                    onDragEnd = {
-                        dragOffset = Offset.Zero
-                        dragStepAccumulator = Offset.Zero
-                        currentOnDragFinished()
-                    },
-                    onDragCancel = {
-                        dragOffset = Offset.Zero
-                        dragStepAccumulator = Offset.Zero
-                        currentOnDragFinished()
-                    }
-                )
-            },
+            ),
         shape = RoundedCornerShape(topStart = 3.dp, topEnd = 5.dp),
         colors = CardDefaults.cardColors(containerColor = spineColor),
         elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
@@ -1418,6 +1777,133 @@ private fun EbookShelfBook(
                 }
             }
         }
+    }
+}
+
+/**
+ * 在当前书架页中查找被长按起点命中的书籍。
+ *
+ * 使用方法：
+ * 根层收到长按开始坐标后调用。函数只检查[currentPage]对应的三十个绝对槽位，避免相邻预加载
+ * 页面中不可见的书籍抢占手势；只有坐标位于真实书脊边界内时才返回书籍。
+ *
+ * @param pointerInRoot 长按起点在Compose根布局中的坐标。
+ * @param currentPage 当前书架页的零基索引。
+ * @param books 当前全部在架书籍。
+ * @param bookBoundsById 书籍id到真实书脊根坐标边界的映射。
+ * @return 命中的书籍；长按发生在空槽、层板或页外时返回null。
+ */
+private fun findEbookShelfBookAtPointer(
+    pointerInRoot: Offset,
+    currentPage: Int,
+    books: List<EbookBook>,
+    bookBoundsById: Map<String, Rect>
+): EbookBook? {
+    val firstSlot = currentPage.coerceAtLeast(0) * BOOKS_PER_SHELF_PAGE
+    val pageSlots = firstSlot until firstSlot + BOOKS_PER_SHELF_PAGE
+    return books.firstOrNull { book ->
+        book.shelfSlot in pageSlots &&
+            bookBoundsById[book.id]?.contains(pointerInRoot) == true
+    }
+}
+
+/**
+ * 使用真实槽位边界把手指根坐标解析为当前页唯一目标槽位。
+ *
+ * 使用方法：
+ * 每个拖动事件和边缘翻页完成后调用。手指位于某个完整槽位矩形内时直接返回该槽；仅在距离
+ * 槽位边缘不超过[nearbyTolerancePx]的小间隙内吸附到最近槽。拖到标题区、书架上下方或远离
+ * 槽位后返回null，松手时保留原位置，避免书籍看似自行“飘”到远处。
+ *
+ * @param pointerInRoot 当前手指在Compose根布局中的坐标。
+ * @param currentPage 当前书架页的零基索引。
+ * @param slotBoundsBySlot 绝对槽位到完整槽位根坐标边界的映射。
+ * @param nearbyTolerancePx 允许跨越书脊小间隙的最大像素距离；负数按0处理。
+ * @return 当前页直接命中或容差内最近的绝对槽位；越界或边界未就绪时返回null。
+ */
+internal fun resolveEbookShelfTargetSlot(
+    pointerInRoot: Offset,
+    currentPage: Int,
+    slotBoundsBySlot: Map<Int, Rect>,
+    nearbyTolerancePx: Float
+): Int? {
+    val firstSlot = currentPage.coerceAtLeast(0) * BOOKS_PER_SHELF_PAGE
+    val candidates = (firstSlot until firstSlot + BOOKS_PER_SHELF_PAGE).mapNotNull { slot ->
+        slotBoundsBySlot[slot]
+            ?.takeIf { bounds -> bounds.width > 0f && bounds.height > 0f }
+            ?.let { bounds -> slot to bounds }
+    }
+    candidates.firstOrNull { (_, bounds) -> bounds.contains(pointerInRoot) }?.let { return it.first }
+    val nearest = candidates.minWithOrNull(
+        compareBy<Pair<Int, Rect>> { (_, bounds) ->
+            squaredDistanceFromPointToRect(pointerInRoot, bounds)
+        }.thenBy { (_, bounds) ->
+            val centerX = (bounds.left + bounds.right) / 2f
+            val centerY = (bounds.top + bounds.bottom) / 2f
+            val deltaX = pointerInRoot.x - centerX
+            val deltaY = pointerInRoot.y - centerY
+            deltaX * deltaX + deltaY * deltaY
+        }.thenBy { (slot, _) -> slot }
+    ) ?: return null
+    val safeTolerance = nearbyTolerancePx.coerceAtLeast(0f)
+    return nearest.first.takeIf {
+        squaredDistanceFromPointToRect(pointerInRoot, nearest.second) <=
+            safeTolerance * safeTolerance
+    }
+}
+
+/**
+ * 计算一个点到轴对齐矩形边缘的平方距离。
+ *
+ * 使用方法：
+ * 落槽解析用它判断手指是否只位于相邻槽的小间隙内。点在矩形内部或边界上返回0；使用平方值
+ * 可以避免每帧拖动都执行开方，并保持与像素容差的严格比较。
+ *
+ * @param point 当前手指的根坐标。
+ * @param bounds 一个已经验证宽高为正的槽位根坐标矩形。
+ * @return 点到矩形最近位置的非负平方像素距离。
+ */
+private fun squaredDistanceFromPointToRect(point: Offset, bounds: Rect): Float {
+    val deltaX = when {
+        point.x < bounds.left -> bounds.left - point.x
+        point.x > bounds.right -> point.x - bounds.right
+        else -> 0f
+    }
+    val deltaY = when {
+        point.y < bounds.top -> bounds.top - point.y
+        point.y > bounds.bottom -> point.y - bounds.bottom
+        else -> 0f
+    }
+    return deltaX * deltaX + deltaY * deltaY
+}
+
+/**
+ * 判断拖动手指是否进入可以切换相邻书架的左右边缘。
+ *
+ * 使用方法：
+ * 根层每次收到有效拖动坐标时调用，并把返回值交给单一延时任务。第一页左缘和末页右缘不会继续
+ * 翻页；不在有效边缘时返回0，用于取消尚未触发的等待任务。
+ *
+ * @param pointerInRoot 当前手指在Compose根布局中的坐标。
+ * @param shelfBoundsInRoot 书架手势根层在根布局中的边界。
+ * @param currentPage 当前书架页的零基索引。
+ * @param pageCount 当前书架总页数。
+ * @param edgeWidthPx 左右边缘触发区域的像素宽度。
+ * @return 左翻返回-1，右翻返回1，无需翻页返回0。
+ */
+internal fun resolveEbookShelfEdgePagingDirection(
+    pointerInRoot: Offset,
+    shelfBoundsInRoot: Rect,
+    currentPage: Int,
+    pageCount: Int,
+    edgeWidthPx: Float
+): Int {
+    if (pageCount <= 1 || shelfBoundsInRoot.width <= 0f || edgeWidthPx <= 0f) return 0
+    if (pointerInRoot.y !in shelfBoundsInRoot.top..shelfBoundsInRoot.bottom) return 0
+    return when {
+        pointerInRoot.x <= shelfBoundsInRoot.left + edgeWidthPx && currentPage > 0 -> -1
+        pointerInRoot.x >= shelfBoundsInRoot.right - edgeWidthPx && currentPage < pageCount - 1 -> 1
+        else -> 0
     }
 }
 
@@ -1955,14 +2441,25 @@ private fun EbookReader(
         mutableStateOf(EbookTranslationStage.IDLE.name)
     }
     var translationMessage by remember(book.id) { mutableStateOf("") }
-    var isAutoReading by rememberSaveable(book.id) { mutableStateOf(false) }
-    var isSpeaking by remember(book.id) { mutableStateOf(false) }
+    var isTimedAutoPageTurning by rememberSaveable(book.id) { mutableStateOf(false) }
+    var autoPageIntervalSeconds by rememberSaveable(book.id) {
+        mutableIntStateOf(DEFAULT_EBOOK_AUTO_PAGE_INTERVAL_SECONDS)
+    }
+    var naturalReadingEnabled by rememberSaveable(book.id) { mutableStateOf(true) }
+    var isReaderForeground by remember(book.id) { mutableStateOf(false) }
+    var isPageScrollInProgress by remember(book.id) { mutableStateOf(false) }
+    var settledPage by remember(book.id) { mutableIntStateOf(currentPage) }
     var readAloudStateName by remember(book.id) {
         mutableStateOf(EbookReadAloudState.INITIALIZING.name)
     }
     var showReadAloudDialog by rememberSaveable(book.id) { mutableStateOf(false) }
-    var finishedUtteranceId by remember(book.id) { mutableStateOf("") }
-    var activeUtteranceId by remember(book.id) { mutableStateOf("") }
+    var readAloudLaunchMessage by remember(book.id) { mutableStateOf("") }
+    var startReadAloudAfterNotificationPermission by remember(book.id) {
+        mutableStateOf(false)
+    }
+    var notificationPermissionGranted by remember(book.id) {
+        mutableStateOf(hasEbookReadAloudNotificationPermission(context))
+    }
     var speechRate by remember(book.id) {
         mutableStateOf(EbookReadAloudController.DEFAULT_SPEECH_RATE)
     }
@@ -1970,20 +2467,32 @@ private fun EbookReader(
     val noteRepository = remember(book.id) { EbookNoteRepository(context.applicationContext) }
     var ebookNotes by remember(book.id) { mutableStateOf(noteRepository.getBookNotes(book)) }
     val translator = remember(book.id) { EbookOfflineTranslator() }
-    val readAloudController = remember(book.id) {
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        notificationPermissionGranted = granted
+        if (!granted) {
+            startReadAloudAfterNotificationPermission = false
+            readAloudLaunchMessage = "需要通知权限才能显示后台朗读控制栏"
+        }
+    }
+    val readAloudSettingsController = remember(book.id) {
         EbookReadAloudController(
             context = context,
             onStateChanged = { state -> readAloudStateName = state.name },
-            onSpeakingChanged = { speaking -> isSpeaking = speaking },
-            onUtteranceFinished = { utteranceId -> finishedUtteranceId = utteranceId },
-            onUtteranceFailed = { utteranceId ->
-                if (utteranceId == activeUtteranceId) {
-                    isAutoReading = false
-                    activeUtteranceId = ""
-                }
-            }
+            onSpeakingChanged = {},
+            onUtteranceRangeChanged = { _, _, _ -> },
+            onUtteranceFinished = {},
+            onUtteranceFailed = {}
         )
     }
+    val playbackSnapshot by EbookReadAloudPlayback.snapshot.collectAsState()
+    val currentBookPlayback = playbackSnapshot.takeIf { snapshot ->
+        snapshot.bookId == book.id &&
+            snapshot.status != EbookReadAloudPlaybackStatus.IDLE &&
+            snapshot.status != EbookReadAloudPlaybackStatus.STOPPED
+    }
+    val isReadAloudSessionActive = currentBookPlayback != null
     val readingMode = EbookReadingMode.entries.firstOrNull { mode ->
         mode.name == readingModeName
     } ?: EbookReadingMode.HORIZONTAL
@@ -2023,19 +2532,27 @@ private fun EbookReader(
 
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
-                Lifecycle.Event.ON_RESUME -> beginReadingIfNeeded()
+                Lifecycle.Event.ON_RESUME -> {
+                    isReaderForeground = true
+                    beginReadingIfNeeded()
+                }
                 Lifecycle.Event.ON_PAUSE,
                 Lifecycle.Event.ON_STOP,
-                Lifecycle.Event.ON_DESTROY -> flushReadingDuration()
+                Lifecycle.Event.ON_DESTROY -> {
+                    isReaderForeground = false
+                    flushReadingDuration()
+                }
                 else -> Unit
             }
         }
         activity?.lifecycle?.addObserver(observer)
         if (activity?.lifecycle?.currentState?.isAtLeast(Lifecycle.State.RESUMED) == true) {
+            isReaderForeground = true
             beginReadingIfNeeded()
         }
 
         onDispose {
+            isReaderForeground = false
             activity?.lifecycle?.removeObserver(observer)
             flushReadingDuration()
         }
@@ -2060,7 +2577,8 @@ private fun EbookReader(
         onDispose {
             latestImmersiveChanged(false)
             translator.close()
-            readAloudController.shutdown()
+            // 页面只释放用于音色设置的空闲控制器；真正发声的前台服务继续存活并保持播放。
+            readAloudSettingsController.shutdown()
         }
     }
 
@@ -2168,8 +2686,16 @@ private fun EbookReader(
     val readerTextReady = textLoaded && (book.format == EbookFormat.PDF || paginationReady)
     val readerDisplayReady = readerTextReady ||
         (book.format != EbookFormat.PDF && book.currentPagePreview.isNotBlank())
-    val chapters = remember(textPages, book.format) {
-        if (book.format == EbookFormat.PDF) emptyList() else buildEbookTableOfContents(textPages)
+    var chapters by remember(book.id) { mutableStateOf<List<EbookChapter>>(emptyList()) }
+    LaunchedEffect(book.id, book.format, measuredTextPages) {
+        chapters = if (book.format == EbookFormat.PDF || measuredTextPages.isEmpty()) {
+            emptyList()
+        } else {
+            // 大型小说可能包含数十万行，目录识别必须离开Compose主线程，避免分页完成瞬间冻结翻页按钮。
+            withContext(Dispatchers.Default) {
+                buildEbookTableOfContents(textPages)
+            }
+        }
     }
     val pageCount = resolveEbookReaderPageCount(
         format = book.format,
@@ -2180,24 +2706,29 @@ private fun EbookReader(
 
     // 旧版本笔记只保存页码。真实屏幕分页后根据摘录在完整正文中的位置重新定位，避免字体或屏幕
     // 尺寸变化导致页边标记、笔记列表跳转仍停留在旧页码。
-    val displayedEbookNotes = remember(
+    var displayedEbookNotes by remember(book.id) { mutableStateOf(ebookNotes) }
+    LaunchedEffect(
+        book.id,
+        book.format,
         ebookNotes,
         measuredTextPages,
-        extractedText,
-        book.format
+        extractedText
     ) {
-        if (book.format == EbookFormat.PDF || measuredTextPages.isEmpty()) {
+        displayedEbookNotes = if (book.format == EbookFormat.PDF || measuredTextPages.isEmpty()) {
             ebookNotes
         } else {
-            ebookNotes.map { note ->
-                note.copy(
-                    pageIndex = findEbookPageIndexForExcerpt(
-                        pages = measuredTextPages,
-                        fullText = extractedText,
-                        excerpt = note.excerpt,
-                        fallbackPageIndex = note.pageIndex
+            // 每条旧笔记都可能检索完整正文，放到后台集中重定位，避免笔记较多时再次占用触摸主线程。
+            withContext(Dispatchers.Default) {
+                ebookNotes.map { note ->
+                    note.copy(
+                        pageIndex = findEbookPageIndexForExcerpt(
+                            pages = measuredTextPages,
+                            fullText = extractedText,
+                            excerpt = note.excerpt,
+                            fallbackPageIndex = note.pageIndex
+                        )
                     )
-                )
+                }
             }
         }
     }
@@ -2212,11 +2743,29 @@ private fun EbookReader(
         }
     }
 
-    // 用户真正翻到新页后更新字符锚点，供退出保存、字号变化和横竖屏变化时恢复位置。
-    LaunchedEffect(book.id, book.format, currentPage) {
+    // 用户真正翻到新页后更新字符锚点；若后台服务正在朗读本页，则优先采用服务的安全词句
+    // 断点，避免页面重建或退出保存时又把精确位置覆盖为页首。
+    LaunchedEffect(
+        book.id,
+        book.format,
+        currentPage,
+        currentBookPlayback?.currentPage,
+        currentBookPlayback?.resumeOffset,
+        currentBookPlayback?.spokenText
+    ) {
         if (book.format != EbookFormat.PDF && paginationReady) {
             measuredTextPages.getOrNull(currentPage)?.let { page ->
-                currentTextOffset = page.startOffset
+                val playbackPageOffset = currentBookPlayback
+                    ?.takeIf { snapshot ->
+                        snapshot.currentPage == currentPage && snapshot.spokenText == page.text
+                    }
+                    ?.resumeOffset
+                    ?.coerceIn(0, page.text.length)
+                    ?: 0
+                currentTextOffset = (page.startOffset + playbackPageOffset).coerceIn(
+                    page.startOffset,
+                    page.endOffset
+                )
             }
         }
     }
@@ -2246,13 +2795,23 @@ private fun EbookReader(
             readyToSave = book.format == EbookFormat.PDF || readerTextReady
         )
     )
+    val latestReadAloudSessionActive by rememberUpdatedState(isReadAloudSessionActive)
 
-    // 退出阅读器时同步写入最后一页，补足350毫秒防抖任务可能被页面销毁取消的时间窗口。
+    // 退出阅读器时补足350毫秒防抖任务可能被页面销毁取消的时间窗口。后台朗读仍存活时，服务是
+    // 唯一页码写入者，页面只合并阅读设置，避免刚推进的新断点被退出瞬间捕获的旧Compose页码覆盖。
     DisposableEffect(book.id, repository) {
         onDispose {
             val snapshot = latestProgressSnapshot
             if (snapshot.readyToSave) {
-                val saved = synchronized(repository) {
+                val saved = if (latestReadAloudSessionActive) {
+                    repository.saveReadingSettings(
+                        bookId = snapshot.bookId,
+                        readingMode = snapshot.readingMode,
+                        readingBackground = snapshot.readingBackground,
+                        fontScale = snapshot.fontScale,
+                        fontFamily = snapshot.fontFamily
+                    )
+                } else {
                     repository.saveReadingProgress(
                         bookId = snapshot.bookId,
                         currentPage = snapshot.currentPage,
@@ -2280,6 +2839,10 @@ private fun EbookReader(
             book.currentPagePreview.ifBlank { "没有可显示的正文" }
         }
     }
+    val serviceSpokenTextForCurrentPage = currentBookPlayback
+        ?.takeIf { snapshot -> snapshot.currentPage == currentPage }
+        ?.spokenText
+        .orEmpty()
     val displayedPageText = when (translationDisplayMode) {
         EbookTranslationDisplayMode.ORIGINAL -> originalPageText
         EbookTranslationDisplayMode.BILINGUAL -> {
@@ -2289,19 +2852,38 @@ private fun EbookReader(
                 "$originalPageText\n\n—— 离线译文 ——\n\n$translatedText"
             }
         }
-        EbookTranslationDisplayMode.TRANSLATED -> translatedText.ifBlank { originalPageText }
+        EbookTranslationDisplayMode.TRANSLATED -> {
+            serviceSpokenTextForCurrentPage.ifBlank {
+                translatedText.ifBlank { originalPageText }
+            }
+        }
     }
-    // 对照模式固定朗读原文，避免同一个TTS音色在中英文混合段落中频繁误读。
-    val readAloudText = when (translationDisplayMode) {
-        EbookTranslationDisplayMode.TRANSLATED -> translatedText
-        else -> originalPageText
-    }
+    val readAloudRange = currentBookPlayback
+        ?.takeIf { snapshot ->
+            snapshot.currentPage == currentPage &&
+                snapshot.highlightStart >= 0 &&
+                snapshot.highlightEnd > snapshot.highlightStart &&
+                snapshot.highlightEnd <= displayedPageText.length
+        }
+        ?.let { snapshot ->
+            EbookSpeechTextRange(
+                startOffset = snapshot.highlightStart,
+                endOffsetExclusive = snapshot.highlightEnd
+            )
+        }
     val readAloudLanguageCode = when {
         translationDisplayMode == EbookTranslationDisplayMode.TRANSLATED &&
             translationDirection == EbookTranslationDirection.ENGLISH_TO_CHINESE -> Locale.CHINESE.language
         translationDisplayMode == EbookTranslationDisplayMode.TRANSLATED -> Locale.ENGLISH.language
         else -> detectEbookLanguageCode(originalPageText)
     }
+    val readerOverlayVisible = showReaderSettings ||
+        showTableOfContents ||
+        showBookNotes ||
+        pendingNoteDraft != null ||
+        showJumpDialog ||
+        showTranslationDialog ||
+        showReadAloudDialog
 
     // 每次翻页或切换语言方向时只翻译当前页；上一任务由LaunchedEffect自动取消，防止旧译文覆盖新页面。
     LaunchedEffect(
@@ -2334,52 +2916,181 @@ private fun EbookReader(
     }
 
     LaunchedEffect(readAloudState, readAloudLanguageCode, showReadAloudDialog) {
-        speechRate = readAloudController.speechRate()
+        speechRate = readAloudSettingsController.speechRate()
         if (showReadAloudDialog && readAloudState == EbookReadAloudState.READY) {
-            selectedVoiceName = readAloudController.selectedVoiceName(readAloudLanguageCode)
+            selectedVoiceName = readAloudSettingsController.selectedVoiceName(
+                readAloudLanguageCode
+            )
         }
     }
 
-    // 连续朗读会在翻页或译文准备完成后提交当前页；QUEUE_FLUSH会停止仍在朗读的旧页面。
+    // 服务是后台朗读页码和词句断点的唯一事实源。通知栏、锁屏或耳机切页后，即使阅读页面之前
+    // 已离开，重新进入也会先同步到服务当前页，再由Pager完成可见页面动画。
     LaunchedEffect(
-        isAutoReading,
-        currentPage,
-        readAloudText,
-        readAloudLanguageCode,
-        readAloudState,
-        translationStage
+        currentBookPlayback?.currentPage,
+        currentBookPlayback?.resumeOffset,
+        readerTextReady,
+        measuredTextPages
     ) {
-        if (!isAutoReading) return@LaunchedEffect
-        if (readAloudState != EbookReadAloudState.READY || readAloudText.isBlank()) {
-            if (
-                translationDisplayMode != EbookTranslationDisplayMode.TRANSLATED ||
-                translationStage == EbookTranslationStage.ERROR
-            ) {
-                isAutoReading = false
-            }
-            return@LaunchedEffect
+        val snapshot = currentBookPlayback ?: return@LaunchedEffect
+        if (!readerTextReady || book.format == EbookFormat.PDF) return@LaunchedEffect
+        val page = measuredTextPages.getOrNull(snapshot.currentPage) ?: return@LaunchedEffect
+        currentPage = snapshot.currentPage
+        val originalPageResumeOffset = if (snapshot.spokenText == page.text) {
+            snapshot.resumeOffset.coerceIn(0, page.text.length)
+        } else {
+            0
         }
-        val utteranceId = "ebook_${book.id}_${currentPage}_${System.nanoTime()}"
-        activeUtteranceId = utteranceId
-        if (!readAloudController.speak(readAloudText, readAloudLanguageCode, utteranceId)) {
-            isAutoReading = false
-            activeUtteranceId = ""
+        currentTextOffset = (page.startOffset + originalPageResumeOffset).coerceIn(
+            page.startOffset,
+            page.endOffset
+        )
+    }
+
+    // 页面上的按钮、手势、目录和笔记仍先改变Compose页码；页面动画停稳后把同一目标页交给
+    // 服务。服务会原子作废旧TTS代际，并保持原来的播放或暂停意图，避免两页声音交叉。
+    LaunchedEffect(
+        currentPage,
+        settledPage,
+        isPageScrollInProgress,
+        currentBookPlayback?.currentPage
+    ) {
+        val snapshot = currentBookPlayback ?: return@LaunchedEffect
+        if (
+            !isPageScrollInProgress &&
+            settledPage == currentPage &&
+            snapshot.currentPage != currentPage
+        ) {
+            if (!EbookReadAloudService.seekTo(context, currentPage)) {
+                readAloudLaunchMessage = "无法把后台朗读切换到当前页，请停止后重新开始"
+            }
         }
     }
 
-    LaunchedEffect(finishedUtteranceId) {
-        if (
-            finishedUtteranceId.isBlank() ||
-            finishedUtteranceId != activeUtteranceId ||
-            !isAutoReading
-        ) {
-            return@LaunchedEffect
-        }
-        activeUtteranceId = ""
-        if (currentPage < pageCount - 1) {
-            currentPage += 1
+    val startReadAloud: () -> Unit = {
+        if (book.format == EbookFormat.PDF || measuredTextPages.isEmpty()) {
+            readAloudLaunchMessage = "当前书籍还没有可供连续朗读的分页正文"
         } else {
-            isAutoReading = false
+            readAloudLaunchMessage = ""
+            val spokenTextUsesOriginal =
+                translationDisplayMode != EbookTranslationDisplayMode.TRANSLATED
+            val config = EbookReadAloudConfig(
+                bookId = book.id,
+                title = book.title,
+                author = book.author,
+                pages = measuredTextPages.map { page -> EbookReadAloudPage(page.text) },
+                initialPage = currentPage,
+                naturalReadingEnabled = naturalReadingEnabled,
+                translationDirection = if (spokenTextUsesOriginal) null else translationDirection
+            )
+            val progressCallback = EbookReadAloudRepositoryProgressCallback(
+                repository = repository,
+                bookId = book.id,
+                pages = measuredTextPages.toList(),
+                spokenTextUsesOriginal = spokenTextUsesOriginal
+            )
+            val token = runCatching {
+                EbookReadAloudPlayback.register(config, progressCallback)
+            }.onFailure { error ->
+                Log.e(EBOOK_SCREEN_TAG, "Failed to register ebook read-aloud session", error)
+            }.getOrNull()
+            if (token == null || !EbookReadAloudService.start(context, token)) {
+                token?.let(EbookReadAloudPlayback::unregister)
+                readAloudLaunchMessage = "无法启动后台朗读，请检查通知权限后重试"
+            }
+        }
+    }
+
+    val requestPermissionOrStartReadAloud: () -> Unit = {
+        if (hasEbookReadAloudNotificationPermission(context)) {
+            notificationPermissionGranted = true
+            startReadAloud()
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            startReadAloudAfterNotificationPermission = true
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
+    // 权限弹窗返回后再启动前台服务，确保第一张媒体通知从建立时就对用户可见并可控制。
+    LaunchedEffect(
+        startReadAloudAfterNotificationPermission,
+        notificationPermissionGranted
+    ) {
+        if (startReadAloudAfterNotificationPermission && notificationPermissionGranted) {
+            startReadAloudAfterNotificationPermission = false
+            startReadAloud()
+        }
+    }
+
+    val toggleReadAloud: () -> Unit = {
+        readAloudLaunchMessage = ""
+        val commandAccepted = when (currentBookPlayback?.status) {
+            EbookReadAloudPlaybackStatus.PREPARING,
+            EbookReadAloudPlaybackStatus.PLAYING -> EbookReadAloudService.pause(context)
+
+            EbookReadAloudPlaybackStatus.PAUSED,
+            EbookReadAloudPlaybackStatus.COMPLETED,
+            EbookReadAloudPlaybackStatus.ERROR -> EbookReadAloudService.play(context)
+
+            EbookReadAloudPlaybackStatus.IDLE,
+            EbookReadAloudPlaybackStatus.STOPPED,
+            null -> {
+                requestPermissionOrStartReadAloud()
+                true
+            }
+        }
+        if (!commandAccepted) {
+            readAloudLaunchMessage = "后台朗读控制失败，请停止后重新开始"
+        }
+    }
+
+    val stopReadAloud: () -> Unit = {
+        readAloudLaunchMessage = ""
+        if (!EbookReadAloudService.stop(context)) {
+            readAloudLaunchMessage = "后台朗读停止失败，请稍后重试"
+        }
+    }
+
+    // 普通自动翻页与连续朗读互斥：TTS开启时由整页完成回调翻页，定时器完全不运行。任何弹层、
+    // 后台状态或尚未完成的页面动画都会取消当前倒计时，恢复可读状态后重新按完整间隔计时。
+    LaunchedEffect(
+        isTimedAutoPageTurning,
+        autoPageIntervalSeconds,
+        isReadAloudSessionActive,
+        isReaderForeground,
+        readerOverlayVisible,
+        isPageScrollInProgress,
+        readerDisplayReady,
+        currentPage,
+        settledPage,
+        pageCount
+    ) {
+        val canTurnPage = shouldScheduleEbookTimedPageTurn(
+            enabled = isTimedAutoPageTurning,
+            continuousReading = isReadAloudSessionActive,
+            readerForeground = isReaderForeground,
+            overlayVisible = readerOverlayVisible,
+            pageScrollInProgress = isPageScrollInProgress,
+            contentReady = readerDisplayReady && settledPage == currentPage,
+            currentPage = currentPage,
+            pageCount = pageCount
+        )
+        if (!canTurnPage) return@LaunchedEffect
+
+        delay(autoPageIntervalSeconds * 1_000L)
+        resolveNextEbookAutomaticPage(currentPage, pageCount)?.let { nextPage ->
+            currentPage = nextPage
+        }
+    }
+
+    // 到达书末后关闭运行开关，避免设置面板仍显示“正在自动翻页”却没有后续页面。
+    LaunchedEffect(isTimedAutoPageTurning, readerDisplayReady, currentPage, pageCount) {
+        if (
+            isTimedAutoPageTurning &&
+            readerDisplayReady &&
+            resolveNextEbookAutomaticPage(currentPage, pageCount) == null
+        ) {
+            isTimedAutoPageTurning = false
         }
     }
 
@@ -2392,12 +3103,22 @@ private fun EbookReader(
         readingMode,
         readingBackground,
         fontScale,
-        fontFamily
+        fontFamily,
+        isReadAloudSessionActive
     ) {
         if (book.format != EbookFormat.PDF && !readerTextReady) return@LaunchedEffect
         delay(PROGRESS_SAVE_DEBOUNCE_MILLIS)
         withContext(Dispatchers.IO) {
-            synchronized(repository) {
+            if (isReadAloudSessionActive) {
+                // 活跃朗读会话的字符断点由服务保存；此处只合并界面设置。
+                repository.saveReadingSettings(
+                    bookId = book.id,
+                    readingMode = readingMode,
+                    readingBackground = readingBackground,
+                    fontScale = fontScale,
+                    fontFamily = fontFamily
+                )
+            } else {
                 repository.saveReadingProgress(
                     bookId = book.id,
                     currentPage = currentPage,
@@ -2468,6 +3189,7 @@ private fun EbookReader(
                 fontFamily = fontFamily,
                 controlsVisible = controlsVisible,
                 noteCountsByPage = displayedEbookNotes.groupingBy(EbookNote::pageIndex).eachCount(),
+                readAloudRange = readAloudRange,
                 onToggleControls = { controlsVisible = !controlsVisible },
                 onCreateNote = { excerpt, page ->
                     pendingNoteDraft = PendingEbookNoteDraft(
@@ -2483,7 +3205,13 @@ private fun EbookReader(
                     controlsVisible = true
                     showBookNotes = true
                 },
-                onPageChanged = { page -> currentPage = page.coerceIn(0, pageCount - 1) }
+                onPageChanged = { page -> currentPage = page.coerceIn(0, pageCount - 1) },
+                onPageScrollStateChanged = { scrolling ->
+                    isPageScrollInProgress = scrolling
+                },
+                onPageSettled = { page ->
+                    settledPage = page.coerceIn(0, pageCount - 1)
+                }
             )
         }
 
@@ -2509,8 +3237,7 @@ private fun EbookReader(
                 ) {
                     TextButton(
                         onClick = {
-                            isAutoReading = false
-                            readAloudController.stop()
+                            isTimedAutoPageTurning = false
                             onBack()
                         }
                     ) {
@@ -2590,7 +3317,26 @@ private fun EbookReader(
                     } else {
                         null
                     }
-                    val footerColor = if (translationStage == EbookTranslationStage.ERROR) {
+                    val readingAutomationStatus = when {
+                        currentBookPlayback?.status == EbookReadAloudPlaybackStatus.PAUSED ->
+                            "后台朗读已暂停 · 可从通知栏继续"
+                        currentBookPlayback?.status == EbookReadAloudPlaybackStatus.PREPARING ->
+                            "正在准备后台朗读…"
+                        currentBookPlayback?.status == EbookReadAloudPlaybackStatus.PLAYING ->
+                            "后台连续朗读 · 当前词句背景高亮"
+                        currentBookPlayback?.status == EbookReadAloudPlaybackStatus.COMPLETED ->
+                            "本书已朗读完成"
+                        currentBookPlayback?.status == EbookReadAloudPlaybackStatus.ERROR ->
+                            currentBookPlayback.error ?: "后台朗读发生错误"
+                        readAloudLaunchMessage.isNotBlank() -> readAloudLaunchMessage
+                        isTimedAutoPageTurning -> "自动翻页 · ${autoPageIntervalSeconds}秒/页"
+                        else -> null
+                    }
+                    val footerColor = if (
+                        translationStage == EbookTranslationStage.ERROR ||
+                        currentBookPlayback?.status == EbookReadAloudPlaybackStatus.ERROR ||
+                        readAloudLaunchMessage.isNotBlank()
+                    ) {
                         MaterialTheme.colorScheme.error
                     } else {
                         readerPalette.controlText.copy(alpha = 0.74f)
@@ -2603,7 +3349,8 @@ private fun EbookReader(
                     ) {
                         Text(
                             modifier = Modifier.weight(1f),
-                            text = translationStatus
+                            text = readingAutomationStatus
+                                ?: translationStatus
                                 ?: currentChapter?.title
                                 ?: "轻触正文进入沉浸阅读",
                             color = footerColor,
@@ -2646,7 +3393,10 @@ private fun EbookReader(
             noteCount = displayedEbookNotes.size,
             translationDisplayMode = translationDisplayMode,
             readAloudReady = readAloudState == EbookReadAloudState.READY,
-            isAutoReading = isAutoReading || isSpeaking,
+            readAloudPlaybackStatus = currentBookPlayback?.status,
+            isTimedAutoPageTurning = isTimedAutoPageTurning,
+            autoPageIntervalSeconds = autoPageIntervalSeconds,
+            naturalReadingEnabled = naturalReadingEnabled,
             onReadingModeChanged = { mode -> readingModeName = mode.name },
             onReadingBackgroundChanged = { background ->
                 readingBackgroundName = background.name
@@ -2675,14 +3425,19 @@ private fun EbookReader(
                 showReaderSettings = false
                 showTranslationDialog = true
             },
-            onToggleReadAloud = {
-                if (isAutoReading || isSpeaking) {
-                    isAutoReading = false
-                    activeUtteranceId = ""
-                    readAloudController.stop()
-                } else {
-                    isAutoReading = true
-                }
+            onTimedAutoPageTurningChanged = { enabled ->
+                isTimedAutoPageTurning = enabled
+            },
+            onAutoPageIntervalChanged = { seconds ->
+                autoPageIntervalSeconds = seconds.coerceIn(
+                    MIN_EBOOK_AUTO_PAGE_INTERVAL_SECONDS,
+                    MAX_EBOOK_AUTO_PAGE_INTERVAL_SECONDS
+                )
+            },
+            onToggleReadAloud = toggleReadAloud,
+            onStopReadAloud = stopReadAloud,
+            onNaturalReadingChanged = { enabled ->
+                naturalReadingEnabled = enabled
             },
             onReadAloudSettings = {
                 showReaderSettings = false
@@ -2765,14 +3520,20 @@ private fun EbookReader(
         EbookTranslationDialog(
             direction = translationDirection,
             displayMode = translationDisplayMode,
-            onDirectionChanged = { direction -> translationDirectionName = direction.name },
-            onDisplayModeChanged = { mode -> translationDisplayModeName = mode.name },
+            onDirectionChanged = { direction ->
+                if (isReadAloudSessionActive) stopReadAloud()
+                translationDirectionName = direction.name
+            },
+            onDisplayModeChanged = { mode ->
+                if (isReadAloudSessionActive) stopReadAloud()
+                translationDisplayModeName = mode.name
+            },
             onDismiss = { showTranslationDialog = false }
         )
     }
 
     if (showReadAloudDialog) {
-        val voiceOptions = readAloudController.availableVoices(readAloudLanguageCode)
+        val voiceOptions = readAloudSettingsController.availableVoices(readAloudLanguageCode)
         EbookReadAloudDialog(
             state = readAloudState,
             languageCode = readAloudLanguageCode,
@@ -2780,13 +3541,13 @@ private fun EbookReader(
             selectedVoiceName = selectedVoiceName,
             speechRate = speechRate,
             onVoiceSelected = { voiceName ->
-                if (readAloudController.selectVoice(readAloudLanguageCode, voiceName)) {
+                if (readAloudSettingsController.selectVoice(readAloudLanguageCode, voiceName)) {
                     selectedVoiceName = voiceName
                 }
             },
             onSpeechRateChanged = { rate -> speechRate = rate },
             onSpeechRateChangeFinished = {
-                readAloudController.setSpeechRate(speechRate)
+                readAloudSettingsController.setSpeechRate(speechRate)
             },
             onOpenSystemSettings = {
                 runCatching {
@@ -2996,7 +3757,8 @@ private data class EbookReaderPalette(
     val background: Color,
     val text: Color,
     val control: Color,
-    val controlText: Color
+    val controlText: Color,
+    val readAloudHighlight: Color
 )
 
 /**
@@ -3006,7 +3768,7 @@ private data class EbookReaderPalette(
  * 阅读器根据已保存的[EbookReadingBackground]调用本函数，并把返回值传给正文页和工具栏。
  *
  * @param background 当前阅读背景选项。
- * @return 完整的阅读器背景、文字、控制栏和控制栏文字颜色。
+ * @return 完整的阅读器背景、文字、控制栏、控制栏文字和朗读范围背景颜色。
  */
 private fun ebookReaderPalette(background: EbookReadingBackground): EbookReaderPalette {
     return when (background) {
@@ -3014,25 +3776,29 @@ private fun ebookReaderPalette(background: EbookReadingBackground): EbookReaderP
             background = Color(0xFFFFFAEF),
             text = Color(0xFF2D281F),
             control = Color(0xFFF2E9D5),
-            controlText = Color(0xFF332B20)
+            controlText = Color(0xFF332B20),
+            readAloudHighlight = Color(0xB3FFD45A)
         )
         EbookReadingBackground.WARM -> EbookReaderPalette(
             background = Color(0xFFF1DEB7),
             text = Color(0xFF3A2A1C),
             control = Color(0xFFDEBF8B),
-            controlText = Color(0xFF372515)
+            controlText = Color(0xFF372515),
+            readAloudHighlight = Color(0xB3F6B94B)
         )
         EbookReadingBackground.GREEN -> EbookReaderPalette(
             background = Color(0xFFDDE8D6),
             text = Color(0xFF263328),
             control = Color(0xFFC5D6BD),
-            controlText = Color(0xFF233026)
+            controlText = Color(0xFF233026),
+            readAloudHighlight = Color(0xB39ECE79)
         )
         EbookReadingBackground.NIGHT -> EbookReaderPalette(
             background = Color(0xFF111318),
             text = Color(0xFFD8DAE0),
             control = Color(0xFF22262E),
-            controlText = Color(0xFFF1F2F5)
+            controlText = Color(0xFFF1F2F5),
+            readAloudHighlight = Color(0xCC695426)
         )
     }
 }
@@ -3053,7 +3819,10 @@ private fun ebookReaderPalette(background: EbookReadingBackground): EbookReaderP
  * @param noteCount 当前书籍已经保存的摘录笔记数量。
  * @param translationDisplayMode 当前翻译展示方式。
  * @param readAloudReady Android TTS是否已准备完成。
- * @param isAutoReading 当前是否正在连续朗读。
+ * @param readAloudPlaybackStatus 当前书籍的后台朗读状态；null表示没有活动会话。
+ * @param isTimedAutoPageTurning 当前是否开启按固定间隔自动翻页。
+ * @param autoPageIntervalSeconds 定时自动翻页的单页停留秒数。
+ * @param naturalReadingEnabled 是否按标点分句并应用轻微停顿、语速和音高变化。
  * @param onReadingModeChanged 翻页模式变化回调。
  * @param onReadingBackgroundChanged 阅读背景变化回调。
  * @param onFontScaleChanged 字号变化回调。
@@ -3062,7 +3831,11 @@ private fun ebookReaderPalette(background: EbookReadingBackground): EbookReaderP
  * @param onOpenTableOfContents 打开目录或页码列表的回调。
  * @param onJump 打开跳页窗口的回调。
  * @param onTranslate 打开离线翻译设置的回调。
- * @param onToggleReadAloud 开始或停止连续朗读的回调。
+ * @param onTimedAutoPageTurningChanged 开启或关闭定时自动翻页的回调。
+ * @param onAutoPageIntervalChanged 修改单页停留秒数的回调。
+ * @param onToggleReadAloud 按当前状态开始、暂停、继续或重试朗读的回调。
+ * @param onStopReadAloud 显式结束前台服务并移除媒体通知的回调。
+ * @param onNaturalReadingChanged 开启或关闭自然朗读的回调。
  * @param onReadAloudSettings 打开音色与速度设置的回调。
  * @param onEnterImmersive 进入无干扰阅读的回调。
  * @param onDismiss 关闭面板的回调。
@@ -3080,7 +3853,10 @@ private fun EbookReaderSettingsSheet(
     noteCount: Int,
     translationDisplayMode: EbookTranslationDisplayMode,
     readAloudReady: Boolean,
-    isAutoReading: Boolean,
+    readAloudPlaybackStatus: EbookReadAloudPlaybackStatus?,
+    isTimedAutoPageTurning: Boolean,
+    autoPageIntervalSeconds: Int,
+    naturalReadingEnabled: Boolean,
     onReadingModeChanged: (EbookReadingMode) -> Unit,
     onReadingBackgroundChanged: (EbookReadingBackground) -> Unit,
     onFontScaleChanged: (Float) -> Unit,
@@ -3089,11 +3865,26 @@ private fun EbookReaderSettingsSheet(
     onOpenTableOfContents: () -> Unit,
     onJump: () -> Unit,
     onTranslate: () -> Unit,
+    onTimedAutoPageTurningChanged: (Boolean) -> Unit,
+    onAutoPageIntervalChanged: (Int) -> Unit,
     onToggleReadAloud: () -> Unit,
+    onStopReadAloud: () -> Unit,
+    onNaturalReadingChanged: (Boolean) -> Unit,
     onReadAloudSettings: () -> Unit,
     onEnterImmersive: () -> Unit,
     onDismiss: () -> Unit
 ) {
+    val isReadAloudSessionActive = readAloudPlaybackStatus != null
+    val readAloudActionLabel = when (readAloudPlaybackStatus) {
+        EbookReadAloudPlaybackStatus.PREPARING,
+        EbookReadAloudPlaybackStatus.PLAYING -> "暂停朗读"
+        EbookReadAloudPlaybackStatus.PAUSED -> "继续朗读"
+        EbookReadAloudPlaybackStatus.COMPLETED -> "重读末页"
+        EbookReadAloudPlaybackStatus.ERROR -> "重试朗读"
+        EbookReadAloudPlaybackStatus.IDLE,
+        EbookReadAloudPlaybackStatus.STOPPED,
+        null -> "连续朗读"
+    }
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
             modifier = Modifier
@@ -3223,16 +4014,48 @@ private fun EbookReaderSettingsSheet(
                 Text(if (noteCount > 0) "本书笔记（$noteCount）" else "本书还没有笔记")
             }
 
+            Text("自动翻页", fontWeight = FontWeight.SemiBold)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(if (isTimedAutoPageTurning) "正在自动翻页" else "定时自动翻页")
+                    Text(
+                        "连续朗读时自动暂停计时，改由本页朗读完成后翻页。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = isTimedAutoPageTurning,
+                    onCheckedChange = onTimedAutoPageTurningChanged
+                )
+            }
+            Text(
+                text = "每页停留：${autoPageIntervalSeconds}秒",
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold
+            )
+            Slider(
+                value = autoPageIntervalSeconds.toFloat(),
+                onValueChange = { seconds -> onAutoPageIntervalChanged(seconds.roundToInt()) },
+                valueRange = MIN_EBOOK_AUTO_PAGE_INTERVAL_SECONDS.toFloat()..
+                    MAX_EBOOK_AUTO_PAGE_INTERVAL_SECONDS.toFloat(),
+                steps = EBOOK_AUTO_PAGE_INTERVAL_SLIDER_STEPS
+            )
+
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Button(
                     modifier = Modifier.weight(1f),
-                    enabled = book.format != EbookFormat.PDF && readAloudReady,
+                    enabled = book.format != EbookFormat.PDF &&
+                        (readAloudReady || isReadAloudSessionActive),
                     onClick = onToggleReadAloud
                 ) {
-                    Text(if (isAutoReading) "停止朗读" else "连续朗读")
+                    Text(readAloudActionLabel)
                 }
                 OutlinedButton(
                     modifier = Modifier.weight(1f),
@@ -3242,6 +4065,42 @@ private fun EbookReaderSettingsSheet(
                     Text("音色与速度")
                 }
             }
+            if (isReadAloudSessionActive) {
+                OutlinedButton(
+                    modifier = Modifier.fillMaxWidth(),
+                    onClick = onStopReadAloud
+                ) {
+                    Text("停止朗读并移除通知")
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("自然朗读", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        if (isReadAloudSessionActive) {
+                            "请先停止当前朗读再切换；开启后会按标点分句并加入自然停顿与轻微语调变化。"
+                        } else {
+                            "按标点和段落分句，加入自然停顿与轻微语调变化；实际效果取决于系统离线音色。"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = naturalReadingEnabled,
+                    enabled = book.format != EbookFormat.PDF && !isReadAloudSessionActive,
+                    onCheckedChange = onNaturalReadingChanged
+                )
+            }
+            Text(
+                "离开阅读页或切到后台不会暂停；通知栏和锁屏可上一页、暂停/继续、下一页和停止。" +
+                    "正文会用背景色标出当前词句，系统音色不提供逐词位置时则高亮当前句。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
 
             Button(
                 modifier = Modifier.fillMaxWidth(),
@@ -3261,7 +4120,32 @@ private fun EbookReaderSettingsSheet(
 /**
  * 根据阅读模式承载PDF页或文本页。
  *
- * @return 无返回值。
+ * 使用方法：
+ * [EbookReader]把唯一页码状态和本页朗读范围传入。三种Pager会把用户滑动页码回传，并在滚动开始、
+ * 停止时分别通知外层暂停自动化；程序请求只跨一页时播放当前翻页动画，远距离目录跳转则直接定位。
+ * 淡入模式没有可拖动Pager，会在淡入动画时长后报告页面已经稳定。
+ *
+ * @param modifier 正文容器外部修饰器。
+ * @param book 当前书籍，决定绘制PDF位图或文本正文。
+ * @param repository PDF页面渲染所需仓库。
+ * @param textPages 文本书籍已经完成屏幕分页的页面。
+ * @param pageCount 当前总页数。
+ * @param currentPage 外层持有的当前零基页码。
+ * @param currentTextOverride 当前页经过原文、对照或译文模式处理后的显示文字。
+ * @param readingMode 当前翻页动画模式。
+ * @param readerPalette 当前阅读背景配色。
+ * @param fontScale 正文字号倍率。
+ * @param fontFamily 正文字体。
+ * @param controlsVisible 顶部和底部工具栏是否显示。
+ * @param noteCountsByPage 每页笔记数量。
+ * @param readAloudRange 当前页需要显示背景色的整页UTF-16范围；没有朗读时为null。
+ * @param onToggleControls 单击正文切换工具栏的回调。
+ * @param onCreateNote 创建当前页摘录笔记的回调。
+ * @param onOpenPageNotes 打开指定页笔记的回调。
+ * @param onPageChanged 用户或Pager动画改变当前页时的回调。
+ * @param onPageScrollStateChanged Pager开始或停止移动时的回调。
+ * @param onPageSettled 页面动画完整停止后的最终页码回调。
+ * @return 无返回值，直接绘制当前阅读页。
  */
 @Composable
 private fun EbookPageContainer(
@@ -3278,11 +4162,17 @@ private fun EbookPageContainer(
     fontFamily: EbookFontFamily,
     controlsVisible: Boolean,
     noteCountsByPage: Map<Int, Int>,
+    readAloudRange: EbookSpeechTextRange?,
     onToggleControls: () -> Unit,
     onCreateNote: (String, Int) -> Unit,
     onOpenPageNotes: (Int) -> Unit,
-    onPageChanged: (Int) -> Unit
+    onPageChanged: (Int) -> Unit,
+    onPageScrollStateChanged: (Boolean) -> Unit,
+    onPageSettled: (Int) -> Unit
 ) {
+    val latestOnPageChanged by rememberUpdatedState(onPageChanged)
+    val latestOnPageScrollStateChanged by rememberUpdatedState(onPageScrollStateChanged)
+    val latestOnPageSettled by rememberUpdatedState(onPageSettled)
     val pageContent: @Composable (Int) -> Unit = { page ->
         if (book.format == EbookFormat.PDF) {
             PdfEbookPage(
@@ -3304,6 +4194,8 @@ private fun EbookPageContainer(
                 noteCount = noteCountsByPage[page] ?: 0,
                 backgroundColor = readerPalette.background,
                 textColor = readerPalette.text,
+                readAloudHighlightColor = readerPalette.readAloudHighlight,
+                readAloudRange = readAloudRange.takeIf { page == currentPage },
                 onCreateNote = { excerpt -> onCreateNote(excerpt, page) },
                 onOpenNotes = { onOpenPageNotes(page) }
             )
@@ -3327,11 +4219,23 @@ private fun EbookPageContainer(
             )
             LaunchedEffect(currentPage) {
                 if (!pagerState.isScrollInProgress && pagerState.currentPage != currentPage) {
-                    pagerState.scrollToPage(currentPage)
+                    if ((pagerState.currentPage - currentPage).absoluteValue == 1) {
+                        pagerState.animateScrollToPage(currentPage)
+                    } else {
+                        pagerState.scrollToPage(currentPage)
+                    }
                 }
             }
             LaunchedEffect(pagerState) {
-                snapshotFlow { pagerState.currentPage }.collect(onPageChanged)
+                snapshotFlow { pagerState.currentPage }.collect { page ->
+                    latestOnPageChanged(page)
+                }
+            }
+            LaunchedEffect(pagerState) {
+                snapshotFlow { pagerState.isScrollInProgress }.collect { scrolling ->
+                    latestOnPageScrollStateChanged(scrolling)
+                    if (!scrolling) latestOnPageSettled(pagerState.currentPage)
+                }
             }
             HorizontalPager(
                 modifier = Modifier.fillMaxSize(),
@@ -3395,11 +4299,23 @@ private fun EbookPageContainer(
             )
             LaunchedEffect(currentPage) {
                 if (!pagerState.isScrollInProgress && pagerState.currentPage != currentPage) {
-                    pagerState.scrollToPage(currentPage)
+                    if ((pagerState.currentPage - currentPage).absoluteValue == 1) {
+                        pagerState.animateScrollToPage(currentPage)
+                    } else {
+                        pagerState.scrollToPage(currentPage)
+                    }
                 }
             }
             LaunchedEffect(pagerState) {
-                snapshotFlow { pagerState.currentPage }.collect(onPageChanged)
+                snapshotFlow { pagerState.currentPage }.collect { page ->
+                    latestOnPageChanged(page)
+                }
+            }
+            LaunchedEffect(pagerState) {
+                snapshotFlow { pagerState.isScrollInProgress }.collect { scrolling ->
+                    latestOnPageScrollStateChanged(scrolling)
+                    if (!scrolling) latestOnPageSettled(pagerState.currentPage)
+                }
             }
             HorizontalPager(
                 modifier = Modifier.fillMaxSize(),
@@ -3415,11 +4331,23 @@ private fun EbookPageContainer(
             )
             LaunchedEffect(currentPage) {
                 if (!pagerState.isScrollInProgress && pagerState.currentPage != currentPage) {
-                    pagerState.scrollToPage(currentPage)
+                    if ((pagerState.currentPage - currentPage).absoluteValue == 1) {
+                        pagerState.animateScrollToPage(currentPage)
+                    } else {
+                        pagerState.scrollToPage(currentPage)
+                    }
                 }
             }
             LaunchedEffect(pagerState) {
-                snapshotFlow { pagerState.currentPage }.collect(onPageChanged)
+                snapshotFlow { pagerState.currentPage }.collect { page ->
+                    latestOnPageChanged(page)
+                }
+            }
+            LaunchedEffect(pagerState) {
+                snapshotFlow { pagerState.isScrollInProgress }.collect { scrolling ->
+                    latestOnPageScrollStateChanged(scrolling)
+                    if (!scrolling) latestOnPageSettled(pagerState.currentPage)
+                }
             }
             VerticalPager(
                 modifier = Modifier.fillMaxSize(),
@@ -3429,6 +4357,13 @@ private fun EbookPageContainer(
         }
 
             EbookReadingMode.FADE -> {
+                LaunchedEffect(currentPage) {
+                    latestOnPageScrollStateChanged(true)
+                    delay(EBOOK_READER_FADE_SETTLE_MILLIS)
+                    latestOnPageChanged(currentPage)
+                    latestOnPageScrollStateChanged(false)
+                    latestOnPageSettled(currentPage)
+                }
                 AnimatedContent(
                     modifier = Modifier.fillMaxSize(),
                     targetState = currentPage,
@@ -3453,6 +4388,8 @@ private fun EbookPageContainer(
  * @param noteCount 当前页已经保存的笔记数量。
  * @param backgroundColor 阅读背景颜色。
  * @param textColor 正文文字颜色。
+ * @param readAloudHighlightColor 当前朗读范围使用的背景颜色。
+ * @param readAloudRange 当前页正在朗读的UTF-16范围，终点不包含；没有朗读时为null。
  * @param onCreateNote 用户确认把当前选择保存为笔记的回调。
  * @param onOpenNotes 打开当前页笔记列表的回调。
  * @return 无返回值，直接绘制文本页。
@@ -3466,10 +4403,44 @@ private fun TextEbookPage(
     noteCount: Int,
     backgroundColor: Color,
     textColor: Color,
+    readAloudHighlightColor: Color,
+    readAloudRange: EbookSpeechTextRange?,
     onCreateNote: (String) -> Unit,
     onOpenNotes: () -> Unit
 ) {
     var textFieldValue by remember(text) { mutableStateOf(TextFieldValue(text)) }
+    val safeReadAloudRange = remember(text, readAloudRange) {
+        readAloudRange?.let { range ->
+            val safeStart = range.startOffset.coerceIn(0, text.length)
+            val safeEnd = range.endOffsetExclusive.coerceIn(safeStart, text.length)
+            if (safeEnd > safeStart) {
+                EbookSpeechTextRange(safeStart, safeEnd)
+            } else {
+                null
+            }
+        }
+    }
+    val readAloudVisualTransformation: VisualTransformation = remember(
+        safeReadAloudRange,
+        readAloudHighlightColor
+    ) {
+        val highlightRange = safeReadAloudRange
+        if (highlightRange == null) {
+            VisualTransformation.None
+        } else {
+            VisualTransformation { source ->
+                val highlightedText = buildAnnotatedString {
+                    append(source)
+                    addStyle(
+                        style = SpanStyle(background = readAloudHighlightColor),
+                        start = highlightRange.startOffset,
+                        end = highlightRange.endOffsetExclusive
+                    )
+                }
+                TransformedText(highlightedText, OffsetMapping.Identity)
+            }
+        }
+    }
     val selectedText = normalizeEbookNoteSelection(
         text = text,
         selectionStart = textFieldValue.selection.start,
@@ -3503,6 +4474,7 @@ private fun TextEbookPage(
                     textFieldValue = updatedValue.copy(text = text)
                 },
                 readOnly = true,
+                visualTransformation = readAloudVisualTransformation,
                 textStyle = MaterialTheme.typography.bodyLarge.copy(
                     fontSize = (READER_BASE_FONT_SIZE_SP * fontScale).sp,
                     lineHeight = (READER_BASE_LINE_HEIGHT_SP * fontScale).sp,
@@ -4428,7 +5400,8 @@ internal fun paginateEbookText(text: String): List<String> {
  *
  * 使用方法：
  * 阅读器完成正文分页后调用。支持“第X章/回/卷/节”、Markdown井号标题、Chapter/Book/Part
- * 以及前言、序言、楔子、后记等常见标题；同页重复标题会自动去重。
+ * 以及前言、序言、楔子、后记等常见标题；同页重复标题会自动去重。实现只保留当前行和下一条
+ * 非空行，不会为大型小说一次性创建全书行列表；达到目录数量上限后立即结束扫描。
  *
  * @param pages 已按阅读器规则分页的正文。
  * @return 按页码和出现顺序排列的目录；未识别到可靠标题时返回空列表。
@@ -4436,47 +5409,62 @@ internal fun paginateEbookText(text: String): List<String> {
 internal fun buildEbookTableOfContents(pages: List<String>): List<EbookChapter> {
     val chapters = mutableListOf<EbookChapter>()
     val seen = mutableSetOf<String>()
-    val sourceLines = pages.flatMapIndexed { pageIndex, pageText ->
-        pageText.lineSequence().mapNotNull { rawLine ->
-            val normalized = rawLine.trim().replace(Regex("\\s+"), " ")
-            normalized.takeIf(String::isNotBlank)?.let { line -> pageIndex to line }
-        }.toList()
-    }
-    sourceLines.forEachIndexed { lineIndex, (pageIndex, line) ->
-        if (line.length !in 1..MAX_CHAPTER_TITLE_LENGTH) return@forEachIndexed
+    val sourceLines = sequence {
+        pages.forEachIndexed { pageIndex, pageText ->
+            pageText.lineSequence().forEach { rawLine ->
+                val normalized = rawLine.trim().replace(EBOOK_TOC_WHITESPACE_PATTERN, " ")
+                if (normalized.isNotBlank()) yield(pageIndex to normalized)
+            }
+        }
+    }.iterator()
+    if (!sourceLines.hasNext()) return emptyList()
 
-        val markdownMatch = MARKDOWN_CHAPTER_PATTERN.matchEntire(line)
-        val normalizedTitle: String
-        val level: Int
-        when {
-            markdownMatch != null -> {
-                normalizedTitle = markdownMatch.groupValues[2].trim()
-                level = markdownMatch.groupValues[1].length.coerceIn(1, 4)
+    var currentLine = sourceLines.next()
+    while (true) {
+        val (pageIndex, line) = currentLine
+        var prefetchedNextLine: Pair<Int, String>? = null
+        val chapterCandidate = if (line.length !in 1..MAX_CHAPTER_TITLE_LENGTH) {
+            null
+        } else {
+            val markdownMatch = MARKDOWN_CHAPTER_PATTERN.matchEntire(line)
+            when {
+                markdownMatch != null -> {
+                    markdownMatch.groupValues[2].trim() to
+                        markdownMatch.groupValues[1].length.coerceIn(1, 4)
+                }
+                CHINESE_CHAPTER_PATTERN.matches(line) -> {
+                    // 只有纯“第X章”需要提前取得下一条非空行作为副标题；该行仍会在下一轮正常识别。
+                    if (CHINESE_BARE_CHAPTER_PATTERN.matches(line) && sourceLines.hasNext()) {
+                        prefetchedNextLine = sourceLines.next()
+                    }
+                    enrichChineseEbookChapterTitle(
+                        chapterMarker = line,
+                        nextLine = prefetchedNextLine?.second.orEmpty()
+                    ) to 1
+                }
+                ENGLISH_CHAPTER_PATTERN.matches(line) || SPECIAL_CHAPTER_PATTERN.matches(line) -> {
+                    line to 1
+                }
+                else -> null
             }
-            CHINESE_CHAPTER_PATTERN.matches(line) -> {
-                normalizedTitle = enrichChineseEbookChapterTitle(
-                    chapterMarker = line,
-                    nextLine = sourceLines.getOrNull(lineIndex + 1)?.second.orEmpty()
-                )
-                level = 1
-            }
-            ENGLISH_CHAPTER_PATTERN.matches(line) || SPECIAL_CHAPTER_PATTERN.matches(line) -> {
-                normalizedTitle = line
-                level = 1
-            }
-            else -> return@forEachIndexed
         }
-        if (normalizedTitle.length !in 1..MAX_CHAPTER_TITLE_LENGTH) return@forEachIndexed
-        val key = "$pageIndex|${normalizedTitle.lowercase(Locale.ROOT)}"
-        if (seen.add(key)) {
-            chapters += EbookChapter(
-                title = normalizedTitle,
-                pageIndex = pageIndex,
-                level = level
-            )
+        chapterCandidate?.let { (normalizedTitle, level) ->
+            if (normalizedTitle.length in 1..MAX_CHAPTER_TITLE_LENGTH) {
+                val key = "$pageIndex|${normalizedTitle.lowercase(Locale.ROOT)}"
+                if (seen.add(key)) {
+                    chapters += EbookChapter(
+                        title = normalizedTitle,
+                        pageIndex = pageIndex,
+                        level = level
+                    )
+                }
+            }
         }
+        if (chapters.size >= MAX_TABLE_OF_CONTENTS_ITEMS) return chapters
+
+        currentLine = prefetchedNextLine
+            ?: if (sourceLines.hasNext()) sourceLines.next() else return chapters
     }
-    return chapters.take(MAX_TABLE_OF_CONTENTS_ITEMS)
 }
 
 /**
@@ -4582,6 +5570,8 @@ private const val TEXT_PAGE_CHARACTER_LIMIT = 1_050
 private const val MIN_TEXT_PAGE_REMAINDER = 80
 private const val PAGE_LAYOUT_CHARACTER_WINDOW = 64_000
 private const val PROGRESS_SAVE_DEBOUNCE_MILLIS = 350L
+private const val EBOOK_AUTO_PAGE_INTERVAL_SLIDER_STEPS = 10
+private const val EBOOK_READER_FADE_SETTLE_MILLIS = 300L
 private const val MIN_READER_FONT_SCALE = 0.75f
 private const val MAX_READER_FONT_SCALE = 1.8f
 private const val READER_FONT_STEP = 0.1f
@@ -4600,8 +5590,10 @@ private const val MAX_TABLE_OF_CONTENTS_QUERY_LENGTH = 48
 private const val MAX_TABLE_OF_CONTENTS_ITEMS = 2_000
 private const val MAX_NOTE_SELECTION_LENGTH = 8_000
 private const val MAX_NOTE_COMMENT_LENGTH = 8_000
-private val BOOK_DRAG_HORIZONTAL_THRESHOLD = 20.dp
-private val BOOK_DRAG_VERTICAL_THRESHOLD = 44.dp
+private val EBOOK_SHELF_EDGE_PAGING_WIDTH = 36.dp
+private val EBOOK_SHELF_DROP_TOLERANCE = 8.dp
+private const val EBOOK_SHELF_EDGE_PAGING_DWELL_MILLIS = 450L
+private const val EBOOK_SHELF_DRAG_OVERLAY_Z_INDEX = 10f
 private val DEFAULT_EBOOK_SPINE_COLORS = listOf(
     Color(0xFF8C2F39),
     Color(0xFF315B63),
@@ -4624,6 +5616,7 @@ private val EBOOK_SPINE_COLOR_PRESETS = listOf(
     EbookSpineColorPreset("莓粉", createOpaqueArgb(126, 63, 88))
 )
 private val MARKDOWN_CHAPTER_PATTERN = Regex("^(#{1,4})\\s+(.+)$")
+private val EBOOK_TOC_WHITESPACE_PATTERN = Regex("\\s+")
 private val CHINESE_CHAPTER_PATTERN = Regex(
     "^第[〇零一二三四五六七八九十百千万两0-9]+[章节回卷部篇集](?!正文(?:[。.]|$)).{0,60}$"
 )

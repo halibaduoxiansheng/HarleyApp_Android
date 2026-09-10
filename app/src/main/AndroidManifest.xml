@@ -221,6 +221,17 @@
             android:foregroundServiceType="mediaPlayback" />
 
         <!--
+            用户从电子书阅读页主动开始连续朗读后，由本前台媒体服务独立持有TTS和MediaSession。
+            Activity退出、锁屏或切换到其他App不会结束朗读；通知/锁屏/App内“停止”、系统强停、
+            重启或系统回收进程时才释放服务。stopWithTask=false保证清理最近任务卡片不会被误当成停止。
+        -->
+        <service
+            android:name=".system.EbookReadAloudService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback"
+            android:stopWithTask="false" />
+
+        <!--
             用户开启后常驻等待充电连接，必须持续显示低重要性通知；不采集位置、麦克风或其他App数据。
         -->
         <service

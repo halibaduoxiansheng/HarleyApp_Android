@@ -228,10 +228,10 @@ class EbookRepository(context: Context) {
      *
      * @return 按最近阅读、最近修改和导入时间倒序排列；目录损坏时记录英文日志并返回空列表。
      */
-    fun getBooks(): List<EbookBook> {
-        return runCatching {
+    fun getBooks(): List<EbookBook> = synchronized(READING_PROGRESS_LOCK) {
+        runCatching {
             ensureDirectories()
-            if (!catalogFile.baseFile.isFile) return emptyList()
+            if (!catalogFile.baseFile.isFile) return@runCatching emptyList()
             val json = catalogFile.openRead().bufferedReader(Charsets.UTF_8).use { it.readText() }
             val array = JSONArray(json)
             val decodedBooks = buildList {
@@ -455,30 +455,33 @@ class EbookRepository(context: Context) {
                 pageCount = estimateTextPageCount(content)
             }
 
-            val now = System.currentTimeMillis()
-            val currentBooks = getBooks()
-            val firstEmptyShelfSlot = firstAvailableEbookShelfSlot(
-                currentBooks.filter(EbookBook::isOnShelf)
-                    .mapTo(mutableSetOf(), EbookBook::shelfSlot)
-            )
-            val book = EbookBook(
-                id = id,
-                title = displayName.substringBeforeLast('.').trim().ifBlank { "未命名书籍" },
-                author = "",
-                format = format,
-                originalFileName = displayName,
-                storedFileName = storedFileName,
-                extractedTextFileName = extractedTextFileName,
-                fileSizeBytes = copiedBytes,
-                createdAtMillis = now,
-                updatedAtMillis = now,
-                pageCount = pageCount.coerceAtLeast(1),
-                shelfOrder = firstEmptyShelfSlot.toLong(),
-                shelfSlot = firstEmptyShelfSlot
-            )
-            val updated = currentBooks.filterNot { current -> current.id == id } + book
             reportImportProgress(onProgress, 0.99f, "正在登记到书库…")
-            require(saveBooks(updated)) { "Unable to save ebook catalog" }
+            val book = synchronized(READING_PROGRESS_LOCK) {
+                val now = System.currentTimeMillis()
+                val currentBooks = getBooks()
+                val firstEmptyShelfSlot = firstAvailableEbookShelfSlot(
+                    currentBooks.filter(EbookBook::isOnShelf)
+                        .mapTo(mutableSetOf(), EbookBook::shelfSlot)
+                )
+                val importedBook = EbookBook(
+                    id = id,
+                    title = displayName.substringBeforeLast('.').trim().ifBlank { "未命名书籍" },
+                    author = "",
+                    format = format,
+                    originalFileName = displayName,
+                    storedFileName = storedFileName,
+                    extractedTextFileName = extractedTextFileName,
+                    fileSizeBytes = copiedBytes,
+                    createdAtMillis = now,
+                    updatedAtMillis = now,
+                    pageCount = pageCount.coerceAtLeast(1),
+                    shelfOrder = firstEmptyShelfSlot.toLong(),
+                    shelfSlot = firstEmptyShelfSlot
+                )
+                val updated = currentBooks.filterNot { current -> current.id == id } + importedBook
+                require(saveBooks(updated)) { "Unable to save ebook catalog" }
+                importedBook
+            }
             reportImportProgress(onProgress, 1f, "导入完成")
             EbookImportResult(
                 success = true,
@@ -562,61 +565,70 @@ class EbookRepository(context: Context) {
             return@withContext true
         }
         runCatching {
-            ensureDirectories()
-            val existingBooks = getBooks().toMutableList()
-            val existingIds = existingBooks.mapTo(hashSetOf(), EbookBook::id)
-            val now = System.currentTimeMillis()
-
-            STARTER_BOOKS.forEachIndexed { index, starter ->
-                val stableId = "$STARTER_BOOK_ID_PREFIX${starter.gutenbergId}"
-                if (stableId !in existingIds) {
-                    val textFileName = "$stableId.txt"
-                    val textFile = File(textDirectory, textFileName)
-                    applicationContext.assets.open("$STARTER_ASSET_DIRECTORY/${starter.assetFileName}")
-                        .buffered()
-                        .use { input ->
-                            textFile.outputStream().buffered().use { output -> input.copyTo(output) }
-                        }
-                    require(textFile.isFile && textFile.length() > 0L) {
-                        "Starter ebook asset is empty"
-                    }
-                    val characterCount = textFile.bufferedReader(Charsets.UTF_8).use { reader ->
-                        var totalCharacters = 0
-                        val buffer = CharArray(DEFAULT_BUFFER_SIZE)
-                        while (true) {
-                            val read = reader.read(buffer)
-                            if (read < 0) break
-                            totalCharacters += read
-                        }
-                        totalCharacters
-                    }
-                    existingBooks += EbookBook(
-                        id = stableId,
-                        title = starter.title,
-                        author = starter.author,
-                        format = EbookFormat.TEXT,
-                        originalFileName = starter.assetFileName,
-                        storedFileName = "",
-                        extractedTextFileName = textFileName,
-                        fileSizeBytes = textFile.length(),
-                        createdAtMillis = now + index,
-                        updatedAtMillis = now + index,
-                        pageCount = estimateTextPageCountByLength(characterCount),
-                        isOnShelf = index < DEFAULT_STARTER_SHELF_COUNT,
-                        shelfOrder = now + index,
-                        shelfSlot = if (index < DEFAULT_STARTER_SHELF_COUNT) index else -1,
-                        category = starter.category,
-                        sourceUrl = "https://www.gutenberg.org/ebooks/${starter.gutenbergId}",
-                        isBundled = true
-                    )
+            synchronized(READING_PROGRESS_LOCK) {
+                // 双重检查避免两个启动协程先后等待锁时重复复制内置正文和重写目录。
+                if (preferences.getBoolean(STARTER_BOOKS_INSTALLED_KEY, false)) {
+                    return@synchronized true
                 }
-            }
+                ensureDirectories()
+                val existingBooks = getBooks().toMutableList()
+                val existingIds = existingBooks.mapTo(hashSetOf(), EbookBook::id)
+                val now = System.currentTimeMillis()
 
-            require(saveBooks(existingBooks)) { "Unable to save starter ebook catalog" }
-            require(
-                preferences.edit().putBoolean(STARTER_BOOKS_INSTALLED_KEY, true).commit()
-            ) { "Unable to save starter ebook state" }
-            true
+                STARTER_BOOKS.forEachIndexed { index, starter ->
+                    val stableId = "$STARTER_BOOK_ID_PREFIX${starter.gutenbergId}"
+                    if (stableId !in existingIds) {
+                        val textFileName = "$stableId.txt"
+                        val textFile = File(textDirectory, textFileName)
+                        applicationContext.assets
+                            .open("$STARTER_ASSET_DIRECTORY/${starter.assetFileName}")
+                            .buffered()
+                            .use { input ->
+                                textFile.outputStream().buffered().use { output ->
+                                    input.copyTo(output)
+                                }
+                            }
+                        require(textFile.isFile && textFile.length() > 0L) {
+                            "Starter ebook asset is empty"
+                        }
+                        val characterCount = textFile.bufferedReader(Charsets.UTF_8).use { reader ->
+                            var totalCharacters = 0
+                            val buffer = CharArray(DEFAULT_BUFFER_SIZE)
+                            while (true) {
+                                val read = reader.read(buffer)
+                                if (read < 0) break
+                                totalCharacters += read
+                            }
+                            totalCharacters
+                        }
+                        existingBooks += EbookBook(
+                            id = stableId,
+                            title = starter.title,
+                            author = starter.author,
+                            format = EbookFormat.TEXT,
+                            originalFileName = starter.assetFileName,
+                            storedFileName = "",
+                            extractedTextFileName = textFileName,
+                            fileSizeBytes = textFile.length(),
+                            createdAtMillis = now + index,
+                            updatedAtMillis = now + index,
+                            pageCount = estimateTextPageCountByLength(characterCount),
+                            isOnShelf = index < DEFAULT_STARTER_SHELF_COUNT,
+                            shelfOrder = now + index,
+                            shelfSlot = if (index < DEFAULT_STARTER_SHELF_COUNT) index else -1,
+                            category = starter.category,
+                            sourceUrl = "https://www.gutenberg.org/ebooks/${starter.gutenbergId}",
+                            isBundled = true
+                        )
+                    }
+                }
+
+                require(saveBooks(existingBooks)) { "Unable to save starter ebook catalog" }
+                require(
+                    preferences.edit().putBoolean(STARTER_BOOKS_INSTALLED_KEY, true).commit()
+                ) { "Unable to save starter ebook state" }
+                true
+            }
         }.onFailure { error ->
             Log.e(TAG, "Failed to install starter ebooks", error)
         }.getOrDefault(false)
@@ -629,28 +641,30 @@ class EbookRepository(context: Context) {
      * @param isOnShelf true表示加入书架，false表示移出书架。
      * @return 书籍存在且目录写入成功返回true。
      */
-    fun setOnShelf(bookId: String, isOnShelf: Boolean): Boolean {
-        val books = getBooks()
-        val target = books.firstOrNull { book -> book.id == bookId } ?: return false
-        if (target.isOnShelf == isOnShelf) return true
-        val nextSlot = firstAvailableEbookShelfSlot(
-            books.filter(EbookBook::isOnShelf).mapTo(mutableSetOf(), EbookBook::shelfSlot)
-        )
-        return saveBooks(
-            books.map { book ->
-                if (book.id == bookId) {
-                    book.copy(
-                        isOnShelf = isOnShelf,
-                        shelfOrder = if (isOnShelf) nextSlot.toLong() else book.shelfOrder,
-                        shelfSlot = if (isOnShelf) nextSlot else -1,
-                        updatedAtMillis = System.currentTimeMillis()
-                    )
-                } else {
-                    book
+    fun setOnShelf(bookId: String, isOnShelf: Boolean): Boolean =
+        synchronized(READING_PROGRESS_LOCK) {
+            val books = getBooks()
+            val target = books.firstOrNull { book -> book.id == bookId }
+                ?: return@synchronized false
+            if (target.isOnShelf == isOnShelf) return@synchronized true
+            val nextSlot = firstAvailableEbookShelfSlot(
+                books.filter(EbookBook::isOnShelf).mapTo(mutableSetOf(), EbookBook::shelfSlot)
+            )
+            saveBooks(
+                books.map { book ->
+                    if (book.id == bookId) {
+                        book.copy(
+                            isOnShelf = isOnShelf,
+                            shelfOrder = if (isOnShelf) nextSlot.toLong() else book.shelfOrder,
+                            shelfSlot = if (isOnShelf) nextSlot else -1,
+                            updatedAtMillis = System.currentTimeMillis()
+                        )
+                    } else {
+                        book
+                    }
                 }
-            }
-        )
-    }
+            )
+        }
 
     /**
      * 按用户长按拖动后的顺序重新排列“我的书架”。
@@ -663,32 +677,34 @@ class EbookRepository(context: Context) {
      * @return 顺序合法且目录保存成功返回true；没有在架书籍或写入失败返回false。
      */
     fun reorderShelfBooks(orderedBookIds: List<String>): Boolean {
-        val books = getBooks()
-        val shelfBooks = books.filter(EbookBook::isOnShelf).sortedBy(EbookBook::shelfOrder)
-        if (shelfBooks.isEmpty()) return false
-        val shelfIds = shelfBooks.mapTo(linkedSetOf(), EbookBook::id)
-        val normalizedIds = buildList {
-            orderedBookIds.forEach { id ->
-                if (id in shelfIds && id !in this) add(id)
-            }
-            shelfBooks.forEach { book ->
-                if (book.id !in this) add(book.id)
-            }
-        }
-        if (normalizedIds == shelfBooks.map(EbookBook::id)) return true
-        val orderById = normalizedIds.withIndex().associate { indexed ->
-            indexed.value to indexed.index.toLong()
-        }
-        return saveBooks(
-            books.map { book ->
-                val order = orderById[book.id]
-                if (book.isOnShelf && order != null) {
-                    book.copy(shelfOrder = order, shelfSlot = order.toInt())
-                } else {
-                    book
+        return synchronized(READING_PROGRESS_LOCK) {
+            val books = getBooks()
+            val shelfBooks = books.filter(EbookBook::isOnShelf).sortedBy(EbookBook::shelfOrder)
+            if (shelfBooks.isEmpty()) return@synchronized false
+            val shelfIds = shelfBooks.mapTo(linkedSetOf(), EbookBook::id)
+            val normalizedIds = buildList {
+                orderedBookIds.forEach { id ->
+                    if (id in shelfIds && id !in this) add(id)
+                }
+                shelfBooks.forEach { book ->
+                    if (book.id !in this) add(book.id)
                 }
             }
-        )
+            if (normalizedIds == shelfBooks.map(EbookBook::id)) return@synchronized true
+            val orderById = normalizedIds.withIndex().associate { indexed ->
+                indexed.value to indexed.index.toLong()
+            }
+            saveBooks(
+                books.map { book ->
+                    val order = orderById[book.id]
+                    if (book.isOnShelf && order != null) {
+                        book.copy(shelfOrder = order, shelfSlot = order.toInt())
+                    } else {
+                        book
+                    }
+                }
+            )
+        }
     }
 
     /**
@@ -706,30 +722,32 @@ class EbookRepository(context: Context) {
         author: String,
         spineColorArgb: Int
     ): Boolean {
-        val normalizedTitle = title.trim()
-        if (normalizedTitle.isBlank()) return false
-        val normalizedSpineColor = if (spineColorArgb == 0) {
-            0
-        } else {
-            spineColorArgb or OPAQUE_ALPHA_MASK
-        }
-        val books = getBooks()
-        if (books.none { book -> book.id == bookId }) return false
-        val now = System.currentTimeMillis()
-        return saveBooks(
-            books.map { book ->
-                if (book.id == bookId) {
-                    book.copy(
-                        title = normalizedTitle.take(MAX_TITLE_LENGTH),
-                        author = author.trim().take(MAX_AUTHOR_LENGTH),
-                        spineColorArgb = normalizedSpineColor,
-                        updatedAtMillis = now
-                    )
-                } else {
-                    book
-                }
+        return synchronized(READING_PROGRESS_LOCK) {
+            val normalizedTitle = title.trim()
+            if (normalizedTitle.isBlank()) return@synchronized false
+            val normalizedSpineColor = if (spineColorArgb == 0) {
+                0
+            } else {
+                spineColorArgb or OPAQUE_ALPHA_MASK
             }
-        )
+            val books = getBooks()
+            if (books.none { book -> book.id == bookId }) return@synchronized false
+            val now = System.currentTimeMillis()
+            saveBooks(
+                books.map { book ->
+                    if (book.id == bookId) {
+                        book.copy(
+                            title = normalizedTitle.take(MAX_TITLE_LENGTH),
+                            author = author.trim().take(MAX_AUTHOR_LENGTH),
+                            spineColorArgb = normalizedSpineColor,
+                            updatedAtMillis = now
+                        )
+                    } else {
+                        book
+                    }
+                }
+            )
+        }
     }
 
     /**
@@ -749,9 +767,6 @@ class EbookRepository(context: Context) {
             var finalCover: File? = null
             runCatching {
                 ensureDirectories()
-                val books = getBooks()
-                val targetBook = books.firstOrNull { book -> book.id == bookId }
-                    ?: error("Book not found")
                 val coverFileName = "cover_${UUID.randomUUID()}.img"
                 val temporaryFile = File(coverDirectory, "$coverFileName.tmp")
                 temporary = temporaryFile
@@ -767,19 +782,25 @@ class EbookRepository(context: Context) {
                 require(temporaryFile.renameTo(installedFile)) { "Unable to finalize cover image" }
                 temporary = null
                 finalCover = installedFile
-                val saved = saveBooks(
-                    books.map { book ->
-                        if (book.id == bookId) {
-                            book.copy(
-                                coverFileName = coverFileName,
-                                updatedAtMillis = System.currentTimeMillis()
-                            )
-                        } else {
-                            book
+                val targetBook = synchronized(READING_PROGRESS_LOCK) {
+                    val books = getBooks()
+                    val currentTarget = books.firstOrNull { book -> book.id == bookId }
+                        ?: error("Book not found")
+                    val saved = saveBooks(
+                        books.map { book ->
+                            if (book.id == bookId) {
+                                book.copy(
+                                    coverFileName = coverFileName,
+                                    updatedAtMillis = System.currentTimeMillis()
+                                )
+                            } else {
+                                book
+                            }
                         }
-                    }
-                )
-                require(saved) { "Unable to save ebook catalog" }
+                    )
+                    require(saved) { "Unable to save ebook catalog" }
+                    currentTarget
+                }
                 coverFileFor(targetBook)?.let { oldCover ->
                     if (oldCover != installedFile && !oldCover.delete()) {
                         Log.w(TAG, "Failed to delete replaced ebook cover")
@@ -811,30 +832,40 @@ class EbookRepository(context: Context) {
      * @return 目录更新及封面清理结果，页面可直接使用其中消息反馈用户。
      */
     fun removeCustomCover(bookId: String): EbookCoverUpdateResult {
-        val books = getBooks()
-        val targetBook = books.firstOrNull { book -> book.id == bookId }
-            ?: return EbookCoverUpdateResult(false, "没有找到需要修改封面的书籍")
-        if (targetBook.coverFileName.isBlank()) {
-            return EbookCoverUpdateResult(true, "《${targetBook.title}》当前使用的就是默认封面")
-        }
-        val coverFile = coverFileFor(targetBook)
-        val saved = saveBooks(
-            books.map { book ->
-                if (book.id == bookId) {
-                    book.copy(
-                        coverFileName = "",
-                        updatedAtMillis = System.currentTimeMillis()
-                    )
-                } else {
-                    book
-                }
+        return synchronized(READING_PROGRESS_LOCK) {
+            val books = getBooks()
+            val targetBook = books.firstOrNull { book -> book.id == bookId }
+                ?: return@synchronized EbookCoverUpdateResult(
+                    false,
+                    "没有找到需要修改封面的书籍"
+                )
+            if (targetBook.coverFileName.isBlank()) {
+                return@synchronized EbookCoverUpdateResult(
+                    true,
+                    "《${targetBook.title}》当前使用的就是默认封面"
+                )
             }
-        )
-        if (!saved) return EbookCoverUpdateResult(false, "恢复默认封面失败")
-        if (coverFile != null && !coverFile.delete()) {
-            Log.w(TAG, "Failed to delete removed ebook cover")
+            val coverFile = coverFileFor(targetBook)
+            val saved = saveBooks(
+                books.map { book ->
+                    if (book.id == bookId) {
+                        book.copy(
+                            coverFileName = "",
+                            updatedAtMillis = System.currentTimeMillis()
+                        )
+                    } else {
+                        book
+                    }
+                }
+            )
+            if (!saved) {
+                return@synchronized EbookCoverUpdateResult(false, "恢复默认封面失败")
+            }
+            if (coverFile != null && !coverFile.delete()) {
+                Log.w(TAG, "Failed to delete removed ebook cover")
+            }
+            EbookCoverUpdateResult(true, "《${targetBook.title}》已恢复默认封面")
         }
-        return EbookCoverUpdateResult(true, "《${targetBook.title}》已恢复默认封面")
     }
 
     /**
@@ -861,11 +892,11 @@ class EbookRepository(context: Context) {
         fontScale: Float,
         fontFamily: EbookFontFamily,
         readingBackground: EbookReadingBackground
-    ): Boolean {
+    ): Boolean = synchronized(READING_PROGRESS_LOCK) {
         val books = getBooks()
-        if (books.none { book -> book.id == bookId }) return false
+        if (books.none { book -> book.id == bookId }) return@synchronized false
         val safePageCount = pageCount.coerceAtLeast(1)
-        return saveBooks(
+        saveBooks(
             books.map { book ->
                 if (book.id == bookId) {
                     book.copy(
@@ -888,16 +919,106 @@ class EbookRepository(context: Context) {
     }
 
     /**
+     * 只保存后台朗读推进后的页码和完整正文锚点。
+     *
+     * 使用方法：
+     * 电子书前台朗读服务在自动跨页、通知栏切页、暂停或停止时调用。该函数不会写入翻页动画、字号、
+     * 字体或阅读背景，因此阅读页面已经保存的个性化设置不会被后台服务持有的旧快照覆盖。页面内的
+     * [saveReadingProgress]与本函数共用进程级锁，避免两条朗读进度写入同时操作AtomicFile。
+     *
+     * @param bookId 正在朗读的书籍稳定id。
+     * @param currentPage 后台会话当前零基页码。
+     * @param currentTextOffset 当前安全词句在完整提取正文中的UTF-16位置；原文朗读可精确到页内，
+     * 译文朗读因索引体系不同而传入对应原文页首，用于重新分页后找回同一段落。
+     * @param currentPagePreview 当前页原文快照；译文朗读也必须传入原文，避免下次打开显示临时译文。
+     * @param pageCount 后台会话使用的总页数，至少为1。
+     * @return 找到目标书籍并成功写入完整目录返回true；书籍已删除或磁盘写入失败返回false。
+     */
+    fun saveBackgroundReadingPosition(
+        bookId: String,
+        currentPage: Int,
+        currentTextOffset: Int,
+        currentPagePreview: String,
+        pageCount: Int
+    ): Boolean = synchronized(READING_PROGRESS_LOCK) {
+        val books = getBooks()
+        if (books.none { book -> book.id == bookId }) return@synchronized false
+        val safePageCount = pageCount.coerceAtLeast(1)
+        saveBooks(
+            books.map { book ->
+                if (book.id == bookId) {
+                    book.copy(
+                        currentPage = currentPage.coerceIn(0, safePageCount - 1),
+                        currentTextOffset = currentTextOffset.coerceAtLeast(0),
+                        currentPagePreview = currentPagePreview
+                            .take(MAX_READING_PAGE_PREVIEW_CHARACTERS),
+                        pageCount = safePageCount,
+                        lastReadAtMillis = System.currentTimeMillis()
+                    )
+                } else {
+                    book
+                }
+            }
+        )
+    }
+
+    /**
+     * 只保存阅读器界面设置，并保留目录中已经由后台朗读推进的页码和正文锚点。
+     *
+     * 使用方法：
+     * 后台朗读会话仍在播放或暂停时，阅读页的防抖保存和退出保存必须调用本函数，不能再调用
+     * [saveReadingProgress]写入页面快照。这样即使后台服务刚好跨到下一页，界面协程也只会合并字号、
+     * 字体、背景和翻页模式，不会用旧Compose状态覆盖服务已保存的断点。
+     *
+     * @param bookId 正在阅读的书籍稳定id。
+     * @param readingMode 当前翻页模式。
+     * @param fontScale 当前文本字号倍率，超出合法范围时自动收敛。
+     * @param fontFamily 当前文本字体族。
+     * @param readingBackground 当前阅读背景。
+     * @return 找到目标书籍并成功写入完整目录返回true；书籍已删除或磁盘写入失败返回false。
+     */
+    fun saveReadingSettings(
+        bookId: String,
+        readingMode: EbookReadingMode,
+        fontScale: Float,
+        fontFamily: EbookFontFamily,
+        readingBackground: EbookReadingBackground
+    ): Boolean = synchronized(READING_PROGRESS_LOCK) {
+        val books = getBooks()
+        if (books.none { book -> book.id == bookId }) return@synchronized false
+        saveBooks(
+            books.map { book ->
+                if (book.id == bookId) {
+                    book.copy(
+                        readingMode = readingMode,
+                        fontScale = fontScale.coerceIn(MIN_FONT_SCALE, MAX_FONT_SCALE),
+                        fontFamily = fontFamily,
+                        readingBackground = readingBackground,
+                        lastReadAtMillis = System.currentTimeMillis()
+                    )
+                } else {
+                    book
+                }
+            }
+        )
+    }
+
+    /**
      * 从书库及App私有目录永久删除一本书。
      *
      * @param bookId 目标书籍id。
      * @return 目录、原文件、解析文本和自定义封面均处理成功返回true；书籍不存在返回false。
      */
     fun deleteBook(bookId: String): Boolean {
-        val books = getBooks()
-        val target = books.firstOrNull { book -> book.id == bookId } ?: return false
-        val catalogSaved = saveBooks(books.filterNot { book -> book.id == bookId })
-        if (!catalogSaved) return false
+        val target = synchronized(READING_PROGRESS_LOCK) {
+            val books = getBooks()
+            val currentTarget = books.firstOrNull { book -> book.id == bookId }
+                ?: return@synchronized null
+            if (!saveBooks(books.filterNot { book -> book.id == bookId })) {
+                return@synchronized null
+            }
+            currentTarget
+        } ?: return false
         val originalDeleted = originalFileFor(target)?.delete() ?: true
         val textDeleted = extractedTextFileFor(target)?.delete() ?: true
         val coverDeleted = coverFileFor(target)?.delete() ?: true
@@ -966,37 +1087,40 @@ class EbookRepository(context: Context) {
      * @param requestedSlots 当前界面中每本在架书籍的目标绝对槽位。
      * @return 至少存在一本在架书籍且目录保存成功时返回true。
      */
-    fun updateShelfSlots(requestedSlots: Map<String, Int>): Boolean {
-        val books = normalizeEbookShelfSlots(getBooks())
-        val shelfBooks = books.filter(EbookBook::isOnShelf)
-        if (shelfBooks.isEmpty()) return false
-        val occupiedSlots = mutableSetOf<Int>()
-        val slotById = mutableMapOf<String, Int>()
-        shelfBooks.sortedBy(EbookBook::shelfSlot).forEach { book ->
-            val requestedSlot = requestedSlots[book.id]
-            val slot = if (
-                requestedSlot != null &&
-                requestedSlot in 0..MAX_EBOOK_SHELF_SLOT &&
-                occupiedSlots.add(requestedSlot)
-            ) {
-                requestedSlot
-            } else {
-                firstAvailableEbookShelfSlot(occupiedSlots).also(occupiedSlots::add)
-            }
-            slotById[book.id] = slot
-        }
-        if (shelfBooks.all { book -> slotById[book.id] == book.shelfSlot }) return true
-        return saveBooks(
-            books.map { book ->
-                val slot = slotById[book.id]
-                if (book.isOnShelf && slot != null) {
-                    book.copy(shelfSlot = slot, shelfOrder = slot.toLong())
+    fun updateShelfSlots(requestedSlots: Map<String, Int>): Boolean =
+        synchronized(READING_PROGRESS_LOCK) {
+            val books = normalizeEbookShelfSlots(getBooks())
+            val shelfBooks = books.filter(EbookBook::isOnShelf)
+            if (shelfBooks.isEmpty()) return@synchronized false
+            val occupiedSlots = mutableSetOf<Int>()
+            val slotById = mutableMapOf<String, Int>()
+            shelfBooks.sortedBy(EbookBook::shelfSlot).forEach { book ->
+                val requestedSlot = requestedSlots[book.id]
+                val slot = if (
+                    requestedSlot != null &&
+                    requestedSlot in 0..MAX_EBOOK_SHELF_SLOT &&
+                    occupiedSlots.add(requestedSlot)
+                ) {
+                    requestedSlot
                 } else {
-                    book
+                    firstAvailableEbookShelfSlot(occupiedSlots).also(occupiedSlots::add)
                 }
+                slotById[book.id] = slot
             }
-        )
-    }
+            if (shelfBooks.all { book -> slotById[book.id] == book.shelfSlot }) {
+                return@synchronized true
+            }
+            saveBooks(
+                books.map { book ->
+                    val slot = slotById[book.id]
+                    if (book.isOnShelf && slot != null) {
+                        book.copy(shelfSlot = slot, shelfOrder = slot.toLong())
+                    } else {
+                        book
+                    }
+                }
+            )
+        }
 
     /**
      * 读取与当前书籍、屏幕和字体条件完全一致的分页边界缓存。
@@ -1712,27 +1836,37 @@ class EbookRepository(context: Context) {
             .coerceAtLeast(1)
     }
 
-    /** 把完整目录原子写入catalog.json。 */
-    private fun saveBooks(books: List<EbookBook>): Boolean {
-        return runCatching {
-            ensureDirectories()
-            val output = catalogFile.startWrite()
-            try {
-                val writer = output.writer(Charsets.UTF_8)
-                val array = JSONArray()
-                books.forEach { book -> array.put(encodeBook(book)) }
-                writer.write(array.toString())
-                writer.flush()
-                catalogFile.finishWrite(output)
-            } catch (error: Throwable) {
-                catalogFile.failWrite(output)
-                throw error
-            }
-            true
-        }.onFailure { error ->
-            Log.e(TAG, "Failed to save ebook catalog", error)
-        }.getOrDefault(false)
-    }
+    /**
+     * 把完整目录原子写入catalog.json。
+     *
+     * 使用方法：
+     * 任何先读取旧目录再生成新目录的调用者，都必须在同一个[READING_PROGRESS_LOCK]事务内完成读取和
+     * 调用；本函数自身再次加锁是可重入保护，防止未来新增的直接写入路径与现有事务交叉提交。
+     *
+     * @param books 需要完整替换到目录文件中的全部书籍模型。
+     * @return AtomicFile提交成功返回true；创建目录、编码或磁盘写入失败返回false。
+     */
+    private fun saveBooks(books: List<EbookBook>): Boolean =
+        synchronized(READING_PROGRESS_LOCK) {
+            runCatching {
+                ensureDirectories()
+                val output = catalogFile.startWrite()
+                try {
+                    val writer = output.writer(Charsets.UTF_8)
+                    val array = JSONArray()
+                    books.forEach { book -> array.put(encodeBook(book)) }
+                    writer.write(array.toString())
+                    writer.flush()
+                    catalogFile.finishWrite(output)
+                } catch (error: Throwable) {
+                    catalogFile.failWrite(output)
+                    throw error
+                }
+                true
+            }.onFailure { error ->
+                Log.e(TAG, "Failed to save ebook catalog", error)
+            }.getOrDefault(false)
+        }
 
     /** @return 书籍模型对应的JSON对象。 */
     private fun encodeBook(book: EbookBook): JSONObject {
@@ -1934,6 +2068,9 @@ class EbookRepository(context: Context) {
     }
 
     private companion object {
+        /** 串行化目录读取、迁移和全部读改写事务，避免后台朗读覆盖书架、封面或删除结果。 */
+        val READING_PROGRESS_LOCK = Any()
+
         const val TAG = "EbookRepository"
         const val ROOT_DIRECTORY = "harley_ebooks"
         const val ORIGINAL_DIRECTORY = "original"

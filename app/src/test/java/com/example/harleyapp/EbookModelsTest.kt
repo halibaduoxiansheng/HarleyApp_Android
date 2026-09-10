@@ -356,6 +356,34 @@ class EbookModelsTest {
     }
 
     /**
+     * 验证目录扫描可以跨阅读页取得章节副标题，并在达到上限后停止访问后续超大正文。
+     *
+     * @return 无返回值；跨页副标题丢失或达到上限后仍继续扫描时由JUnit报告失败。
+     */
+    @Test
+    fun tableOfContentsStreamsLinesAndStopsAtLimit() {
+        val pages = object : AbstractList<String>() {
+            override val size: Int = 2_002
+
+            override fun get(index: Int): String {
+                return when {
+                    index == 0 -> "第一章"
+                    index == 1 -> "山边小村"
+                    index in 2..2_000 -> "第${index}章 标题$index"
+                    else -> error("目录达到上限后不应继续访问正文")
+                }
+            }
+        }
+
+        val chapters = buildEbookTableOfContents(pages)
+
+        assertEquals(2_000, chapters.size)
+        assertEquals("第一章 山边小村", chapters.first().title)
+        assertEquals(0, chapters.first().pageIndex)
+        assertEquals("第2000章 标题2000", chapters.last().title)
+    }
+
+    /**
      * 验证自定义书脊RGB通道会限制到合法范围，并固定使用完全不透明Alpha。
      *
      * @return 无返回值；ARGB位组合或边界限制错误时由JUnit报告失败。

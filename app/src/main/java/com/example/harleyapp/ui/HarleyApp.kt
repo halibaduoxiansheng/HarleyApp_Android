@@ -416,6 +416,8 @@ private fun ThemedNavigationIcon(
  * @param startupAnimationEnabled 下次启动是否播放逐字启动动画。
  * @param openTodayRequest 是否收到桌面小组件发出的“打开今日总览”请求。
  * @param onOpenTodayRequestConsumed 请求完成导航后的消费回调，防止重组时重复打开。
+ * @param openEbookRequestId 媒体通知要求打开的电子书id；为空表示没有待处理请求。
+ * @param onOpenEbookRequestConsumed 进入目标电子书后的消费回调，防止重组时重复导航。
  * @param onSetDarkTheme 保存并立即应用主题模式的回调，成功返回true。
  * @param onSetVisualTheme 保存并立即应用角色风格主题的回调，成功返回true。
  * @param onSetStartupAnimationEnabled 保存下次启动动画开关的回调，成功返回true。
@@ -430,6 +432,8 @@ fun HarleyApp(
     startupAnimationEnabled: Boolean,
     openTodayRequest: Boolean,
     onOpenTodayRequestConsumed: () -> Unit,
+    openEbookRequestId: String,
+    onOpenEbookRequestConsumed: () -> Unit,
     onSetDarkTheme: (Boolean) -> Boolean,
     onSetVisualTheme: (AppVisualTheme) -> Boolean,
     onSetStartupAnimationEnabled: (Boolean) -> Boolean,
@@ -808,6 +812,19 @@ fun HarleyApp(
             detailReturnSectionName = AppSection.HOME.name
             currentSectionName = AppSection.TODAY.name
             onOpenTodayRequestConsumed()
+        }
+    }
+
+    // 通知内容点击必须直接回到正在朗读的书，而不是只打开App首页。这里复用全局搜索已经验证过的
+    // 电子书深链状态，目标不存在时EbookScreen会安全留在书架并消费请求。
+    LaunchedEffect(openEbookRequestId) {
+        if (openEbookRequestId.isNotBlank()) {
+            searchEnglishWordTargetId = ""
+            searchNotebookArticleTargetId = ""
+            searchEbookTargetId = openEbookRequestId
+            featureCenterPageName = FeatureCenterPage.EBOOKS.name
+            currentSectionName = AppSection.FEATURES.name
+            onOpenEbookRequestConsumed()
         }
     }
     val notificationAccessLauncher = rememberLauncherForActivityResult(
