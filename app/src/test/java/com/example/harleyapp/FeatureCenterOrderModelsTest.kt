@@ -15,14 +15,14 @@ import org.junit.Test
 class FeatureCenterOrderModelsTest {
 
     /**
-     * 验证旧版本保存顺序中的重复项和未知项会被清理，新功能会自动补在末尾。
+     * 验证旧版本保存顺序中的重复项和已下线文件空间会被清理，新功能会自动补在末尾。
      *
      * @return 无返回值；兼容顺序不正确时由JUnit报告失败。
      */
     @Test
     fun normalizeOrderKeepsKnownUniqueItemsAndAppendsMissingItems() {
         val result = normalizeFeatureCenterOrder(
-            listOf("FITNESS", "UNKNOWN", "TODAY", "FITNESS")
+            listOf("FITNESS", "STORAGE_MANAGER", "TODAY", "FITNESS")
         )
 
         assertEquals(HomeFeatureId.FITNESS, result[0])

@@ -52,7 +52,7 @@ data class EbookReadAloudPage(
  * @param author 通知栏和锁屏媒体卡片显示的作者；未知时传空字符串。
  * @param pages 已完成当前阅读布局分页的有序正文，列表下标为零基页码。
  * @param initialPage 首次启动服务时要朗读的零基页码，越界值会被限制到有效范围。
- * @param naturalReadingEnabled 是否沿用自然分句、轻微韵律和句间停顿。
+ * @param naturalReadingEnabled 是否沿用自然分句和稳定音高与速度下的句间停顿。
  * @param translationDirection 可选离线翻译方向；null朗读原文，非null时服务先准备当前页译文再朗读。
  */
 data class EbookReadAloudConfig(

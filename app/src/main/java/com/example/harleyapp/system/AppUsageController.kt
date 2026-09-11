@@ -13,12 +13,15 @@ import android.os.Process
 import android.provider.Settings
 import android.util.Log
 import androidx.core.graphics.drawable.toBitmap
+import com.example.harleyapp.data.AppUsageHistoryRepository
+import com.example.harleyapp.model.APP_USAGE_TREND_DAY_COUNT
 import com.example.harleyapp.model.AppUsageDashboard
+import com.example.harleyapp.model.AppUsageDayDetail
 import com.example.harleyapp.model.AppUsageEntry
 import com.example.harleyapp.model.AppUsageEventSnapshot
+import com.example.harleyapp.model.AppUsageEventType
 import com.example.harleyapp.model.AppUsageQueryError
 import com.example.harleyapp.model.AppUsageQueryResult
-import com.example.harleyapp.model.APP_USAGE_TREND_DAY_COUNT
 import com.example.harleyapp.model.aggregateAppUsageEvents
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -26,15 +29,17 @@ import java.time.Instant
 import java.time.ZoneId
 
 /**
- * 读取Android“使用情况访问”提供的前台Activity事件，并转换为应用使用统计页面需要的数据。
+ * 读取Android“使用情况访问”提供的系统事件，并转换为最近七天逐日应用使用明细。
  *
  * 使用方法：
  * 页面先调用[hasUsageAccess]判断用户是否已经授权。未授权时，通过[createUsageAccessIntent]
- * 打开系统设置；用户返回页面后再次检查权限。已授权时，在协程内调用[query]即可读取今天概览、
- * 应用排行和最近七天趋势。查询和图标解码固定在IO线程执行，不会阻塞Compose主线程。
+ * 打开系统设置；用户返回页面后再次检查权限。已授权时，在协程内调用[query]即可读取最近七天
+ * 每一天的前台交互时长、打开次数、夜间使用和应用排行。查询、图标解码和历史合并固定在IO线程。
  *
- * 系统事件只记录Android提供的Activity前台状态变化，部分厂商会延迟或提前清理历史事件，
- * 因此结果是用于自我管理的合理估算，不把它表述为精确的后台存活时长。
+ * 时长统计的是“用户可交互时的唯一前台Activity”，不是后台进程存在时间。控制器同时读取Activity、
+ * 息屏、锁屏和设备启停事件；全部包先参与前台归属切换，只有最终结果才过滤为桌面应用，从而避免
+ * 漏暂停、系统界面切换或多应用事件重叠造成长时间虚高。Android可能清理较早的原始事件，因此
+ * 已经成功算出的日明细会自动保存在本机；不生成月报，也不提供删除、清空或重置入口。
  *
  * @param context Android上下文，内部统一保存Application Context，避免持有页面Activity。
  */
@@ -44,6 +49,7 @@ class AppUsageController(context: Context) {
     private val packageManager = applicationContext.packageManager
     private val appOpsManager = applicationContext.getSystemService(AppOpsManager::class.java)
     private val usageStatsManager = applicationContext.getSystemService(UsageStatsManager::class.java)
+    private val historyRepository = AppUsageHistoryRepository(applicationContext)
 
     /**
      * 判断用户是否在系统设置中允许本应用读取使用情况。
@@ -77,10 +83,11 @@ class AppUsageController(context: Context) {
     fun createUsageAccessIntent(): Intent = Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)
 
     /**
-     * 查询今天和最近七个自然日的应用前台使用统计。
+     * 查询最近七个自然日的逐日应用前台交互统计。
      *
      * 调用方式：必须在用户完成“使用情况访问”授权后调用。函数内部仍会二次检查授权，防止用户
-     * 从系统设置撤销权限后页面继续读取。返回结果已按今天前台时长降序排列并补齐应用名称、图标。
+     * 从系统设置撤销权限后页面继续读取。查询会额外向前读取一个自然日作为状态预滚，但只返回
+     * 今天和前六天；应用名称与图标按包名只解析一次，再复用到七天明细中。
      *
      * @return 成功时返回包含[AppUsageDashboard]的结果；未授权、系统服务缺失或查询异常时返回
      * 对应的[AppUsageQueryError]，不会把异常抛到Compose页面。
@@ -98,23 +105,29 @@ class AppUsageController(context: Context) {
         val nowMillis = System.currentTimeMillis()
         val zoneId = ZoneId.systemDefault()
         val today = Instant.ofEpochMilli(nowMillis).atZone(zoneId).toLocalDate()
-        val rangeStartMillis = today
-            .minusDays((APP_USAGE_TREND_DAY_COUNT - 1).toLong())
+        val firstDisplayDate = today.minusDays((APP_USAGE_TREND_DAY_COUNT - 1).toLong())
+        val rangeStartMillis = firstDisplayDate
+            .atStartOfDay(zoneId)
+            .toInstant()
+            .toEpochMilli()
+        val eventQueryStartMillis = firstDisplayDate
+            .minusDays(APP_USAGE_EVENT_PREROLL_DAY_COUNT)
             .atStartOfDay(zoneId)
             .toInstant()
             .toEpochMilli()
         val launcherPackages = queryLauncherPackages()
+            ?: return@withContext AppUsageQueryResult(error = AppUsageQueryError.QUERY_FAILED)
         val eventSnapshots = runCatching {
             readEventSnapshots(
                 service = service,
-                rangeStartMillis = rangeStartMillis,
+                queryStartMillis = eventQueryStartMillis,
                 nowMillis = nowMillis
             )
         }.getOrElse { error ->
             Log.e(TAG, "Failed to read app usage events", error)
             return@withContext AppUsageQueryResult(error = AppUsageQueryError.QUERY_FAILED)
         }
-        val aggregated = runCatching {
+        val liveAggregation = runCatching {
             aggregateAppUsageEvents(
                 events = eventSnapshots,
                 rangeStartMillis = rangeStartMillis,
@@ -126,61 +139,102 @@ class AppUsageController(context: Context) {
             Log.e(TAG, "Failed to aggregate app usage events", error)
             return@withContext AppUsageQueryResult(error = AppUsageQueryError.QUERY_FAILED)
         }
-        val entries = aggregated.packages.map { usage ->
-            val applicationInfo = getApplicationInfo(usage.packageName)
-            AppUsageEntry(
-                packageName = usage.packageName,
-                label = applicationInfo?.let(packageManager::getApplicationLabel)?.toString()
-                    ?: usage.packageName,
-                icon = applicationInfo?.let(::loadIcon),
-                foregroundMillis = usage.todayForegroundMillis,
-                launchCount = usage.todayLaunchCount,
-                nightMillis = usage.todayNightMillis,
-                lastUsedAtMillis = usage.lastUsedAtMillis
+        val mergedDays = runCatching {
+            historyRepository.mergeWithHistory(
+                liveDays = liveAggregation.days,
+                zoneId = zoneId,
+                allowedPackages = launcherPackages,
+                currentDate = today
+            )
+        }.onFailure { error ->
+            Log.w(TAG, "Failed to merge app usage history", error)
+        }.getOrDefault(liveAggregation.days)
+
+        // 名称和图标只按包名解析一次，避免同一个应用在七个日期里重复解码位图。
+        val applicationPresentation = mergedDays.asSequence()
+            .flatMap { day -> day.packages.asSequence() }
+            .map { usage -> usage.packageName }
+            .distinct()
+            .associateWith(::loadApplicationPresentation)
+        val dayDetails = mergedDays.map { day ->
+            AppUsageDayDetail(
+                date = day.date,
+                appEntries = day.packages.map { usage ->
+                    val presentation = applicationPresentation.getValue(usage.packageName)
+                    AppUsageEntry(
+                        packageName = usage.packageName,
+                        label = presentation.label,
+                        icon = presentation.icon,
+                        foregroundMillis = usage.foregroundMillis,
+                        launchCount = usage.launchCount,
+                        nightMillis = usage.nightMillis,
+                        lastUsedAtMillis = usage.lastUsedAtMillis
+                    )
+                }
             )
         }
 
         AppUsageQueryResult(
             dashboard = AppUsageDashboard(
                 generatedAtMillis = nowMillis,
-                todayForegroundMillis = entries.sumOf(AppUsageEntry::foregroundMillis),
-                todayLaunchCount = entries.sumOf(AppUsageEntry::launchCount),
-                todayNightMillis = entries.sumOf(AppUsageEntry::nightMillis),
-                appEntries = entries,
-                sevenDayTrend = aggregated.sevenDayTrend
+                dayDetails = dayDetails
             )
         )
     }
 
     /**
-     * 顺序读取UsageEvents游标，只保留Activity进入前台和离开前台两种事件。
+     * 顺序读取UsageEvents游标，保留前台、屏幕、锁屏、交互和设备启停事件。
+     *
+     * Android 8和9的MOVE_TO_FOREGROUND/BACKGROUND与新版ACTIVITY_RESUMED/PAUSED使用相同
+     * 事件编号，因此统一映射为Activity恢复和暂停。原始游标顺序写入sequenceIndex，相同毫秒内
+     * 不会因为再次排序而颠倒暂停、恢复或锁屏的先后关系。
      *
      * @param service Android使用情况统计服务。
-     * @param rangeStartMillis 查询起点Unix毫秒时间。
+     * @param queryStartMillis 含一个预滚日的查询起点Unix毫秒时间。
      * @param nowMillis 查询截止Unix毫秒时间。
      * @return 可交给纯计算层聚合的稳定事件快照列表。
      */
     private fun readEventSnapshots(
         service: UsageStatsManager,
-        rangeStartMillis: Long,
+        queryStartMillis: Long,
         nowMillis: Long
     ): List<AppUsageEventSnapshot> {
-        val usageEvents = service.queryEvents(rangeStartMillis, nowMillis)
+        val endExclusiveMillis = if (nowMillis == Long.MAX_VALUE) {
+            nowMillis
+        } else {
+            nowMillis + 1L
+        }
+        val usageEvents = service.queryEvents(queryStartMillis, endExclusiveMillis)
         val currentEvent = UsageEvents.Event()
         val snapshots = mutableListOf<AppUsageEventSnapshot>()
+        var sequenceIndex = 0L
         while (usageEvents.hasNextEvent()) {
             usageEvents.getNextEvent(currentEvent)
-            val resumed = when (currentEvent.eventType) {
-                UsageEvents.Event.ACTIVITY_RESUMED -> true
-                UsageEvents.Event.ACTIVITY_PAUSED -> false
-                else -> continue
+            val type = when (currentEvent.eventType) {
+                UsageEvents.Event.ACTIVITY_RESUMED -> AppUsageEventType.ACTIVITY_RESUMED
+                UsageEvents.Event.ACTIVITY_PAUSED -> AppUsageEventType.ACTIVITY_PAUSED
+                UsageEvents.Event.ACTIVITY_STOPPED -> AppUsageEventType.ACTIVITY_STOPPED
+                UsageEvents.Event.USER_INTERACTION -> AppUsageEventType.USER_INTERACTION
+                UsageEvents.Event.SCREEN_INTERACTIVE -> AppUsageEventType.SCREEN_INTERACTIVE
+                UsageEvents.Event.SCREEN_NON_INTERACTIVE ->
+                    AppUsageEventType.SCREEN_NON_INTERACTIVE
+                UsageEvents.Event.KEYGUARD_SHOWN -> AppUsageEventType.KEYGUARD_SHOWN
+                UsageEvents.Event.KEYGUARD_HIDDEN -> AppUsageEventType.KEYGUARD_HIDDEN
+                UsageEvents.Event.DEVICE_SHUTDOWN -> AppUsageEventType.DEVICE_SHUTDOWN
+                UsageEvents.Event.DEVICE_STARTUP -> AppUsageEventType.DEVICE_STARTUP
+                else -> {
+                    sequenceIndex += 1L
+                    continue
+                }
             }
             snapshots += AppUsageEventSnapshot(
                 packageName = currentEvent.packageName.orEmpty(),
                 componentName = currentEvent.className.orEmpty(),
                 timestampMillis = currentEvent.timeStamp,
-                resumed = resumed
+                type = type,
+                sequenceIndex = sequenceIndex
             )
+            sequenceIndex += 1L
         }
         return snapshots
     }
@@ -188,12 +242,15 @@ class AppUsageController(context: Context) {
     /**
      * 查询具有桌面启动入口的应用包名，过滤系统内部Activity和不可直接打开的组件。
      *
-     * @return 当前用户下所有可见桌面应用包名；查询失败时返回空集合，此时计算层不过滤事件。
+     * 该集合只用于最终输出过滤，所有系统包事件仍会先进入状态机并结束旧应用的前台归属。
+     *
+     * @return 当前用户下所有可见桌面应用包名；查询失败或结果异常为空时返回null，调用方停止统计，
+     * 避免把空白名单误解释为“允许所有系统组件”。
      */
     @Suppress("DEPRECATION")
-    private fun queryLauncherPackages(): Set<String> {
+    private fun queryLauncherPackages(): Set<String>? {
         val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-        return runCatching {
+        val packages = runCatching {
             val activities = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 packageManager.queryIntentActivities(
                     intent,
@@ -207,7 +264,27 @@ class AppUsageController(context: Context) {
             }
         }.onFailure { error ->
             Log.w(TAG, "Failed to query launcher applications", error)
-        }.getOrDefault(emptySet())
+        }.getOrNull()
+        if (packages.isNullOrEmpty()) {
+            Log.w(TAG, "Launcher application query returned no packages")
+            return null
+        }
+        return packages
+    }
+
+    /**
+     * 读取一个包的用户可见名称和缩放图标。
+     *
+     * @param packageName 要解析的应用包名。
+     * @return 始终可用的展示信息；系统读取失败时使用包名并返回空图标。
+     */
+    private fun loadApplicationPresentation(packageName: String): ApplicationPresentation {
+        val applicationInfo = getApplicationInfo(packageName)
+        return ApplicationPresentation(
+            label = applicationInfo?.let(packageManager::getApplicationLabel)?.toString()
+                ?: packageName,
+            icon = applicationInfo?.let(::loadIcon)
+        )
     }
 
     /**
@@ -246,8 +323,15 @@ class AppUsageController(context: Context) {
         }.getOrNull()
     }
 
+    /** 一个包在页面中复用的名称和图标。 */
+    private data class ApplicationPresentation(
+        val label: String,
+        val icon: Bitmap?
+    )
+
     private companion object {
         const val TAG = "AppUsageController"
         const val ICON_SIZE_PX = 120
+        const val APP_USAGE_EVENT_PREROLL_DAY_COUNT = 1L
     }
 }

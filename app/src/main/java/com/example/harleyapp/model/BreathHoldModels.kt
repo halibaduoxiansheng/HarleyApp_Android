@@ -74,3 +74,26 @@ fun calculateBreathHoldSummary(records: List<BreathHoldRecord>): BreathHoldSumma
         } ?: 0L
     )
 }
+
+/**
+ * 从憋气历史中移除用户明确选中的记录，并保持其余记录的原始顺序。
+ *
+ * 使用方法：
+ * 历史管理界面把勾选记录的稳定ID集合与当前完整历史传入本函数，再由Repository持久化返回列表。
+ * 空白ID、未知ID和空选择都不会误删数据；若历史中意外存在相同ID，则对应记录会一并删除，避免
+ * 用户取消选择模式后仍残留无法单独识别的重复项。
+ *
+ * @param records 当前完整憋气历史。
+ * @param selectedRecordIds 用户明确选择删除的记录ID集合。
+ * @return 删除选中项后的新列表；没有有效选择时返回内容相同的新列表。
+ */
+fun removeBreathHoldRecords(
+    records: List<BreathHoldRecord>,
+    selectedRecordIds: Set<String>
+): List<BreathHoldRecord> {
+    val safeSelectedIds = selectedRecordIds
+        .filterTo(mutableSetOf()) { recordId -> recordId.isNotBlank() }
+    if (safeSelectedIds.isEmpty()) return records.toList()
+
+    return records.filterNot { record -> record.id in safeSelectedIds }
+}

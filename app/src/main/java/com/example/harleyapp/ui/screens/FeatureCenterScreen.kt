@@ -1,11 +1,15 @@
 package com.example.harleyapp.ui.screens
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,9 +22,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
-import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -29,12 +33,15 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
@@ -44,6 +51,7 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import com.example.harleyapp.model.HomeFeatureId
@@ -58,7 +66,10 @@ import com.example.harleyapp.model.WechatReminderSettings
 import com.example.harleyapp.model.WechatReminderStatus
 import com.example.harleyapp.model.moveFeatureCenterItem
 import com.example.harleyapp.system.OfflineEnglishTtsState
-import com.example.harleyapp.ui.components.bouncyClickable
+import com.example.harleyapp.ui.components.HarleyPageBackground
+import com.example.harleyapp.ui.components.HarleyPageHeader
+import com.example.harleyapp.ui.components.HarleySymbolBadge
+import com.example.harleyapp.ui.components.harleyCardBorder
 import com.example.harleyapp.ui.theme.LocalAppVisualTheme
 
 /**
@@ -77,8 +88,23 @@ enum class FeatureCenterPage {
     NOTEBOOK,
     EBOOKS,
     CHINESE_GROWTH,
-    QR_SCANNER
+    QR_SCANNER,
+    FLASHLIGHT,
+    MAO_QUOTES,
+    DUAL_CAMERA
 }
+
+/** 功能入口按下时的缩放比例，既要让反馈明显，也要避免文字产生过大的视觉抖动。 */
+private const val FEATURE_ENTRY_PRESSED_SCALE = 0.985f
+
+/** 功能入口缩放动画的阻尼比，用于形成短促且不反复回弹的按压手感。 */
+private const val FEATURE_ENTRY_PRESS_DAMPING_RATIO = 0.78f
+
+/** 功能入口缩放动画的刚度，保证抬手后能快速恢复，不拖慢页面跳转。 */
+private const val FEATURE_ENTRY_PRESS_STIFFNESS = 650f
+
+/** 功能入口按压色彩的过渡时长，单位为毫秒。 */
+private const val FEATURE_ENTRY_COLOR_ANIMATION_MILLIS = 90
 
 /**
  * 集中展示记账、运动、提醒与清理功能，并承载轻量工具的详情页面。
@@ -89,6 +115,10 @@ enum class FeatureCenterPage {
  *
  * @param page 当前功能中心页面。
  * @param onPageChanged 切换功能中心概览或内部详情的回调。
+ * @param overviewGridState 由App根层长期保存的功能入口网格状态，确保进入详情再返回时恢复原位置。
+ * @param overviewRestoreIndex 最近一次打开功能前记录的首个可见卡片索引。
+ * @param overviewRestoreOffset 最近一次打开功能前记录的首个可见卡片像素偏移。
+ * @param onOverviewPositionCaptured 打开功能前保存首项索引与像素偏移的回调。
  * @param featureOrder 功能卡片当前从左到右、从上到下的持久化顺序。
  * @param onFeatureOrderChanged 长按拖动结束后保存完整新顺序的回调，成功返回true。
  * @param onOpenLedger 打开原有完整记账页面的回调。
@@ -96,7 +126,6 @@ enum class FeatureCenterPage {
  * @param onOpenHotTopics 打开每日热点完整页面的回调。
  * @param onOpenMobileData 打开手机流量统计页面的回调。
  * @param onOpenAppUsage 打开应用使用统计页面的回调。
- * @param onOpenStorageManager 打开文件空间管理页面的回调。
  * @param onOpenBreathHold 打开深海憋气计时页面的回调。
  * @param onOpenToday 打开今日总览页面的回调。
  * @param onOpenSearch 打开全局本地搜索页面的回调。
@@ -150,6 +179,10 @@ enum class FeatureCenterPage {
 fun FeatureCenterScreen(
     page: FeatureCenterPage,
     onPageChanged: (FeatureCenterPage) -> Unit,
+    overviewGridState: LazyGridState,
+    overviewRestoreIndex: Int,
+    overviewRestoreOffset: Int,
+    onOverviewPositionCaptured: (index: Int, offset: Int) -> Unit,
     featureOrder: List<HomeFeatureId>,
     onFeatureOrderChanged: (List<HomeFeatureId>) -> Boolean,
     onOpenLedger: () -> Unit,
@@ -157,7 +190,6 @@ fun FeatureCenterScreen(
     onOpenHotTopics: () -> Unit,
     onOpenMobileData: () -> Unit,
     onOpenAppUsage: () -> Unit,
-    onOpenStorageManager: () -> Unit,
     onOpenBreathHold: () -> Unit,
     onOpenToday: () -> Unit,
     onOpenSearch: () -> Unit,
@@ -205,9 +237,19 @@ fun FeatureCenterScreen(
     onOpenSystemStorage: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    // 部分工具（例如电子书书架）只在更深层内容中注册返回处理；这里统一兜底详情首页的系统
+    // 返回事件，避免事件落到App外层后直接回首页。工具自身更晚注册的返回处理仍会优先执行。
+    BackHandler(enabled = page != FeatureCenterPage.OVERVIEW) {
+        onPageChanged(FeatureCenterPage.OVERVIEW)
+    }
+
     when (page) {
         FeatureCenterPage.OVERVIEW -> FeatureCenterOverview(
             modifier = modifier,
+            gridState = overviewGridState,
+            restoreIndex = overviewRestoreIndex,
+            restoreOffset = overviewRestoreOffset,
+            onPositionCaptured = onOverviewPositionCaptured,
             featureOrder = featureOrder,
             onFeatureOrderChanged = onFeatureOrderChanged,
             onOpenLedger = onOpenLedger,
@@ -215,7 +257,6 @@ fun FeatureCenterScreen(
             onOpenHotTopics = onOpenHotTopics,
             onOpenMobileData = onOpenMobileData,
             onOpenAppUsage = onOpenAppUsage,
-            onOpenStorageManager = onOpenStorageManager,
             onOpenBreathHold = onOpenBreathHold,
             onOpenToday = onOpenToday,
             onOpenSearch = onOpenSearch,
@@ -234,6 +275,15 @@ fun FeatureCenterScreen(
             },
             onOpenQrScanner = {
                 onPageChanged(FeatureCenterPage.QR_SCANNER)
+            },
+            onOpenFlashlight = {
+                onPageChanged(FeatureCenterPage.FLASHLIGHT)
+            },
+            onOpenMaoQuotes = {
+                onPageChanged(FeatureCenterPage.MAO_QUOTES)
+            },
+            onOpenDualCamera = {
+                onPageChanged(FeatureCenterPage.DUAL_CAMERA)
             },
             onOpenWechatReminder = {
                 onPageChanged(FeatureCenterPage.WECHAT_REMINDER)
@@ -352,6 +402,21 @@ fun FeatureCenterScreen(
             modifier = modifier,
             onBack = { onPageChanged(FeatureCenterPage.OVERVIEW) }
         )
+
+        FeatureCenterPage.FLASHLIGHT -> FlashlightScreen(
+            modifier = modifier,
+            onBack = { onPageChanged(FeatureCenterPage.OVERVIEW) }
+        )
+
+        FeatureCenterPage.MAO_QUOTES -> MaoQuotesScreen(
+            modifier = modifier,
+            onBack = { onPageChanged(FeatureCenterPage.OVERVIEW) }
+        )
+
+        FeatureCenterPage.DUAL_CAMERA -> DualCameraScreen(
+            modifier = modifier,
+            onBack = { onPageChanged(FeatureCenterPage.OVERVIEW) }
+        )
     }
 }
 
@@ -359,6 +424,10 @@ fun FeatureCenterScreen(
  * 显示功能中心全部卡片化入口。
  *
  * @param modifier 外部布局修饰器。
+ * @param gridState 由App根层持有的网格滚动状态，概览暂时离开组合后仍保留首项和像素偏移。
+ * @param restoreIndex 最近一次打开功能前记录的首个可见卡片索引。
+ * @param restoreOffset 最近一次打开功能前记录的首个可见卡片像素偏移。
+ * @param onPositionCaptured 打开任一功能前保存当前首项索引与像素偏移的回调。
  * @param featureOrder 功能卡片的持久化顺序；当前概览保留该接口供拖动排序组件接入。
  * @param onFeatureOrderChanged 保存新功能顺序的回调；当前概览保留该接口避免上层状态丢失。
  * @param onOpenLedger 打开记账功能的回调。
@@ -366,7 +435,6 @@ fun FeatureCenterScreen(
  * @param onOpenHotTopics 打开每日热点的回调。
  * @param onOpenMobileData 打开手机流量统计的回调。
  * @param onOpenAppUsage 打开应用使用统计的回调。
- * @param onOpenStorageManager 打开文件空间管理的回调。
  * @param onOpenBreathHold 打开深海憋气计时的回调。
  * @param onOpenWechatReminder 打开微信消息提醒的回调。
  * @param onOpenGeneralReminder 打开普通通知提醒的回调。
@@ -379,12 +447,19 @@ fun FeatureCenterScreen(
  * @param onOpenEnglishWords 打开离线英语单词学习页的回调。
  * @param onOpenChineseGrowth 打开语文写作与阅读成长页的回调。
  * @param onOpenQrScanner 打开完全本地识别的二维码扫描页回调。
+ * @param onOpenFlashlight 打开可调频率、时长和亮度的手电筒页回调。
+ * @param onOpenMaoQuotes 打开毛主席语录章节阅读、搜索收藏与本地导入页的回调。
+ * @param onOpenDualCamera 打开前后摄像头等分同屏预览页的回调。
  *
  * @return 无返回值，直接输出功能入口网格。
  */
 @Composable
 private fun FeatureCenterOverview(
     modifier: Modifier,
+    gridState: LazyGridState,
+    restoreIndex: Int,
+    restoreOffset: Int,
+    onPositionCaptured: (index: Int, offset: Int) -> Unit,
     featureOrder: List<HomeFeatureId>,
     onFeatureOrderChanged: (List<HomeFeatureId>) -> Boolean,
     onOpenLedger: () -> Unit,
@@ -392,7 +467,6 @@ private fun FeatureCenterOverview(
     onOpenHotTopics: () -> Unit,
     onOpenMobileData: () -> Unit,
     onOpenAppUsage: () -> Unit,
-    onOpenStorageManager: () -> Unit,
     onOpenBreathHold: () -> Unit,
     onOpenToday: () -> Unit,
     onOpenSearch: () -> Unit,
@@ -402,12 +476,14 @@ private fun FeatureCenterOverview(
     onOpenEnglishWords: () -> Unit,
     onOpenChineseGrowth: () -> Unit,
     onOpenQrScanner: () -> Unit,
+    onOpenFlashlight: () -> Unit,
+    onOpenMaoQuotes: () -> Unit,
+    onOpenDualCamera: () -> Unit,
     onOpenWechatReminder: () -> Unit,
     onOpenGeneralReminder: () -> Unit,
     onOpenLocalCleanup: () -> Unit
 ) {
     val hapticFeedback = LocalHapticFeedback.current
-    val gridState = rememberLazyGridState()
     var displayedOrder by remember(featureOrder) {
         mutableStateOf(featureOrder)
     }
@@ -423,7 +499,6 @@ private fun FeatureCenterOverview(
         onOpenHotTopics = onOpenHotTopics,
         onOpenMobileData = onOpenMobileData,
         onOpenAppUsage = onOpenAppUsage,
-        onOpenStorageManager = onOpenStorageManager,
         onOpenBreathHold = onOpenBreathHold,
         onOpenToday = onOpenToday,
         onOpenSearch = onOpenSearch,
@@ -433,44 +508,89 @@ private fun FeatureCenterOverview(
         onOpenEnglishWords = onOpenEnglishWords,
         onOpenChineseGrowth = onOpenChineseGrowth,
         onOpenQrScanner = onOpenQrScanner,
+        onOpenFlashlight = onOpenFlashlight,
+        onOpenMaoQuotes = onOpenMaoQuotes,
+        onOpenDualCamera = onOpenDualCamera,
         onOpenWechatReminder = onOpenWechatReminder,
         onOpenGeneralReminder = onOpenGeneralReminder,
         onOpenLocalCleanup = onOpenLocalCleanup
     ).associateBy(FeatureEntry::id)
     val orderedEntries = displayedOrder.mapNotNull(entriesById::get)
+    val context = LocalContext.current
+    val visualTheme = LocalAppVisualTheme.current
+    val themeArtResourceId = remember(visualTheme.artResourceName) {
+        if (visualTheme.artResourceName.isBlank()) {
+            0
+        } else {
+            context.resources.getIdentifier(
+                visualTheme.artResourceName,
+                "drawable",
+                context.packageName
+            )
+        }
+    }
 
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-            .padding(start = 20.dp, top = 22.dp, end = 20.dp)
-    ) {
-        Text(
-            text = "功能中心",
-            style = MaterialTheme.typography.headlineMedium,
-            fontWeight = FontWeight.Bold
-        )
-        Text(
-            text = "轻点打开 · 长按卡片后拖动可调整位置",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
+    // 外层全屏页面返回时，Scaffold会先恢复底部导航再收窄内容区。等待两个布局帧后按离开前的
+    // 首项和像素偏移复位，可避开中间视口对LazyGridState产生的一次性滚动夹紧。
+    LaunchedEffect(gridState, restoreIndex, restoreOffset, orderedEntries.size) {
+        if (orderedEntries.isNotEmpty()) {
+            withFrameNanos { }
+            withFrameNanos { }
+            gridState.scrollToItem(
+                index = restoreIndex.coerceIn(0, orderedEntries.lastIndex),
+                scrollOffset = restoreOffset.coerceAtLeast(0)
+            )
+        }
+    }
 
-        LazyVerticalGrid(
-            columns = GridCells.Fixed(2),
+    HarleyPageBackground(modifier = modifier) {
+        Column(
             modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f)
-                .padding(top = 14.dp),
-            state = gridState,
-            contentPadding = PaddingValues(bottom = 28.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+                .fillMaxSize()
+                .padding(start = 20.dp, top = 22.dp, end = 20.dp)
         ) {
-            items(
-                items = orderedEntries,
-                key = { entry -> entry.id.name }
-            ) { entry ->
+            HarleyPageHeader(
+                title = "功能中心",
+                subtitle = "${orderedEntries.size} 个本地工具 · 长按卡片可拖动排序",
+                eyebrow = "TOOLS",
+                trailing = {
+                    if (themeArtResourceId != 0) {
+                        Surface(
+                            modifier = Modifier.size(58.dp),
+                            shape = RoundedCornerShape(18.dp),
+                            color = MaterialTheme.colorScheme.primaryContainer,
+                            border = harleyCardBorder(alpha = 0.8f)
+                        ) {
+                            Image(
+                                painter = painterResource(themeArtResourceId),
+                                contentDescription = null,
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .clip(RoundedCornerShape(18.dp)),
+                                contentScale = ContentScale.Crop
+                            )
+                        }
+                    } else {
+                        HarleySymbolBadge(symbol = "功")
+                    }
+                }
+            )
+
+            LazyVerticalGrid(
+                columns = GridCells.Adaptive(minSize = 144.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .padding(top = 20.dp),
+                state = gridState,
+                contentPadding = PaddingValues(bottom = 32.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                items(
+                    items = orderedEntries,
+                    key = { entry -> entry.id.name }
+                ) { entry ->
                 val isDragging = draggingFeatureId == entry.id
                 val dragScale by animateFloatAsState(
                     targetValue = if (isDragging) 1.055f else 1f,
@@ -481,18 +601,18 @@ private fun FeatureCenterOverview(
                     label = "feature_drag_scale_${entry.id.name}"
                 )
 
-                Box(
-                    modifier = Modifier
-                        .animateItem()
-                        .zIndex(if (isDragging) 1f else 0f)
-                        .graphicsLayer {
-                            translationX = if (isDragging) dragOffset.x else 0f
-                            translationY = if (isDragging) dragOffset.y else 0f
-                            scaleX = dragScale
-                            scaleY = dragScale
-                            shadowElevation = if (isDragging) 24f else 0f
-                        }
-                        .pointerInput(entry.id) {
+                    Box(
+                        modifier = Modifier
+                            .animateItem()
+                            .zIndex(if (isDragging) 1f else 0f)
+                            .graphicsLayer {
+                                translationX = if (isDragging) dragOffset.x else 0f
+                                translationY = if (isDragging) dragOffset.y else 0f
+                                scaleX = dragScale
+                                scaleY = dragScale
+                                shadowElevation = if (isDragging) 24f else 0f
+                            }
+                            .pointerInput(entry.id) {
                             detectDragGesturesAfterLongPress(
                                 onDragStart = {
                                     draggingFeatureId = entry.id
@@ -551,12 +671,21 @@ private fun FeatureCenterOverview(
                                     }
                                 }
                             )
-                        }
-                ) {
-                    FeatureEntryCard(
-                        modifier = Modifier.fillMaxWidth(),
-                        entry = entry
-                    )
+                            }
+                    ) {
+                        FeatureEntryCard(
+                            modifier = Modifier.fillMaxWidth(),
+                            entry = entry.copy(
+                                onClick = {
+                                    onPositionCaptured(
+                                        gridState.firstVisibleItemIndex,
+                                        gridState.firstVisibleItemScrollOffset
+                                    )
+                                    entry.onClick()
+                                }
+                            )
+                        )
+                    }
                 }
             }
         }
@@ -584,7 +713,6 @@ private data class FeatureEntry(
  * @param onOpenHotTopics 打开每日热点的回调。
  * @param onOpenMobileData 打开手机流量的回调。
  * @param onOpenAppUsage 打开应用使用统计的回调。
- * @param onOpenStorageManager 打开文件空间管理的回调。
  * @param onOpenBreathHold 打开深海憋气计时的回调。
  * @param onOpenToday 打开今日总览的回调。
  * @param onOpenSearch 打开全局搜索的回调。
@@ -594,6 +722,9 @@ private data class FeatureEntry(
  * @param onOpenEnglishWords 打开离线英语单词学习页的回调。
  * @param onOpenChineseGrowth 打开语文写作与阅读成长页的回调。
  * @param onOpenQrScanner 打开完全本地识别的二维码扫描页回调。
+ * @param onOpenFlashlight 打开手电筒和爆闪控制页回调。
+ * @param onOpenMaoQuotes 打开毛主席语录章节阅读、搜索收藏与本地导入页的回调。
+ * @param onOpenDualCamera 打开前后摄像头等分同屏预览页的回调。
  * @param onOpenWechatReminder 打开微信消息提醒的回调。
  * @param onOpenGeneralReminder 打开通知提醒的回调。
  * @param onOpenLocalCleanup 打开手机清理的回调。
@@ -606,7 +737,6 @@ private fun featureCenterEntries(
     onOpenHotTopics: () -> Unit,
     onOpenMobileData: () -> Unit,
     onOpenAppUsage: () -> Unit,
-    onOpenStorageManager: () -> Unit,
     onOpenBreathHold: () -> Unit,
     onOpenToday: () -> Unit,
     onOpenSearch: () -> Unit,
@@ -616,6 +746,9 @@ private fun featureCenterEntries(
     onOpenEnglishWords: () -> Unit,
     onOpenChineseGrowth: () -> Unit,
     onOpenQrScanner: () -> Unit,
+    onOpenFlashlight: () -> Unit,
+    onOpenMaoQuotes: () -> Unit,
+    onOpenDualCamera: () -> Unit,
     onOpenWechatReminder: () -> Unit,
     onOpenGeneralReminder: () -> Unit,
     onOpenLocalCleanup: () -> Unit
@@ -637,13 +770,19 @@ private fun featureCenterEntries(
         FeatureEntry(HomeFeatureId.CHINESE_GROWTH, "文", "语文成长", "分级写作训练与精选阅读", onOpenChineseGrowth),
         FeatureEntry(HomeFeatureId.QR_SCANNER, "码", "二维码扫描", "本地识别相机与相册二维码", onOpenQrScanner),
         FeatureEntry(HomeFeatureId.APP_USAGE, "用", "应用使用", "时长、次数与七天趋势", onOpenAppUsage),
-        FeatureEntry(HomeFeatureId.STORAGE_MANAGER, "盘", "文件空间", "分类、重复与下载整理", onOpenStorageManager),
-        FeatureEntry(HomeFeatureId.BREATH_HOLD, "息", "深海憋气", "沉浸计时与本机记录", onOpenBreathHold)
+        FeatureEntry(HomeFeatureId.BREATH_HOLD, "息", "深海憋气", "沉浸计时与本机记录", onOpenBreathHold),
+        FeatureEntry(HomeFeatureId.FLASHLIGHT, "光", "手电筒", "亮度、频率与明灭时长控制", onOpenFlashlight),
+        FeatureEntry(HomeFeatureId.MAO_QUOTES, "录", "毛主席语录", "章节阅读、搜索收藏与本地导入", onOpenMaoQuotes),
+        FeatureEntry(HomeFeatureId.DUAL_CAMERA, "双", "前后双摄", "等分同屏、点击互换与手势变焦", onOpenDualCamera)
     )
 }
 
 /**
- * 显示一个可点击的功能入口卡片。
+ * 显示一个带即时按压反馈的功能入口卡片。
+ *
+ * 使用方法：
+ * 传入功能入口数据即可。按下卡片时会同步触发缩放、容器变色、阴影降低和Material涟漪，
+ * 抬手后立即执行entry.onClick，不额外延迟导航。
  *
  * @param entry 功能名称、说明、图标字符和点击回调。
  * @param modifier 外部布局修饰器。
@@ -655,61 +794,101 @@ private fun FeatureEntryCard(
     entry: FeatureEntry,
     modifier: Modifier = Modifier
 ) {
-    val context = LocalContext.current
-    val visualTheme = LocalAppVisualTheme.current
-    val themeArtResourceId = remember(visualTheme.artResourceName) {
-        context.resources.getIdentifier(
-            visualTheme.artResourceName,
-            "drawable",
-            context.packageName
-        )
+    val (badgeContainerColor, badgeContentColor) = when (entry.id) {
+        HomeFeatureId.EBOOKS,
+        HomeFeatureId.CHINESE_GROWTH,
+        HomeFeatureId.ENGLISH_WORDS,
+        HomeFeatureId.MAO_QUOTES -> {
+            MaterialTheme.colorScheme.primaryContainer to
+                MaterialTheme.colorScheme.onPrimaryContainer
+        }
+
+        HomeFeatureId.QR_SCANNER,
+        HomeFeatureId.MOBILE_DATA,
+        HomeFeatureId.APP_USAGE,
+        HomeFeatureId.FLASHLIGHT,
+        HomeFeatureId.DUAL_CAMERA,
+        HomeFeatureId.LOCAL_CLEANUP,
+        HomeFeatureId.BACKUP -> {
+            MaterialTheme.colorScheme.secondaryContainer to
+                MaterialTheme.colorScheme.onSecondaryContainer
+        }
+
+        HomeFeatureId.TODAY,
+        HomeFeatureId.LEDGER,
+        HomeFeatureId.FITNESS,
+        HomeFeatureId.BREATH_HOLD -> {
+            MaterialTheme.colorScheme.tertiaryContainer to
+                MaterialTheme.colorScheme.onTertiaryContainer
+        }
+
+        else -> {
+            MaterialTheme.colorScheme.surfaceContainerHighest to
+                MaterialTheme.colorScheme.onSurface
+        }
     }
-    Card(
-        modifier = modifier
-            .heightIn(min = 128.dp)
-            .bouncyClickable(onClick = entry.onClick),
-        shape = RoundedCornerShape(24.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surface
+
+    val interactionSource = remember(entry.id) { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val pressedScale by animateFloatAsState(
+        targetValue = if (isPressed) FEATURE_ENTRY_PRESSED_SCALE else 1f,
+        animationSpec = spring(
+            dampingRatio = FEATURE_ENTRY_PRESS_DAMPING_RATIO,
+            stiffness = FEATURE_ENTRY_PRESS_STIFFNESS
         ),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+        label = "feature_entry_press_scale_${entry.id.name}"
+    )
+    val containerColor by animateColorAsState(
+        targetValue = if (isPressed) {
+            MaterialTheme.colorScheme.surfaceContainerHigh
+        } else {
+            MaterialTheme.colorScheme.surfaceContainerLow
+        },
+        animationSpec = tween(durationMillis = FEATURE_ENTRY_COLOR_ANIMATION_MILLIS),
+        label = "feature_entry_press_color_${entry.id.name}"
+    )
+
+    Card(
+        onClick = entry.onClick,
+        modifier = modifier
+            .heightIn(min = 148.dp)
+            .graphicsLayer {
+                scaleX = pressedScale
+                scaleY = pressedScale
+            },
+        interactionSource = interactionSource,
+        shape = MaterialTheme.shapes.large,
+        colors = CardDefaults.cardColors(
+            containerColor = containerColor
+        ),
+        border = harleyCardBorder(),
+        elevation = CardDefaults.cardElevation(
+            defaultElevation = 0.dp,
+            pressedElevation = 0.dp
+        )
     ) {
         Column(
-            modifier = Modifier.padding(15.dp),
-            verticalArrangement = Arrangement.spacedBy(7.dp)
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(9.dp)
         ) {
-            Surface(
-                modifier = Modifier.size(48.dp),
-                shape = RoundedCornerShape(14.dp),
-                color = MaterialTheme.colorScheme.primaryContainer
-            ) {
-                if (themeArtResourceId != 0) {
-                    Image(
-                        painter = painterResource(themeArtResourceId),
-                        contentDescription = "${visualTheme.displayName}人物",
-                        modifier = Modifier.fillMaxSize(),
-                        contentScale = ContentScale.Crop
-                    )
-                } else {
-                    Box(contentAlignment = Alignment.Center) {
-                        Text(
-                            text = entry.symbol,
-                            style = MaterialTheme.typography.titleLarge,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                }
-            }
+            HarleySymbolBadge(
+                symbol = entry.symbol,
+                containerColor = badgeContainerColor,
+                contentColor = badgeContentColor
+            )
             Text(
                 text = entry.title,
                 style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
             Text(
                 text = entry.subtitle,
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
             )
         }
     }
@@ -739,39 +918,53 @@ fun FeatureDetailScaffold(
 ) {
     BackHandler(onBack = onBack)
 
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-    ) {
-        Surface(
-            modifier = Modifier.fillMaxWidth(),
-            tonalElevation = 2.dp
-        ) {
-            Row(
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically
+    HarleyPageBackground(modifier = modifier) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                shape = MaterialTheme.shapes.large,
+                color = MaterialTheme.colorScheme.surfaceContainerLow,
+                border = harleyCardBorder(alpha = 0.72f),
+                tonalElevation = 0.dp,
+                shadowElevation = 1.dp
             ) {
-                TextButton(onClick = onBack) {
-                    Text(text = "← 功能中心")
-                }
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = title,
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        text = subtitle,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                Row(
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    TextButton(onClick = onBack) {
+                        Text(
+                            text = "← 功能中心",
+                            style = MaterialTheme.typography.labelLarge
+                        )
+                    }
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        Text(
+                            text = title,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = subtitle,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
             }
-        }
 
-        Box(modifier = Modifier.weight(1f)) {
-            content(Modifier.fillMaxSize())
+            Box(modifier = Modifier.weight(1f)) {
+                content(Modifier.fillMaxSize())
+            }
         }
     }
 }

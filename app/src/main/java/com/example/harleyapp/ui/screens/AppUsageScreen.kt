@@ -8,6 +8,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -19,8 +20,11 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
@@ -33,11 +37,13 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -48,21 +54,29 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.harleyapp.model.AppUsageDashboard
+import com.example.harleyapp.model.AppUsageDayDetail
 import com.example.harleyapp.model.AppUsageDayTrend
 import com.example.harleyapp.model.AppUsageEntry
 import com.example.harleyapp.model.AppUsageQueryError
 import com.example.harleyapp.system.AppUsageController
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 /**
- * 显示今日应用时长、打开次数、夜间使用、七天趋势和最常用应用排行。
+ * 显示最近七天逐日应用时长、打开次数、夜间使用、趋势和应用排行。
  *
  * 使用方法：
  * HarleyApp把页面登记为功能中心的详情页，并传入Application Context创建的
  * [AppUsageController]。页面首次进入会检查“使用情况访问”权限；用户完成系统授权并返回后，
- * 页面自动查询。点击刷新可重新读取，所有结果仅在当前页面内存中展示，不上传也不另存历史。
+ * 页面自动查询。点击日期可切换对应自然日的完整明细；页面从后台回到前台或用户点击刷新时，
+ * 会重新读取最新统计。页面只展示控制器返回的最近七天数据，不提供删除、清空或重置入口。
  *
  * @param controller 使用情况权限检查和统计查询控制器。
  * @param onBack 返回功能中心的回调。
@@ -75,6 +89,7 @@ fun AppUsageScreen(
     onBack: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val lifecycleOwner = LocalLifecycleOwner.current
     var usageAccessGranted by remember {
         mutableStateOf(controller.hasUsageAccess())
     }
@@ -93,30 +108,67 @@ fun AppUsageScreen(
     var settingsError by remember {
         mutableStateOf("")
     }
+    var selectedEpochDay by rememberSaveable {
+        mutableStateOf<Long?>(null)
+    }
+    var hasFinishedInitialQuery by remember {
+        mutableStateOf(false)
+    }
     val usageSettingsLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
     ) {
         usageAccessGranted = controller.hasUsageAccess()
-        refreshToken += 1
+    }
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME && hasFinishedInitialQuery) {
+                // 页面通常在Activity已经RESUMED时才进入；用首次查询完成标记而不是猜测首次生命周期事件。
+                refreshToken += 1
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
     }
 
     LaunchedEffect(refreshToken) {
-        usageAccessGranted = controller.hasUsageAccess()
-        settingsError = ""
-        if (!usageAccessGranted) {
-            dashboard = null
-            queryError = AppUsageQueryError.USAGE_ACCESS_REQUIRED
-            isLoading = false
-            return@LaunchedEffect
-        }
+        try {
+            usageAccessGranted = controller.hasUsageAccess()
+            settingsError = ""
+            if (!usageAccessGranted) {
+                dashboard = null
+                queryError = AppUsageQueryError.USAGE_ACCESS_REQUIRED
+                isLoading = false
+                return@LaunchedEffect
+            }
 
-        isLoading = true
-        queryError = null
-        val result = controller.query()
-        dashboard = result.dashboard
-        queryError = result.error
-        isLoading = false
+            isLoading = true
+            queryError = null
+            val result = controller.query()
+            dashboard = result.dashboard
+            queryError = result.error
+            isLoading = false
+        } finally {
+            hasFinishedInitialQuery = true
+        }
     }
+
+    LaunchedEffect(dashboard) {
+        val availableDays = dashboard?.dayDetails.orEmpty()
+        val selectionStillExists = availableDays.any { detail ->
+            detail.date.toEpochDay() == selectedEpochDay
+        }
+        if (!selectionStillExists) {
+            selectedEpochDay = availableDays.lastOrNull()?.date?.toEpochDay()
+        }
+    }
+
+    val selectedDayDetail = dashboard?.dayDetails
+        ?.firstOrNull { detail -> detail.date.toEpochDay() == selectedEpochDay }
+        ?: dashboard?.dayDetails?.lastOrNull()
+    val activeEpochDay = selectedDayDetail?.date?.toEpochDay()
 
     LazyColumn(
         modifier = modifier
@@ -162,77 +214,96 @@ fun AppUsageScreen(
                 )
             }
         } else {
-            item {
-                AnimatedContent(
-                    targetState = dashboard,
-                    transitionSpec = {
-                        fadeIn().togetherWith(fadeOut())
-                    },
-                    label = "app_usage_dashboard"
-                ) { currentDashboard ->
-                    when {
-                        isLoading && currentDashboard == null -> AppUsageLoadingCard()
-                        currentDashboard != null -> AppUsageSummaryCard(currentDashboard)
-                        else -> AppUsageErrorCard(queryError)
-                    }
-                }
-            }
-
             dashboard?.let { currentDashboard ->
                 item {
-                    AppUsageTrendCard(currentDashboard.sevenDayTrend)
+                    AppUsageDaySelector(
+                        dayDetails = currentDashboard.dayDetails,
+                        selectedEpochDay = activeEpochDay,
+                        onDateSelected = { epochDay ->
+                            selectedEpochDay = epochDay
+                        }
+                    )
                 }
 
-                item {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
+                selectedDayDetail?.let { currentDay ->
+                    item {
+                        AnimatedContent(
+                            targetState = currentDay,
+                            transitionSpec = {
+                                fadeIn().togetherWith(fadeOut())
+                            },
+                            label = "app_usage_selected_day"
+                        ) { selectedDay ->
+                            AppUsageSummaryCard(selectedDay)
+                        }
+                    }
+
+                    item {
+                        AppUsageTrendCard(
+                            trends = currentDashboard.sevenDayTrend,
+                            selectedEpochDay = activeEpochDay,
+                            onDateSelected = { epochDay ->
+                                selectedEpochDay = epochDay
+                            }
+                        )
+                    }
+
+                    item {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "${currentDay.date.format(APP_USAGE_DATE_TITLE_FORMATTER)}应用排行",
+                                    style = MaterialTheme.typography.titleLarge,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "按当日前台使用时长排序",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
                             Text(
-                                text = "最常用应用",
-                                style = MaterialTheme.typography.titleLarge,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Text(
-                                text = "按今天前台使用时长排序",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                text = "${currentDay.appEntries.size}个",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.primary
                             )
                         }
-                        Text(
-                            text = "${currentDashboard.appEntries.size}个",
-                            style = MaterialTheme.typography.labelLarge,
-                            color = MaterialTheme.colorScheme.primary
-                        )
                     }
-                }
 
-                if (currentDashboard.appEntries.isEmpty()) {
-                    item {
-                        AppUsageEmptyCard()
-                    }
-                } else {
-                    val largestDuration = currentDashboard.appEntries
-                        .maxOf(AppUsageEntry::foregroundMillis)
-                        .coerceAtLeast(1L)
-                    items(
-                        items = currentDashboard.appEntries,
-                        key = AppUsageEntry::packageName
-                    ) { usage ->
-                        AppUsageAppRow(
-                            usage = usage,
-                            largestDurationMillis = largestDuration
-                        )
+                    if (currentDay.appEntries.isEmpty()) {
+                        item {
+                            AppUsageEmptyCard(currentDay.date)
+                        }
+                    } else {
+                        val largestDuration = currentDay.appEntries
+                            .maxOf(AppUsageEntry::foregroundMillis)
+                            .coerceAtLeast(1L)
+                        items(
+                            items = currentDay.appEntries,
+                            key = AppUsageEntry::packageName
+                        ) { usage ->
+                            AppUsageAppRow(
+                                usage = usage,
+                                largestDurationMillis = largestDuration
+                            )
+                        }
                     }
                 }
 
                 item {
                     Text(
-                        text = "说明：时长和次数由Android前台Activity事件推算，厂商系统可能延迟或清理记录；夜间固定为23:00—次日06:00。",
+                        text = "说明：各日期时长和次数由Android前台Activity、亮屏与锁屏事件综合推算；夜间固定为23:00—次日06:00。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                }
+            } ?: item {
+                when {
+                    isLoading -> AppUsageLoadingCard()
+                    else -> AppUsageErrorCard(queryError)
                 }
             }
         }
@@ -329,13 +400,136 @@ private fun AppUsagePermissionCard(
 }
 
 /**
- * 显示今天的总时长、打开次数和夜间使用三个核心指标。
+ * 显示最近七个自然日的固定日期入口，并自动让当前选中日期进入可见区域。
  *
- * @param dashboard 当前成功读取的统计快照。
- * @return 无返回值。
+ * 使用方法：传入控制器已经补齐的七天明细和当前选中日期。用户点击任意日期卡后，函数通过
+ * [onDateSelected]返回该日期的Epoch Day，页面据此统一切换总览、趋势选中态和应用排行。
+ *
+ * @param dayDetails 按日期升序排列的最近七天完整明细。
+ * @param selectedEpochDay 当前选中日期的Epoch Day；页面尚未建立选择时可以为空。
+ * @param onDateSelected 用户选择日期后的回调，参数为所选日期的Epoch Day。
+ * @return 无返回值，直接输出可横向滚动的日期选择卡片。
  */
 @Composable
-private fun AppUsageSummaryCard(dashboard: AppUsageDashboard) {
+private fun AppUsageDaySelector(
+    dayDetails: List<AppUsageDayDetail>,
+    selectedEpochDay: Long?,
+    onDateSelected: (Long) -> Unit
+) {
+    val listState = rememberLazyListState()
+
+    LaunchedEffect(dayDetails, selectedEpochDay) {
+        val selectedIndex = dayDetails.indexOfFirst { detail ->
+            detail.date.toEpochDay() == selectedEpochDay
+        }
+        if (selectedIndex >= 0) {
+            listState.animateScrollToItem(selectedIndex)
+        }
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(24.dp)
+    ) {
+        Column(
+            modifier = Modifier.padding(vertical = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(horizontal = 18.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                Text(
+                    text = "选择日期",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = "查看最近7天中每一天的应用明细",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            LazyRow(
+                state = listState,
+                contentPadding = PaddingValues(horizontal = 18.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(
+                    items = dayDetails,
+                    key = { detail -> detail.date.toEpochDay() }
+                ) { detail ->
+                    val epochDay = detail.date.toEpochDay()
+                    val isSelected = epochDay == selectedEpochDay
+                    val isLatestDay = detail.date == dayDetails.lastOrNull()?.date
+                    Surface(
+                        modifier = Modifier
+                            .width(76.dp)
+                            .clickable {
+                                onDateSelected(epochDay)
+                            },
+                        shape = RoundedCornerShape(16.dp),
+                        color = if (isSelected) {
+                            MaterialTheme.colorScheme.primaryContainer
+                        } else {
+                            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.62f)
+                        }
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 10.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(3.dp)
+                        ) {
+                            Text(
+                                text = if (isLatestDay) {
+                                    "今天"
+                                } else {
+                                    detail.date.format(APP_USAGE_WEEKDAY_FORMATTER)
+                                },
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                color = if (isSelected) {
+                                    MaterialTheme.colorScheme.onPrimaryContainer
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                }
+                            )
+                            Text(
+                                text = detail.date.format(APP_USAGE_DAY_FORMATTER),
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = if (isSelected) {
+                                    MaterialTheme.colorScheme.onPrimaryContainer
+                                } else {
+                                    MaterialTheme.colorScheme.onSurface
+                                }
+                            )
+                            Text(
+                                text = compactAppUsageDuration(detail.foregroundMillis),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (isSelected) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 显示所选日期的总时长、打开次数和夜间使用三个核心指标。
+ *
+ * @param dayDetail 当前选中自然日的完整统计明细。
+ * @return 无返回值，直接输出所选日期的总览卡片。
+ */
+@Composable
+private fun AppUsageSummaryCard(dayDetail: AppUsageDayDetail) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(28.dp),
@@ -353,12 +547,12 @@ private fun AppUsageSummaryCard(dashboard: AppUsageDashboard) {
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             Text(
-                text = "今天屏幕里的时间",
+                text = "${dayDetail.date.format(APP_USAGE_DATE_TITLE_FORMATTER)}屏幕里的时间",
                 style = MaterialTheme.typography.labelLarge,
                 color = Color.White.copy(alpha = 0.82f)
             )
             Text(
-                text = formatAppUsageDuration(dashboard.todayForegroundMillis),
+                text = formatAppUsageDuration(dayDetail.foregroundMillis),
                 style = MaterialTheme.typography.displaySmall,
                 fontWeight = FontWeight.Bold,
                 color = Color.White
@@ -371,13 +565,13 @@ private fun AppUsageSummaryCard(dashboard: AppUsageDashboard) {
                     modifier = Modifier.weight(1f),
                     symbol = "↗",
                     title = "打开次数",
-                    value = "${dashboard.todayLaunchCount}次"
+                    value = "${dayDetail.launchCount}次"
                 )
                 AppUsageMetric(
                     modifier = Modifier.weight(1f),
                     symbol = "☾",
                     title = "夜间使用",
-                    value = formatAppUsageDuration(dashboard.todayNightMillis)
+                    value = formatAppUsageDuration(dayDetail.nightMillis)
                 )
             }
         }
@@ -425,13 +619,19 @@ private fun AppUsageMetric(
 }
 
 /**
- * 以七根相对高度柱显示最近七个自然日的总前台时长。
+ * 以七根可点击的相对高度柱显示最近七个自然日的总前台时长。
  *
  * @param trends 按日期升序排列并已补零的七天趋势。
- * @return 无返回值。
+ * @param selectedEpochDay 当前选中日期的Epoch Day，用于突出对应柱体。
+ * @param onDateSelected 用户点击趋势柱时的日期选择回调。
+ * @return 无返回值，直接输出可联动切换明细的七天趋势卡片。
  */
 @Composable
-private fun AppUsageTrendCard(trends: List<AppUsageDayTrend>) {
+private fun AppUsageTrendCard(
+    trends: List<AppUsageDayTrend>,
+    selectedEpochDay: Long?,
+    onDateSelected: (Long) -> Unit
+) {
     val largestDuration = trends.maxOfOrNull(AppUsageDayTrend::foregroundMillis)
         ?.coerceAtLeast(1L)
         ?: 1L
@@ -459,6 +659,11 @@ private fun AppUsageTrendCard(trends: List<AppUsageDayTrend>) {
                     color = MaterialTheme.colorScheme.primary
                 )
             }
+            Text(
+                text = "点击日期柱也可以切换下方明细",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -467,17 +672,31 @@ private fun AppUsageTrendCard(trends: List<AppUsageDayTrend>) {
                 verticalAlignment = Alignment.Bottom
             ) {
                 trends.forEach { trend ->
+                    val epochDay = trend.date.toEpochDay()
+                    val isSelected = epochDay == selectedEpochDay
                     val fraction = (
                         trend.foregroundMillis.toFloat() / largestDuration.toFloat()
                         ).coerceIn(0f, 1f)
                     Column(
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(10.dp))
+                            .clickable {
+                                onDateSelected(epochDay)
+                            }
+                            .padding(horizontal = 2.dp, vertical = 3.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Bottom
                     ) {
                         Text(
                             text = compactAppUsageDuration(trend.foregroundMillis),
                             style = MaterialTheme.typography.labelSmall,
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                            color = if (isSelected) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurface
+                            },
                             maxLines = 1
                         )
                         Spacer(modifier = Modifier.height(5.dp))
@@ -488,7 +707,14 @@ private fun AppUsageTrendCard(trends: List<AppUsageDayTrend>) {
                                 .clip(RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp))
                                 .background(
                                     Brush.verticalGradient(
-                                        colors = listOf(Color(0xFF6C63FF), Color(0xFF26B7E8))
+                                        colors = if (isSelected) {
+                                            listOf(Color(0xFF5448F5), Color(0xFF129FD8))
+                                        } else {
+                                            listOf(
+                                                Color(0xFF6C63FF).copy(alpha = 0.48f),
+                                                Color(0xFF26B7E8).copy(alpha = 0.48f)
+                                            )
+                                        }
                                     )
                                 )
                         )
@@ -496,7 +722,12 @@ private fun AppUsageTrendCard(trends: List<AppUsageDayTrend>) {
                         Text(
                             text = trend.date.format(APP_USAGE_DAY_FORMATTER),
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                            color = if (isSelected) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            }
                         )
                     }
                 }
@@ -506,9 +737,9 @@ private fun AppUsageTrendCard(trends: List<AppUsageDayTrend>) {
 }
 
 /**
- * 显示单个应用今天的时长、打开次数、夜间时长和相对使用占比。
+ * 显示单个应用在所选日期的时长、打开次数、夜间时长和相对使用占比。
  *
- * @param usage 当前应用的今日统计。
+ * @param usage 当前应用在所选日期的统计。
  * @param largestDurationMillis 排名第一应用的时长，用于生成相对进度条。
  * @return 无返回值。
  */
@@ -567,6 +798,11 @@ private fun AppUsageAppRow(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
+                    Text(
+                        text = "最后使用 ${formatAppUsageLastUsed(usage.lastUsedAtMillis)}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
                 Text(
                     text = formatAppUsageDuration(usage.foregroundMillis),
@@ -624,19 +860,20 @@ private fun AppUsageLoadingCard() {
 }
 
 /**
- * 显示已授权但今天没有前台应用事件的空状态。
+ * 显示已授权但所选日期没有前台应用事件的空状态。
  *
- * @return 无返回值。
+ * @param date 当前选中的自然日期，用于让空状态与日期选择保持一致。
+ * @return 无返回值，直接输出所选日期的空状态卡片。
  */
 @Composable
-private fun AppUsageEmptyCard() {
+private fun AppUsageEmptyCard(date: LocalDate) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(20.dp)
     ) {
         Text(
             modifier = Modifier.padding(20.dp),
-            text = "今天还没有读取到应用使用记录。刚授权时系统数据可能稍有延迟，可使用几个应用后再刷新。",
+            text = "${date.format(APP_USAGE_DATE_TITLE_FORMATTER)}没有读取到应用使用记录。刚授权或查看较早日期时，系统数据可能不完整，可稍后刷新。",
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
     }
@@ -703,4 +940,27 @@ private fun compactAppUsageDuration(durationMillis: Long): String {
     }
 }
 
+/**
+ * 把单日最后前台交互时间转换为本地时分，供应用明细快速确认最后使用时刻。
+ *
+ * @param timestampMillis 当日最后前台交互的Unix毫秒时间；非正值表示没有有效时间。
+ * @return 当前手机时区下的“HH:mm”，没有有效时间时返回“--:--”。
+ */
+private fun formatAppUsageLastUsed(timestampMillis: Long): String {
+    if (timestampMillis <= 0L) return "--:--"
+    return Instant.ofEpochMilli(timestampMillis)
+        .atZone(ZoneId.systemDefault())
+        .format(APP_USAGE_TIME_FORMATTER)
+}
+
+/** 最近七天日期选择和趋势图使用的紧凑月日格式。 */
 private val APP_USAGE_DAY_FORMATTER = DateTimeFormatter.ofPattern("M/d", Locale.CHINA)
+
+/** 总览与排行标题使用的完整中文月日格式。 */
+private val APP_USAGE_DATE_TITLE_FORMATTER = DateTimeFormatter.ofPattern("M月d日", Locale.CHINA)
+
+/** 日期选择卡片使用的中文星期格式。 */
+private val APP_USAGE_WEEKDAY_FORMATTER = DateTimeFormatter.ofPattern("EEE", Locale.CHINA)
+
+/** 应用明细最后使用时间采用的二十四小时制格式。 */
+private val APP_USAGE_TIME_FORMATTER = DateTimeFormatter.ofPattern("HH:mm", Locale.CHINA)

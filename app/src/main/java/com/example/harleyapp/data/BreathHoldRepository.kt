@@ -6,6 +6,7 @@ import android.util.Log
 import com.example.harleyapp.model.BREATH_HOLD_HISTORY_LIMIT
 import com.example.harleyapp.model.BREATH_HOLD_MAX_VALID_DURATION_MILLIS
 import com.example.harleyapp.model.BreathHoldRecord
+import com.example.harleyapp.model.removeBreathHoldRecords
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
@@ -14,8 +15,9 @@ import java.util.UUID
  * 使用SharedPreferences在本机保存最近30次憋气计时记录。
  *
  * 使用方法：
- * 页面创建Repository后调用[loadRecords]取得历史；一次计时结束后调用[addRecord]，再使用其返回列表
- * 更新页面。记录只包含随机ID、结束时间和持续毫秒数，不包含账号、健康诊断或云端同步。
+ * 页面创建Repository后调用[loadRecords]取得历史；一次计时结束后调用[addRecord]；用户在历史管理
+ * 界面勾选记录后调用[deleteRecords]。两个写操作都会返回最新完整列表，页面据此重新计算统计。
+ * 记录只包含随机ID、结束时间和持续毫秒数，不包含账号、健康诊断或云端同步。
  *
  * @param context Android上下文，内部统一保存Application Context。
  */
@@ -94,19 +96,22 @@ class BreathHoldRepository(context: Context) {
     }
 
     /**
-     * 清空全部本机憋气记录。
+     * 删除用户明确选中的本机憋气记录。
      *
-     * 页面必须先取得用户确认才可调用；本函数不显示对话框。
+     * 使用方法：
+     * 页面先让用户勾选一项或多项并完成二次确认，再传入这些记录的稳定ID。函数从当前落盘历史
+     * 重新读取和过滤，避免使用过期页面列表覆盖刚保存的计时结果；空选择、空白ID和未知ID均按
+     * 无变化处理。删除后的完整列表可直接替换页面状态，次数、最佳和平均值会据此重新计算。
      *
-     * @return SharedPreferences同步提交成功时返回true，否则返回false并记录英文日志。
+     * @param selectedRecordIds 用户确认删除的记录ID集合。
+     * @return 写入成功后的完整倒序历史；没有有效选择或写入失败时返回删除前历史。
      */
-    @SuppressLint("UseKtx")
-    fun clearRecords(): Boolean {
-        return runCatching {
-            preferences.edit().remove(KEY_RECORDS).commit()
-        }.onFailure { error ->
-            Log.e(TAG, "Failed to clear breath hold history", error)
-        }.getOrDefault(false)
+    fun deleteRecords(selectedRecordIds: Set<String>): List<BreathHoldRecord> {
+        val existing = loadRecords()
+        val updated = removeBreathHoldRecords(existing, selectedRecordIds)
+        if (updated.size == existing.size) return existing
+
+        return if (writeRecords(updated)) updated else existing
     }
 
     /**

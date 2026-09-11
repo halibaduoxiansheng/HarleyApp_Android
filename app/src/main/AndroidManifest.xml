@@ -10,24 +10,14 @@
     <uses-feature
         android:name="android.hardware.camera.any"
         android:required="false" />
+    <!-- 独立手电筒功能会在运行时检测闪光灯；没有闪光灯的设备仍可安装并使用其他功能。 -->
+    <uses-feature
+        android:name="android.hardware.camera.flash"
+        android:required="false" />
     <!-- 用户仍需在系统“使用情况访问”页面主动授权，才能查询其他App的蜂窝流量汇总。 -->
     <uses-permission
         android:name="android.permission.PACKAGE_USAGE_STATS"
         tools:ignore="ProtectedPermissions" />
-    <!--
-        用户主动进入“文件空间”并在系统特殊权限页确认后，才扫描共享存储中的文件名、大小、
-        修改时间和重复内容摘要；删除与移动仍需App内二次确认，不访问其他App私有数据库。
-    -->
-    <uses-permission
-        android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
-        tools:ignore="ScopedStorage" />
-    <!-- Android 10及以下兼容共享存储读取和用户确认后的文件整理。 -->
-    <uses-permission
-        android:name="android.permission.READ_EXTERNAL_STORAGE"
-        android:maxSdkVersion="32" />
-    <uses-permission
-        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
-        android:maxSdkVersion="29" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- 允许高重要性提醒渠道在用户未关闭系统或渠道振动时提供振动反馈。 -->
     <uses-permission android:name="android.permission.VIBRATE" />

@@ -3,6 +3,7 @@ package com.example.harleyapp
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import com.example.harleyapp.system.buildEbookSpeechChunks
+import com.example.harleyapp.system.ebookTtsVoiceQualityLabel
 import com.example.harleyapp.system.mapEbookSpeechChunkRange
 import com.example.harleyapp.system.resolveNextEbookAutomaticPage
 import com.example.harleyapp.system.shouldScheduleEbookTimedPageTurn
@@ -164,6 +165,32 @@ class EbookReaderAutomationTest {
     }
 
     /**
+     * 验证连续省略号、问号和感叹号会保留在同一个自然停顿语音块内。
+     *
+     * 使用方法：
+     * 传入包含“……”“？！”和重复感叹号的中文正文；每组连续句末符号都应跟随前一句，不能额外
+     * 生成只含标点的语音块或重复停顿，同时全部块拼接后仍须与原文一致。
+     *
+     * @return 无返回值；连续标点被拆散、产生标点专用块或原文字符丢失时由JUnit报告失败。
+     */
+    @Test
+    fun naturalSpeechChunksKeepConsecutiveSentencePunctuationTogether() {
+        val source = "怎么会这样……真的？！好吧！！！下一句。"
+        val chunks = buildEbookSpeechChunks(
+            text = source,
+            maxChunkLength = 128,
+            naturalReadingEnabled = true
+        )
+
+        assertEquals(
+            listOf("怎么会这样……", "真的？！", "好吧！！！", "下一句。"),
+            chunks.map { chunk -> chunk.text }
+        )
+        assertEquals(source, chunks.joinToString(separator = "") { chunk -> chunk.text })
+        assertTrue(chunks.all { chunk -> chunk.pauseAfterMillis > 0L })
+    }
+
+    /**
      * 验证超长中英文混合正文会被限制在TTS单块上限内，并且不会丢失UTF-16字符或表情符号。
      *
      * 使用方法：
@@ -279,11 +306,12 @@ class EbookReaderAutomationTest {
     }
 
     /**
-     * 验证自然朗读按语句切块并附加韵律，而普通朗读在长度允许时保持单块和中性参数。
+     * 验证自然停顿按语句切块，而普通朗读在长度允许时保持一个连续块。
      *
      * 使用方法：
-     * 对同一页短正文分别开启和关闭自然朗读；两种模式都必须完整保留原文，但自然模式应按
-     * 句末拆分并产生停顿，普通模式不应额外改变速度、音高或增加停顿。
+     * 对同一页短正文分别开启和关闭自然停顿；两种模式都必须完整保留原文，但自然模式应按
+     * 句末拆分并产生停顿，普通模式不应增加停顿。音高和速度由控制器在整页开始前统一设置，
+     * 不再作为逐句数据保存，从结构上避免部分系统TTS因反复变调而产生金属感。
      *
      * @return 无返回值；两种模式行为混淆或任一模式改变原文时由JUnit报告失败。
      */
@@ -297,10 +325,27 @@ class EbookReaderAutomationTest {
         assertTrue(naturalChunks.all { chunk -> chunk.pauseAfterMillis > 0L })
         assertEquals(1, regularChunks.size)
         assertEquals(0L, regularChunks.single().pauseAfterMillis)
-        assertEquals(1f, regularChunks.single().speechRateMultiplier)
-        assertEquals(1f, regularChunks.single().pitch)
         assertEquals(source, naturalChunks.joinToString(separator = "") { chunk -> chunk.text })
         assertEquals(source, regularChunks.single().text)
+    }
+
+    /**
+     * 验证系统音色质量数值能转换成稳定、易理解的中文标签。
+     *
+     * 使用方法：
+     * 传入Android Voice五个标准质量等级以及一个介于高品质和极高品质之间的扩展值；标准等级应
+     * 显示对应标签，扩展值应按不夸大质量的方式向下归到“高品质”。
+     *
+     * @return 无返回值；系统音色列表的质量标签映射错误时由JUnit报告失败。
+     */
+    @Test
+    fun ttsVoiceQualityLabelsUseStableChineseDescriptions() {
+        assertEquals("极高品质", ebookTtsVoiceQualityLabel(500))
+        assertEquals("高品质", ebookTtsVoiceQualityLabel(450))
+        assertEquals("高品质", ebookTtsVoiceQualityLabel(400))
+        assertEquals("普通品质", ebookTtsVoiceQualityLabel(300))
+        assertEquals("较低品质", ebookTtsVoiceQualityLabel(200))
+        assertEquals("低品质", ebookTtsVoiceQualityLabel(100))
     }
 
     /**

@@ -27,7 +27,7 @@ class HomeFeatureModelsTest {
     }
 
     /**
-     * 验证损坏或未来版本产生的未知名称不会影响当前版本读取有效功能。
+     * 验证已下线的文件空间名称不会影响当前版本读取仍受支持的首页功能。
      *
      * @return 无返回值；断言失败时由JUnit报告测试失败。
      */
@@ -36,7 +36,7 @@ class HomeFeatureModelsTest {
         val decoded = decodeHomeFeatureIds(
             setOf(
                 HomeFeatureId.MOBILE_DATA.name,
-                "FUTURE_FEATURE",
+                "STORAGE_MANAGER",
                 HomeFeatureId.TODAY.name
             )
         )

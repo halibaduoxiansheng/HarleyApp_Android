@@ -1,0 +1,4 @@
+interface:
+  display_name: "HarleyApp 安全覆盖安装"
+  short_description: "构建、覆盖安装并验证 HarleyApp，严格保留应用数据"
+  default_prompt: "使用 $harleyapp-safe-install 构建并安全覆盖安装 HarleyApp，不得删除现有应用数据。"

@@ -70,6 +70,7 @@ import com.example.harleyapp.model.HealthRecommendationPlan
 import com.example.harleyapp.model.UserGender
 import com.example.harleyapp.model.UserProfile
 import com.example.harleyapp.model.buildAdultHealthRecommendation
+import com.example.harleyapp.ui.components.harleyCardBorder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.util.Locale
@@ -201,11 +202,12 @@ fun UserProfileHealthCard() {
         modifier = Modifier
             .fillMaxWidth()
             .animateContentSize(),
-        shape = RoundedCornerShape(26.dp),
+        shape = MaterialTheme.shapes.large,
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.primaryContainer
+            containerColor = MaterialTheme.colorScheme.surfaceContainerLow
         ),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+        border = harleyCardBorder(),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
     ) {
         Column(
             modifier = Modifier.padding(18.dp),
@@ -234,7 +236,7 @@ fun UserProfileHealthCard() {
                                 "${profile?.heightCm}cm · ${formatWeight(profile?.weightKg ?: 0.0)}kg"
                         },
                         style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.78f)
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
                 TextButton(onClick = { showProfileEditor = true }) {
@@ -248,8 +250,8 @@ fun UserProfileHealthCard() {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Surface(
                             modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(16.dp),
-                            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.72f)
+                            shape = MaterialTheme.shapes.medium,
+                            color = MaterialTheme.colorScheme.surfaceContainerHigh
                         ) {
                             Column(
                                 modifier = Modifier.padding(14.dp),

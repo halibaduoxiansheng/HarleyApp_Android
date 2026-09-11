@@ -54,7 +54,7 @@ import com.example.harleyapp.model.CompanionCategory
 import kotlinx.coroutines.delay
 
 /**
- * 显示用户在首页“我的伙伴”中选择的动态伙伴和halibaduo逐字打印启动画面。
+ * 显示用户在首页“我的伙伴”中选择的动态伙伴和励志短句逐字打印启动画面。
  *
  * 使用方法：
  * MainActivity首次组合时显示本页面。文字打印完成并短暂停留后自动调用[onFinished]；外层使用
@@ -74,10 +74,10 @@ fun HalibaduoStartupScreen(
     modifier: Modifier = Modifier
 ) {
     var visibleCharacters by rememberSaveable { mutableStateOf(0) }
-    val typingCompleted = visibleCharacters >= HALIBADUO_WORD.length
+    val typingCompleted = visibleCharacters >= STARTUP_SLOGAN.length
 
     LaunchedEffect(Unit) {
-        HALIBADUO_WORD.indices.forEach { index ->
+        STARTUP_SLOGAN.indices.forEach { index ->
             visibleCharacters = index + 1
             delay(STARTUP_CHARACTER_DELAY_MILLIS)
         }
@@ -132,10 +132,10 @@ fun HalibaduoStartupScreen(
                 modifier = Modifier.size(190.dp)
             )
 
-            // 增大伙伴与文字之间的留白：组合保持居中时伙伴略上移、文字略下移，避免形态动画遮挡字母。
+            // 增大伙伴与文字之间的留白：组合保持居中时伙伴略上移、文字略下移，避免形态动画遮挡短句。
             Spacer(modifier = Modifier.height(44.dp))
 
-            // 每个字母使用固定宽度槽位，未打印字符仅隐藏颜色，完整单词不会重新测量、平移或缩放。
+            // 每个字符使用固定宽度槽位，未打印字符仅隐藏颜色，完整短句不会重新测量、平移或缩放。
             Row(
                 modifier = Modifier
                     .width(279.dp)
@@ -143,7 +143,7 @@ fun HalibaduoStartupScreen(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.Start
             ) {
-                HALIBADUO_WORD.forEachIndexed { index, character ->
+                STARTUP_SLOGAN.forEachIndexed { index, character ->
                     Text(
                         modifier = Modifier.width(31.dp),
                         text = character.toString(),
@@ -152,7 +152,7 @@ fun HalibaduoStartupScreen(
                         } else {
                             Color.Transparent
                         },
-                        fontSize = 35.sp,
+                        fontSize = 29.sp,
                         fontWeight = FontWeight.Bold,
                         fontFamily = FontFamily.Monospace,
                         textAlign = TextAlign.Center
@@ -365,5 +365,5 @@ private fun formatRecoveryDuration(remainingMillis: Long): String {
     return "%02d:%02d:%02d".format(hours, minutes, seconds)
 }
 
-private const val HALIBADUO_WORD = "halibaduo"
+private const val STARTUP_SLOGAN = "学要学好，玩要玩好"
 private const val STARTUP_CHARACTER_DELAY_MILLIS = 135L

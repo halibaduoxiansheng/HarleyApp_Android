@@ -24,8 +24,10 @@ enum class HomeFeatureId {
     CHINESE_GROWTH,
     QR_SCANNER,
     APP_USAGE,
-    STORAGE_MANAGER,
-    BREATH_HOLD
+    BREATH_HOLD,
+    FLASHLIGHT,
+    MAO_QUOTES,
+    DUAL_CAMERA
 }
 
 /** 首次安装或旧版本升级时沿用首页原有的三个功能入口。 */

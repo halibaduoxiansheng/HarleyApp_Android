@@ -20,6 +20,7 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -31,6 +32,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Snackbar
 import androidx.compose.material3.SnackbarDuration
@@ -47,6 +49,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -57,6 +60,7 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -64,6 +68,9 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.harleyapp.backup.AppBackupManager
 import com.example.harleyapp.data.ChineseGrowthRepository
 import com.example.harleyapp.data.BreathHoldRepository
@@ -81,6 +88,7 @@ import com.example.harleyapp.data.NotebookRepository
 import com.example.harleyapp.data.ReminderRepository
 import com.example.harleyapp.data.ShortcutRepository
 import com.example.harleyapp.data.WebsiteRepository
+import com.example.harleyapp.data.WebsiteBrowserSessionRepository
 import com.example.harleyapp.data.WebsiteCardBackgroundStore
 import com.example.harleyapp.data.WebsiteLibraryChangeNotifier
 import com.example.harleyapp.data.WechatBillImporter
@@ -107,8 +115,15 @@ import com.example.harleyapp.model.WechatCapture
 import com.example.harleyapp.model.WechatReminderSettings
 import com.example.harleyapp.model.WechatReminderStatus
 import com.example.harleyapp.model.homeCarouselWebsites
+import com.example.harleyapp.model.closeWebsiteBrowserTab
+import com.example.harleyapp.model.createBlankWebsiteBrowserTab
+import com.example.harleyapp.model.createWebsiteBrowserChildTab
+import com.example.harleyapp.model.createWebsiteBrowserTab
+import com.example.harleyapp.model.fillWebsiteBrowserTab
 import com.example.harleyapp.model.normalizeWebsiteUrl
 import com.example.harleyapp.model.primaryEnglishWordsForSelection
+import com.example.harleyapp.model.selectWebsiteBrowserTab
+import com.example.harleyapp.model.updateWebsiteBrowserTab
 import com.example.harleyapp.notification.NotificationAlertChannels
 import com.example.harleyapp.notification.WechatReminderScheduler
 import com.example.harleyapp.notification.NotificationTestController
@@ -128,7 +143,6 @@ import com.example.harleyapp.system.NotificationSystemSettingsController
 import com.example.harleyapp.system.OfflineEnglishTts
 import com.example.harleyapp.system.OfflineEnglishTtsState
 import com.example.harleyapp.system.SystemStorageController
-import com.example.harleyapp.system.StorageManagementController
 import com.example.harleyapp.ui.screens.AppUsageScreen
 import com.example.harleyapp.ui.screens.BreathHoldGameScreen
 import com.example.harleyapp.ui.screens.FitnessScreen
@@ -141,12 +155,12 @@ import com.example.harleyapp.ui.screens.GlobalSearchScreen
 import com.example.harleyapp.ui.screens.HotTopicsScreen
 import com.example.harleyapp.ui.screens.LedgerScreen
 import com.example.harleyapp.ui.screens.MobileDataUsageScreen
-import com.example.harleyapp.ui.screens.StorageManagerScreen
 import com.example.harleyapp.ui.screens.ProfileScreen
 import com.example.harleyapp.ui.screens.ReminderSoundPickerDialog
 import com.example.harleyapp.ui.screens.TodayOverviewScreen
 import com.example.harleyapp.ui.screens.WebsiteBookmarkManagerScreen
 import com.example.harleyapp.ui.screens.WebsiteScreen
+import com.example.harleyapp.ui.components.harleyCardBorder
 import com.example.harleyapp.weather.DeviceLocationProvider
 import com.example.harleyapp.weather.WeatherRepository
 import com.example.harleyapp.widget.TodayWeatherWidgetProvider
@@ -157,6 +171,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.first
 import java.time.LocalDate
+import java.util.UUID
 
 /**
  * 应用一级页面和卡片详情页的统一导航目标。
@@ -174,12 +189,11 @@ private enum class AppSection(
     val symbol: String,
     val showInBottomNavigation: Boolean = true
 ) {
-    HOME("首页", "⌂"),
+    HOME("首页", "首"),
     TODAY("今日总览", "今", showInBottomNavigation = false),
     HOT_TOPICS("每日热点", "热", showInBottomNavigation = false),
     MOBILE_DATA("手机流量", "流", showInBottomNavigation = false),
     APP_USAGE("应用使用", "用", showInBottomNavigation = false),
-    STORAGE_MANAGER("文件空间", "盘", showInBottomNavigation = false),
     BREATH_HOLD("深海憋气", "息", showInBottomNavigation = false),
     FEATURES("功能", "功"),
     SEARCH("全局搜索", "搜", showInBottomNavigation = false),
@@ -187,7 +201,7 @@ private enum class AppSection(
     LEDGER("记账", "¥", showInBottomNavigation = false),
     FITNESS("运动", "动", showInBottomNavigation = false),
     BOOKMARKS("网站收藏", "夹", showInBottomNavigation = false),
-    WEBSITE("网站", "◎"),
+    WEBSITE("网站", "网"),
     PROFILE("我的", "我")
 }
 
@@ -293,8 +307,8 @@ private fun SwipeDismissibleSnackbarHost(hostState: SnackbarHostState) {
  * 显示会随角色主题变化的底部导航图标。
  *
  * 使用方法：
- * 底部四个一级页面统一调用本组件。纯色主题继续显示简洁字符；人物主题会把同一张角色图按页面
- * 使用不同偏移和放大比例裁成头像、发饰或服装局部，并叠加小型页面符号，避免四个按钮简单重复整张人物。
+ * 底部四个一级页面统一调用本组件。所有状态都保留各自的单字徽记；人物主题只在当前选中页
+ * 作为低透明背景出现，让用户仍能感知主题，也不会因切换成一张脸而失去页面辨识度。
  *
  * @param section 当前底部导航页面。
  * @param selected 是否为当前选中页面。
@@ -321,85 +335,47 @@ private fun ThemedNavigationIcon(
             )
         }
     }
-    if (artResourceId == 0) {
-        Text(
-            text = section.symbol,
-            style = MaterialTheme.typography.titleLarge,
-            modifier = Modifier.graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-            }
-        )
-        return
-    }
-
-    val horizontalShift = when (section) {
-        AppSection.HOME -> -7.dp
-        AppSection.FEATURES -> 5.dp
-        AppSection.WEBSITE -> -2.dp
-        AppSection.PROFILE -> 8.dp
-        else -> 0.dp
-    }
-    val verticalShift = when (section) {
-        AppSection.HOME -> 7.dp
-        AppSection.FEATURES -> -5.dp
-        AppSection.WEBSITE -> 0.dp
-        AppSection.PROFILE -> -9.dp
-        else -> 0.dp
-    }
-    Box(
+    Surface(
         modifier = Modifier
-            .size(width = 48.dp, height = 38.dp)
+            .size(width = 44.dp, height = 34.dp)
             .graphicsLayer {
                 scaleX = scale
                 scaleY = scale
             },
-        contentAlignment = Alignment.Center
-    ) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .clip(RoundedCornerShape(15.dp))
-                .background(MaterialTheme.colorScheme.primaryContainer)
-        ) {
-            Image(
-                painter = painterResource(artResourceId),
-                contentDescription = "${visualTheme.displayName}主题·${section.title}局部插画",
-                contentScale = ContentScale.Crop,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .graphicsLayer {
-                        scaleX = if (selected) 1.72f else 1.58f
-                        scaleY = if (selected) 1.72f else 1.58f
-                        translationX = horizontalShift.toPx()
-                        translationY = verticalShift.toPx()
-                        alpha = if (selected) 1f else 0.72f
-                    }
-            )
+        shape = RoundedCornerShape(13.dp),
+        color = if (selected) {
+            MaterialTheme.colorScheme.primaryContainer
+        } else {
+            Color.Transparent
+        },
+        border = if (selected) {
+            harleyCardBorder(alpha = 0.86f)
+        } else {
+            null
         }
-        Surface(
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .size(19.dp),
-            shape = CircleShape,
-            color = if (selected) {
-                MaterialTheme.colorScheme.primary
-            } else {
-                MaterialTheme.colorScheme.surfaceContainerHighest
-            }
-        ) {
-            Box(contentAlignment = Alignment.Center) {
-                Text(
-                    text = section.symbol,
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = if (selected) {
-                        MaterialTheme.colorScheme.onPrimary
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    }
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            if (selected && artResourceId != 0) {
+                Image(
+                    painter = painterResource(artResourceId),
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clip(RoundedCornerShape(13.dp))
+                        .graphicsLayer { alpha = 0.36f }
                 )
             }
+            Text(
+                text = section.symbol,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                color = if (selected) {
+                    MaterialTheme.colorScheme.onPrimaryContainer
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                }
+            )
         }
     }
 }
@@ -440,6 +416,7 @@ fun HarleyApp(
     onExitApp: () -> Unit
 ) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val applicationContext = context.applicationContext
     val ledgerRepository = remember {
         LedgerRepository(applicationContext)
@@ -458,6 +435,9 @@ fun HarleyApp(
     }
     val websiteRepository = remember {
         WebsiteRepository(applicationContext)
+    }
+    val websiteBrowserSessionRepository = remember {
+        WebsiteBrowserSessionRepository(applicationContext)
     }
     val websiteBackgroundStore = remember {
         WebsiteCardBackgroundStore(applicationContext)
@@ -531,9 +511,6 @@ fun HarleyApp(
     }
     val appUsageController = remember {
         AppUsageController(applicationContext)
-    }
-    val storageManagementController = remember {
-        StorageManagementController(applicationContext)
     }
     val notificationAccessController = remember {
         NotificationAccessController(applicationContext)
@@ -620,6 +597,13 @@ fun HarleyApp(
     var featureCenterOrder by remember {
         mutableStateOf(featureCenterOrderRepository.getOrder())
     }
+    // 功能中心的网格状态由App根层长期持有。进入任意内部或全屏功能时即使概览离开组合，返回后仍能
+    // 恢复离开前的卡片位置；rememberLazyGridState自身支持Activity重建时保存首项与像素偏移。
+    val featureCenterGridState = rememberLazyGridState()
+    // 独立全屏功能会暂时移除底部导航，返回时网格可能先按更高视口夹紧滚动值；额外保存离开前的
+    // 精确锚点，在底栏恢复布局后用于无动画复位，避免出现整整一个底栏高度的偏移。
+    var featureCenterRestoreIndex by rememberSaveable { mutableIntStateOf(0) }
+    var featureCenterRestoreOffset by rememberSaveable { mutableIntStateOf(0) }
     val initialEnglishWords = remember {
         englishWordRepository.getWords()
     }
@@ -648,9 +632,15 @@ fun HarleyApp(
     var defaultWebsiteId by remember {
         mutableStateOf(websiteRepository.getDefaultWebsiteId(websites))
     }
-    var activeWebsiteId by rememberSaveable {
-        mutableStateOf(defaultWebsiteId ?: websites.firstOrNull()?.id)
+    val websiteBrowserSessionState = remember {
+        val fallbackWebsite = websites.firstOrNull { website ->
+            website.id == defaultWebsiteId
+        } ?: websites.firstOrNull()
+        mutableStateOf(
+            websiteBrowserSessionRepository.getSession(fallbackWebsite)
+        )
     }
+    var websiteBrowserSession by websiteBrowserSessionState
 
     // 浏览器悬浮球可能在Activity仍留在后台时写入收藏；收到事件后立即刷新内存状态，返回App无需重启。
     LaunchedEffect(websiteRepository) {
@@ -660,10 +650,74 @@ fun HarleyApp(
             defaultWebsiteId = websiteRepository.getDefaultWebsiteId(
                 refreshedLibrary.websites
             )
-            if (activeWebsiteId == null) {
-                activeWebsiteId = defaultWebsiteId ?: refreshedLibrary.websites.firstOrNull()?.id
+        }
+    }
+
+    // 标签元数据采用短延迟合并写入，避免页面加载开始/结束连续回调时在主线程同步写磁盘。
+    // WebView本身仍只存在于当前进程；冷启动恢复的是标签顺序、标题和最后一个有效网址。
+    LaunchedEffect(websiteBrowserSession, websiteBrowserSessionRepository) {
+        delay(WEBSITE_BROWSER_SESSION_SAVE_DELAY_MILLIS)
+        websiteBrowserSessionRepository.enqueueSessionSave(websiteBrowserSession)
+    }
+
+    // 快速切换标签后立刻按Home键、旋转Activity或退出时，短延迟自动保存可能尚未触发。生命周期
+    // 进入后台及组合最终释放前再提交最新快照；apply只排队写盘，不在主线程执行同步磁盘commit。
+    DisposableEffect(lifecycleOwner, websiteBrowserSessionRepository) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) {
+                websiteBrowserSessionRepository.enqueueSessionSave(
+                    websiteBrowserSessionState.value
+                )
             }
         }
+        lifecycleOwner.lifecycle.addObserver(observer)
+
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            websiteBrowserSessionRepository.enqueueSessionSave(
+                websiteBrowserSessionState.value
+            )
+        }
+    }
+
+    // 所有应用内网站入口统一通过这里追加标签。同一收藏重复点击也会得到独立标签；达到上限时
+    // 保留当前会话并提示用户手动关闭，不会静默回收任何仍在使用的网页。
+    val openWebsiteInNewTab: (WebsiteShortcut) -> Boolean = { website ->
+        val updatedSession = createWebsiteBrowserTab(
+            session = websiteBrowserSession,
+            tabId = UUID.randomUUID().toString(),
+            website = website
+        )
+        val opened = updatedSession != websiteBrowserSession
+        if (opened) {
+            websiteBrowserSession = updatedSession
+        } else {
+            coroutineScope.launch {
+                snackbarHostState.showSnackbar(WEBSITE_BROWSER_TAB_LIMIT_MESSAGE)
+            }
+        }
+        opened
+    }
+
+    // 网页明确请求target=_blank或window.open时继承来源收藏归属，让不同标签继续共用该网站的
+    // 脚本工具设置，同时仍以独立tabId隔离WebView、标题、历史和关闭行为。
+    val openWebsiteChildTab: (String, String) -> Boolean = { sourceTabId, url ->
+        val updatedSession = createWebsiteBrowserChildTab(
+            session = websiteBrowserSession,
+            sourceTabId = sourceTabId,
+            tabId = UUID.randomUUID().toString(),
+            title = "正在加载…",
+            url = url
+        )
+        val opened = updatedSession != websiteBrowserSession
+        if (opened) {
+            websiteBrowserSession = updatedSession
+        } else {
+            coroutineScope.launch {
+                snackbarHostState.showSnackbar(WEBSITE_BROWSER_TAB_LIMIT_MESSAGE)
+            }
+        }
+        opened
     }
     var companionProgress by remember {
         mutableStateOf(
@@ -721,17 +775,6 @@ fun HarleyApp(
     val featureCenterPage = FeatureCenterPage.entries.firstOrNull { page ->
         page.name == featureCenterPageName
     } ?: FeatureCenterPage.OVERVIEW
-    val activeWebsite = if (activeWebsiteId == PROJECT_SOURCE_WEBSITE.id) {
-        PROJECT_SOURCE_WEBSITE
-    } else {
-        websites.firstOrNull { website ->
-            website.id == activeWebsiteId
-        } ?: websites.firstOrNull()
-    }
-    val defaultWebsite = websites.firstOrNull { website ->
-        website.id == defaultWebsiteId
-    } ?: websites.firstOrNull()
-
     // 离开电子书详情时强制恢复外层导航，防止异常返回路径把沉浸状态遗留到其他页面。
     LaunchedEffect(currentSection, featureCenterPage) {
         if (
@@ -1044,49 +1087,69 @@ fun HarleyApp(
                 !isWebsiteFullscreen &&
                 !isEbookImmersive
             ) {
-                NavigationBar {
-                    AppSection.entries
-                        .filter { section -> section.showInBottomNavigation }
-                        .forEach { section ->
-                            val selected = currentSection == section
-                            val iconScale by animateFloatAsState(
-                                targetValue = if (selected) 1.06f else 1f,
-                                animationSpec = spring(
-                                    dampingRatio = 0.72f,
-                                    stiffness = 500f
-                                ),
-                                label = "nav_scale_${section.name}"
-                            )
-                            NavigationBarItem(
-                                selected = selected,
-                                onClick = {
-                                    // 底部“网站”始终从用户设置的默认网站进入，不沿用上一次临时浏览项。
-                                    if (section == AppSection.WEBSITE) {
-                                        activeWebsiteId = defaultWebsite?.id
-                                    }
-                                    if (section == AppSection.FEATURES) {
-                                        featureCenterPageName = FeatureCenterPage.OVERVIEW.name
-                                    }
-                                    currentSectionName = section.name
-                                },
-                                icon = {
-                                    ThemedNavigationIcon(
-                                        section = section,
-                                        selected = selected,
-                                        visualTheme = visualTheme,
-                                        scale = iconScale
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceContainerLow,
+                    shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+                    tonalElevation = 3.dp,
+                    shadowElevation = 8.dp
+                ) {
+                    NavigationBar(
+                        containerColor = Color.Transparent,
+                        tonalElevation = 0.dp
+                    ) {
+                        AppSection.entries
+                            .filter { section -> section.showInBottomNavigation }
+                            .forEach { section ->
+                                val selected = currentSection == section
+                                val iconScale by animateFloatAsState(
+                                    targetValue = if (selected) 1.03f else 1f,
+                                    animationSpec = spring(
+                                        dampingRatio = 0.8f,
+                                        stiffness = 560f
+                                    ),
+                                    label = "nav_scale_${section.name}"
+                                )
+                                NavigationBarItem(
+                                    selected = selected,
+                                    onClick = {
+                                        if (section == AppSection.FEATURES) {
+                                            featureCenterPageName = FeatureCenterPage.OVERVIEW.name
+                                        }
+                                        currentSectionName = section.name
+                                    },
+                                    icon = {
+                                        ThemedNavigationIcon(
+                                            section = section,
+                                            selected = selected,
+                                            visualTheme = visualTheme,
+                                            scale = iconScale
+                                        )
+                                    },
+                                    label = {
+                                        Text(
+                                            text = section.title,
+                                            style = MaterialTheme.typography.labelMedium
+                                        )
+                                    },
+                                    colors = NavigationBarItemDefaults.colors(
+                                        selectedIconColor =
+                                            MaterialTheme.colorScheme.onPrimaryContainer,
+                                        selectedTextColor = MaterialTheme.colorScheme.primary,
+                                        indicatorColor = MaterialTheme.colorScheme.primaryContainer,
+                                        unselectedIconColor =
+                                            MaterialTheme.colorScheme.onSurfaceVariant,
+                                        unselectedTextColor =
+                                            MaterialTheme.colorScheme.onSurfaceVariant
                                     )
-                                },
-                                label = {
-                                    Text(text = section.title)
-                                }
-                            )
-                        }
+                                )
+                            }
+                    }
                 }
             }
         }
     ) { innerPadding ->
-        AnimatedContent(
+        Box(modifier = Modifier.fillMaxSize()) {
+            AnimatedContent(
             targetState = currentSection,
             transitionSpec = {
                 (
@@ -1138,11 +1201,12 @@ fun HarleyApp(
                 defaultWebsiteId = defaultWebsiteId,
                 companionProgress = companionProgress,
                 onOpenWebsite = { website ->
-                    activeWebsiteId = website.id
-                    companionProgress = companionRepository.claimTask(
-                        task = CompanionTask.WEBSITE_VISIT,
-                        currentEpochDay = LocalDate.now().toEpochDay()
-                    )
+                    if (openWebsiteInNewTab(website)) {
+                        companionProgress = companionRepository.claimTask(
+                            task = CompanionTask.WEBSITE_VISIT,
+                            currentEpochDay = LocalDate.now().toEpochDay()
+                        )
+                    }
                     currentSectionName = AppSection.WEBSITE.name
                 },
                 onOpenWebsiteDetails = {
@@ -1204,11 +1268,6 @@ fun HarleyApp(
                             currentSectionName = AppSection.APP_USAGE.name
                         }
 
-                        HomeFeatureId.STORAGE_MANAGER -> {
-                            detailReturnSectionName = AppSection.HOME.name
-                            currentSectionName = AppSection.STORAGE_MANAGER.name
-                        }
-
                         HomeFeatureId.BREATH_HOLD -> {
                             detailReturnSectionName = AppSection.HOME.name
                             currentSectionName = AppSection.BREATH_HOLD.name
@@ -1256,6 +1315,21 @@ fun HarleyApp(
 
                         HomeFeatureId.QR_SCANNER -> {
                             featureCenterPageName = FeatureCenterPage.QR_SCANNER.name
+                            currentSectionName = AppSection.FEATURES.name
+                        }
+
+                        HomeFeatureId.FLASHLIGHT -> {
+                            featureCenterPageName = FeatureCenterPage.FLASHLIGHT.name
+                            currentSectionName = AppSection.FEATURES.name
+                        }
+
+                        HomeFeatureId.MAO_QUOTES -> {
+                            featureCenterPageName = FeatureCenterPage.MAO_QUOTES.name
+                            currentSectionName = AppSection.FEATURES.name
+                        }
+
+                        HomeFeatureId.DUAL_CAMERA -> {
+                            featureCenterPageName = FeatureCenterPage.DUAL_CAMERA.name
                             currentSectionName = AppSection.FEATURES.name
                         }
                     }
@@ -1313,9 +1387,6 @@ fun HarleyApp(
                                     currentWebsite.backgroundImageFileName
                                 }.toSet()
                             )
-                            if (activeWebsiteId == null) {
-                                activeWebsiteId = websiteToPersist.id
-                            }
                             if (defaultWebsiteId == null) {
                                 val firstWebsiteId = updatedWebsites.firstOrNull()?.id
                                 websiteRepository.setDefaultWebsiteId(
@@ -1349,9 +1420,6 @@ fun HarleyApp(
                                 websites = updatedWebsites
                             )
                             defaultWebsiteId = fallbackWebsiteId
-                        }
-                        if (activeWebsiteId == websiteId) {
-                            activeWebsiteId = updatedWebsites.firstOrNull()?.id
                         }
                     }
                     deleted
@@ -1449,8 +1517,12 @@ fun HarleyApp(
                         }
 
                         LocalSearchType.WEBSITE -> {
-                            activeWebsiteId = result.targetValue
-                            currentSectionName = AppSection.WEBSITE.name
+                            websites.firstOrNull { website ->
+                                website.id == result.targetValue
+                            }?.let { website ->
+                                openWebsiteInNewTab(website)
+                                currentSectionName = AppSection.WEBSITE.name
+                            }
                         }
 
                         LocalSearchType.ENGLISH_WORD -> {
@@ -1549,7 +1621,6 @@ fun HarleyApp(
                         }.toSet()
                     )
                     defaultWebsiteId = restoredDefaultWebsiteId
-                    activeWebsiteId = restoredDefaultWebsiteId ?: restoredWebsites.firstOrNull()?.id
 
                     companionProgress = companionRepository.getProgress(
                         LocalDate.now().toEpochDay()
@@ -1614,14 +1685,6 @@ fun HarleyApp(
                 }
             )
 
-            AppSection.STORAGE_MANAGER -> StorageManagerScreen(
-                modifier = Modifier.padding(innerPadding),
-                controller = storageManagementController,
-                onBack = {
-                    currentSectionName = detailReturnSectionName
-                }
-            )
-
             AppSection.BREATH_HOLD -> BreathHoldGameScreen(
                 modifier = Modifier.padding(innerPadding),
                 repository = breathHoldRepository,
@@ -1633,6 +1696,13 @@ fun HarleyApp(
             AppSection.FEATURES -> FeatureCenterScreen(
                 modifier = Modifier.padding(innerPadding),
                 page = featureCenterPage,
+                overviewGridState = featureCenterGridState,
+                overviewRestoreIndex = featureCenterRestoreIndex,
+                overviewRestoreOffset = featureCenterRestoreOffset,
+                onOverviewPositionCaptured = { index, offset ->
+                    featureCenterRestoreIndex = index
+                    featureCenterRestoreOffset = offset
+                },
                 featureOrder = featureCenterOrder,
                 onFeatureOrderChanged = { newOrder ->
                     val success = featureCenterOrderRepository.saveOrder(newOrder)
@@ -1667,10 +1737,6 @@ fun HarleyApp(
                 onOpenAppUsage = {
                     detailReturnSectionName = AppSection.FEATURES.name
                     currentSectionName = AppSection.APP_USAGE.name
-                },
-                onOpenStorageManager = {
-                    detailReturnSectionName = AppSection.FEATURES.name
-                    currentSectionName = AppSection.STORAGE_MANAGER.name
                 },
                 onOpenBreathHold = {
                     detailReturnSectionName = AppSection.FEATURES.name
@@ -1936,11 +2002,12 @@ fun HarleyApp(
                     currentSectionName = detailReturnSectionName
                 },
                 onOpenWebsite = { website ->
-                    activeWebsiteId = website.id
-                    companionProgress = companionRepository.claimTask(
-                        task = CompanionTask.WEBSITE_VISIT,
-                        currentEpochDay = LocalDate.now().toEpochDay()
-                    )
+                    if (openWebsiteInNewTab(website)) {
+                        companionProgress = companionRepository.claimTask(
+                            task = CompanionTask.WEBSITE_VISIT,
+                            currentEpochDay = LocalDate.now().toEpochDay()
+                        )
+                    }
                     currentSectionName = AppSection.WEBSITE.name
                 },
                 onSetDefaultWebsite = { websiteId ->
@@ -1974,57 +2041,13 @@ fun HarleyApp(
                             )
                             defaultWebsiteId = resolvedDefaultWebsiteId
                         }
-                        if (updatedLibrary.websites.none { website -> website.id == activeWebsiteId }) {
-                            activeWebsiteId = resolvedDefaultWebsiteId
-                                ?: updatedLibrary.websites.firstOrNull()?.id
-                        }
                     }
                     saved
                 }
             )
 
-            AppSection.WEBSITE -> WebsiteScreen(
-                modifier = if (isWebsiteFullscreen) {
-                    Modifier
-                } else {
-                    Modifier.padding(innerPadding)
-                },
-                website = activeWebsite,
-                onFullscreenChanged = { isFullscreen ->
-                    isWebsiteFullscreen = isFullscreen
-                },
-                onEbookDownloadRequested = { request ->
-                    coroutineScope.launch {
-                        val progressMessage = launch {
-                            snackbarHostState.showSnackbar("正在下载并导入电子书…")
-                        }
-                        val result = ebookRepository.importFromWebDownload(request)
-                        progressMessage.cancel()
-                        snackbarHostState.currentSnackbarData?.dismiss()
-                        websiteEbookImportResult = result
-                    }
-                },
-                onBookmarkCurrentPage = bookmarkCurrentPage@ { pageTitle, pageUrl ->
-                    val result = websiteRepository.saveBookmarkedPage(pageTitle, pageUrl)
-                    if (result == WebsiteBookmarkSaveResult.SAVED) {
-                        val refreshedLibrary = websiteRepository.getLibrary()
-                        websiteLibrary = refreshedLibrary
-                        defaultWebsiteId = websiteRepository.getDefaultWebsiteId(
-                            refreshedLibrary.websites
-                        )
-                        if (activeWebsiteId == null) {
-                            activeWebsiteId = defaultWebsiteId ?: refreshedLibrary.websites
-                                .firstOrNull()
-                                ?.id
-                        }
-                    }
-                    result
-                },
-                onManageWebsites = {
-                    detailReturnSectionName = AppSection.WEBSITE.name
-                    currentSectionName = AppSection.BOOKMARKS.name
-                }
-            )
+            // 真正的网站浏览器在AnimatedContent外常驻；这里仅保留一级页面的动画占位。
+            AppSection.WEBSITE -> Box(modifier = Modifier.fillMaxSize())
 
             AppSection.PROFILE -> ProfileScreen(
                 modifier = Modifier.padding(innerPadding),
@@ -2048,7 +2071,7 @@ fun HarleyApp(
                     }
                 },
                 onOpenProjectSource = {
-                    activeWebsiteId = PROJECT_SOURCE_WEBSITE.id
+                    openWebsiteInNewTab(PROJECT_SOURCE_WEBSITE)
                     currentSectionName = AppSection.WEBSITE.name
                 },
                 developerModeConfigured = developerModeRepository.isConfigured(),
@@ -2092,6 +2115,117 @@ fun HarleyApp(
                 }
             )
             }
+        }
+
+            // 浏览器必须长期留在Scaffold内容树中，才能在切换“首页/我的”后继续复用同一批WebView。
+            // 不可见时WebsiteScreen只保留已经访问过的标签对象，不绘制AndroidView或拦截返回事件。
+            WebsiteScreen(
+                modifier = when {
+                    currentSection != AppSection.WEBSITE -> Modifier.size(0.dp)
+                    isWebsiteFullscreen -> Modifier.fillMaxSize()
+                    else -> Modifier
+                        .fillMaxSize()
+                        .padding(innerPadding)
+                },
+                session = websiteBrowserSession,
+                websites = websites,
+                isVisible = currentSection == AppSection.WEBSITE,
+                isFullscreen = isWebsiteFullscreen,
+                onSelectTab = { tabId ->
+                    val updatedSession = selectWebsiteBrowserTab(
+                        session = websiteBrowserSession,
+                        tabId = tabId
+                    )
+                    if (updatedSession != websiteBrowserSession) {
+                        websiteBrowserSession = updatedSession
+                    }
+                },
+                onCloseTab = { tabId ->
+                    val updatedSession = closeWebsiteBrowserTab(
+                        session = websiteBrowserSession,
+                        tabId = tabId,
+                        replacementBlankTabId = UUID.randomUUID().toString()
+                    )
+                    if (updatedSession != websiteBrowserSession) {
+                        websiteBrowserSession = updatedSession
+                    }
+                },
+                onCreateBlankTab = {
+                    val updatedSession = createBlankWebsiteBrowserTab(
+                        session = websiteBrowserSession,
+                        tabId = UUID.randomUUID().toString()
+                    )
+                    if (updatedSession != websiteBrowserSession) {
+                        websiteBrowserSession = updatedSession
+                    } else {
+                        coroutineScope.launch {
+                            snackbarHostState.showSnackbar(WEBSITE_BROWSER_TAB_LIMIT_MESSAGE)
+                        }
+                    }
+                },
+                onOpenWebsiteInTab = { tabId, website ->
+                    val updatedSession = fillWebsiteBrowserTab(
+                        session = websiteBrowserSession,
+                        tabId = tabId,
+                        website = website
+                    )
+                    if (updatedSession != websiteBrowserSession) {
+                        websiteBrowserSession = updatedSession
+                        companionProgress = companionRepository.claimTask(
+                            task = CompanionTask.WEBSITE_VISIT,
+                            currentEpochDay = LocalDate.now().toEpochDay()
+                        )
+                    }
+                },
+                onOpenChildTab = { sourceTab, url ->
+                    openWebsiteChildTab(sourceTab.id, url)
+                },
+                onTabPageChanged = { tabId, title, url ->
+                    val updatedSession = updateWebsiteBrowserTab(
+                        session = websiteBrowserSession,
+                        tabId = tabId,
+                        title = title,
+                        url = url
+                    )
+                    if (updatedSession != websiteBrowserSession) {
+                        websiteBrowserSession = updatedSession
+                    }
+                },
+                onExitWebsite = {
+                    currentSectionName = AppSection.HOME.name
+                },
+                onFullscreenChanged = { isFullscreen ->
+                    if (isWebsiteFullscreen != isFullscreen) {
+                        isWebsiteFullscreen = isFullscreen
+                    }
+                },
+                onEbookDownloadRequested = { request ->
+                    coroutineScope.launch {
+                        val progressMessage = launch {
+                            snackbarHostState.showSnackbar("正在下载并导入电子书…")
+                        }
+                        val result = ebookRepository.importFromWebDownload(request)
+                        progressMessage.cancel()
+                        snackbarHostState.currentSnackbarData?.dismiss()
+                        websiteEbookImportResult = result
+                    }
+                },
+                onBookmarkCurrentPage = bookmarkCurrentPage@ { pageTitle, pageUrl ->
+                    val result = websiteRepository.saveBookmarkedPage(pageTitle, pageUrl)
+                    if (result == WebsiteBookmarkSaveResult.SAVED) {
+                        val refreshedLibrary = websiteRepository.getLibrary()
+                        websiteLibrary = refreshedLibrary
+                        defaultWebsiteId = websiteRepository.getDefaultWebsiteId(
+                            refreshedLibrary.websites
+                        )
+                    }
+                    result
+                },
+                onManageWebsites = {
+                    detailReturnSectionName = AppSection.WEBSITE.name
+                    currentSectionName = AppSection.BOOKMARKS.name
+                }
+            )
         }
     }
 
@@ -2195,6 +2329,12 @@ internal fun notificationTestResultMessage(
 
 /** App保持前台时检查本地日期的间隔，兼顾跨天刷新及时性与低功耗。 */
 private const val COMPANION_DATE_REFRESH_INTERVAL_MILLIS = 60_000L
+
+/** 标签标题或地址连续变化后合并保存的等待时间，减少主线程附近的小型磁盘写入。 */
+private const val WEBSITE_BROWSER_SESSION_SAVE_DELAY_MILLIS = 250L
+
+/** 达到WebView内存保护上限时显示的统一提示，不会自动关闭或替换现有标签。 */
+private const val WEBSITE_BROWSER_TAB_LIMIT_MESSAGE = "最多保留8个标签页，请先手动关闭一个"
 
 /** 覆盖安装后通知监听服务自动重绑的最大尝试次数。 */
 private const val NOTIFICATION_REBIND_RETRY_COUNT = 3

@@ -1,33 +1,25 @@
 package com.example.harleyapp.ui.screens
 
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.harleyapp.ui.components.HarleyStatusPill
+import com.example.harleyapp.ui.components.HarleySymbolBadge
 import com.example.harleyapp.ui.components.bouncyClickable
-import com.example.harleyapp.ui.theme.LocalAppVisualTheme
-import androidx.compose.runtime.remember
+import com.example.harleyapp.ui.components.harleyCardBorder
 
 /**
  * 显示一个只负责进入独立功能页的通用首页卡片。
@@ -55,15 +47,6 @@ fun FeatureEntryCard(
     modifier: Modifier = Modifier,
     statusLabel: String? = null
 ) {
-    val context = LocalContext.current
-    val visualTheme = LocalAppVisualTheme.current
-    val themeArtResourceId = remember(visualTheme.artResourceName) {
-        context.resources.getIdentifier(
-            visualTheme.artResourceName,
-            "drawable",
-            context.packageName
-        )
-    }
     Card(
         modifier = modifier
             .fillMaxWidth()
@@ -71,11 +54,12 @@ fun FeatureEntryCard(
                 role = Role.Button,
                 onClick = onClick
             ),
-        shape = RoundedCornerShape(22.dp),
+        shape = MaterialTheme.shapes.large,
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surface
+            containerColor = MaterialTheme.colorScheme.surfaceContainerLow
         ),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+        border = harleyCardBorder(),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
     ) {
         Row(
             modifier = Modifier
@@ -84,30 +68,7 @@ fun FeatureEntryCard(
             horizontalArrangement = Arrangement.spacedBy(14.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Surface(
-                modifier = Modifier.size(52.dp),
-                shape = CircleShape,
-                color = MaterialTheme.colorScheme.primaryContainer
-            ) {
-                if (themeArtResourceId != 0) {
-                    Image(
-                        painter = painterResource(themeArtResourceId),
-                        contentDescription = "${visualTheme.displayName}人物",
-                        modifier = Modifier
-                            .size(52.dp)
-                            .clip(CircleShape),
-                        contentScale = ContentScale.Crop
-                    )
-                } else {
-                    Text(
-                        modifier = Modifier.padding(12.dp),
-                        text = symbol,
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer
-                    )
-                }
-            }
+            HarleySymbolBadge(symbol = symbol)
 
             Column(
                 modifier = Modifier.weight(1f),
@@ -128,11 +89,7 @@ fun FeatureEntryCard(
                     )
 
                     statusLabel?.let { label ->
-                        Text(
-                            text = label,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.primary
-                        )
+                        HarleyStatusPill(label = label)
                     }
                 }
 

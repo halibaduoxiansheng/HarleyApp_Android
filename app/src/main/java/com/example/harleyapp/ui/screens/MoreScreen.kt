@@ -66,7 +66,12 @@ import com.example.harleyapp.model.DeviceSnapshot
 import com.example.harleyapp.model.LaunchableApp
 import com.example.harleyapp.system.DeviceMonitor
 import com.example.harleyapp.system.NetworkSample
+import com.example.harleyapp.ui.components.HarleyPageBackground
+import com.example.harleyapp.ui.components.HarleyPageHeader
+import com.example.harleyapp.ui.components.HarleySectionHeader
+import com.example.harleyapp.ui.components.HarleyStatusPill
 import com.example.harleyapp.ui.components.bouncyClickable
+import com.example.harleyapp.ui.components.harleyCardBorder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -171,82 +176,102 @@ fun ProfileScreen(
         )
     }
 
-    LazyColumn(
-        modifier = modifier.fillMaxSize(),
-        contentPadding = PaddingValues(
-            start = 20.dp,
-            top = 20.dp,
-            end = 20.dp,
-            bottom = 28.dp
-        ),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        item {
-            Text(
-                text = "我的",
-                style = MaterialTheme.typography.headlineMedium,
-                fontWeight = FontWeight.Bold
-            )
-            Text(
-                text = "个人资料、健康建议、外观与快捷方式",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
+    HarleyPageBackground(modifier = modifier) {
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(
+                start = 20.dp,
+                top = 20.dp,
+                end = 20.dp,
+                bottom = 28.dp
+            ),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            item {
+                HarleyPageHeader(
+                    title = "我的",
+                    subtitle = "个人资料、健康建议与应用偏好",
+                    eyebrow = "PROFILE",
+                    trailing = {
+                        HarleyStatusPill(label = visualTheme.displayName)
+                    }
+                )
+            }
 
-        item {
-            UserProfileHealthCard()
-        }
+            item {
+                UserProfileHealthCard()
+            }
 
-        item {
-            AppearanceCard(
-                isDarkTheme = isDarkTheme,
-                visualTheme = visualTheme,
-                onSetDarkTheme = onSetDarkTheme,
-                onSetVisualTheme = onSetVisualTheme
-            )
-        }
+            item {
+                HarleySectionHeader(
+                    title = "外观与体验",
+                    subtitle = "主题、启动动画与充电效果"
+                )
+            }
 
-        item {
-            StartupAnimationSettingsCard(
-                enabled = startupAnimationEnabled,
-                onEnabledChanged = onSetStartupAnimationEnabled
-            )
-        }
+            item {
+                AppearanceCard(
+                    isDarkTheme = isDarkTheme,
+                    visualTheme = visualTheme,
+                    onSetDarkTheme = onSetDarkTheme,
+                    onSetVisualTheme = onSetVisualTheme
+                )
+            }
 
-        item {
-            ChargingEffectSettingsCard()
-        }
+            item {
+                StartupAnimationSettingsCard(
+                    enabled = startupAnimationEnabled,
+                    onEnabledChanged = onSetStartupAnimationEnabled
+                )
+            }
 
-        item {
-            BrowserBookmarkSettingsCard()
-        }
+            item {
+                ChargingEffectSettingsCard()
+            }
 
-        item {
-            AppLockSettingsCard(repository = appLockRepository)
-        }
+            item {
+                HarleySectionHeader(
+                    title = "隐私与安全",
+                    subtitle = "网站收藏、应用锁与本机权限"
+                )
+            }
 
-        item {
-            DeveloperModeCard(
-                configured = developerModeConfigured,
-                enabled = developerModeEnabled,
-                progress = companionProgress,
-                onVerifyKey = onVerifyDeveloperKey,
-                onDisable = onDisableDeveloperMode,
-                onAddLevels = onAddDeveloperLevels,
-                onAddCoins = onAddDeveloperCoins
-            )
-        }
+            item {
+                BrowserBookmarkSettingsCard()
+            }
 
-        item {
-            AppInfoCard(appInfo = appInfo)
-        }
+            item {
+                AppLockSettingsCard(repository = appLockRepository)
+            }
 
-        item {
-            CompactDeviceStatusCard(snapshot = deviceSnapshot)
-        }
+            item {
+                HarleySectionHeader(
+                    title = "应用与设备",
+                    subtitle = "版本、设备状态与高级选项"
+                )
+            }
 
-        item {
+            item {
+                DeveloperModeCard(
+                    configured = developerModeConfigured,
+                    enabled = developerModeEnabled,
+                    progress = companionProgress,
+                    onVerifyKey = onVerifyDeveloperKey,
+                    onDisable = onDisableDeveloperMode,
+                    onAddLevels = onAddDeveloperLevels,
+                    onAddCoins = onAddDeveloperCoins
+                )
+            }
+
+            item {
+                AppInfoCard(appInfo = appInfo)
+            }
+
+            item {
+                CompactDeviceStatusCard(snapshot = deviceSnapshot)
+            }
+
+            item {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
@@ -274,7 +299,7 @@ fun ProfileScreen(
             }
         }
 
-        when {
+            when {
             isLoading -> {
                 item {
                     Column(
@@ -323,14 +348,22 @@ fun ProfileScreen(
             }
         }
 
-        item {
-            PrivacyCard()
-        }
+            item {
+                HarleySectionHeader(
+                    title = "关于",
+                    subtitle = "数据说明与项目来源"
+                )
+            }
 
-        item {
-            ProjectSourceCodeCard(
-                onOpenSource = onOpenProjectSource
-            )
+            item {
+                PrivacyCard()
+            }
+
+            item {
+                ProjectSourceCodeCard(
+                    onOpenSource = onOpenProjectSource
+                )
+            }
         }
     }
 }
@@ -1269,13 +1302,14 @@ private fun AppearanceCard(
 
     Card(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(22.dp),
+        shape = MaterialTheme.shapes.large,
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.primaryContainer
-        )
+            containerColor = MaterialTheme.colorScheme.surfaceContainerLow
+        ),
+        border = harleyCardBorder()
     ) {
         Column(
-            modifier = Modifier.padding(18.dp),
+            modifier = Modifier.padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             Row(
@@ -1296,7 +1330,7 @@ private fun AppearanceCard(
                             "当前为白天模式，设置会在下次启动时保留"
                         },
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
 
@@ -1395,7 +1429,7 @@ private fun AppearanceCard(
                         Text(
                             text = "${visualTheme.symbol} ${visualTheme.description}",
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         Text(
                             text = if (visualTheme.artResourceName.isBlank()) {
@@ -1404,14 +1438,14 @@ private fun AppearanceCard(
                                 "角色素材：${visualTheme.artCredit}"
                             },
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }
                 Text(
                     text = "共10个人物主题与1个无角色纯色主题；App图标不会作为角色主题素材。",
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
 

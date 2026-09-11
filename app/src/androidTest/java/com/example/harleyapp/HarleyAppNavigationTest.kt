@@ -260,11 +260,10 @@ class HarleyAppNavigationTest {
     }
 
     /**
-     * 验证应用使用、文件空间和深海憋气均可从功能中心进入，并保持无数据污染。
+     * 验证应用使用和深海憋气均可从功能中心进入，并保持无数据污染。
      *
      * 使用方法：
-     * 测试只检查固定标题和文件授权说明；憋气确认后在三秒倒计时阶段取消，不进入正式计时、不保存历史；
-     * 文件空间不授予特殊权限、不扫描、不移动也不删除用户文件。
+     * 测试只检查固定标题；憋气确认后在三秒倒计时阶段取消，不进入正式计时、不保存历史。
      *
      * @return 无返回值；任一入口、标题或安全确认缺失时由测试框架报告失败。
      */
@@ -278,13 +277,6 @@ class HarleyAppNavigationTest {
         clickNode("应用使用")
         waitForNode("看见时间去了哪里")
         waitForNode("最近7天趋势")
-        clickNode("‹ 返回")
-
-        waitForNode("功能中心")
-        scrollUntilNode("文件空间")
-        clickNode("文件空间")
-        waitForNode("看清占用，再决定整理")
-        waitForNode("需要文件管理权限")
         clickNode("‹ 返回")
 
         waitForNode("功能中心")

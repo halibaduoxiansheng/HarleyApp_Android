@@ -30,12 +30,15 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
@@ -63,6 +66,7 @@ import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -121,8 +125,17 @@ fun BreathHoldGameScreen(
     var showSafetyDialog by remember {
         mutableStateOf(false)
     }
-    var showClearDialog by remember {
+    var historySelectionMode by remember {
         mutableStateOf(false)
+    }
+    var selectedRecordIds by remember {
+        mutableStateOf<Set<String>>(emptySet())
+    }
+    var showDeleteDialog by remember {
+        mutableStateOf(false)
+    }
+    var historyOperationMessage by remember {
+        mutableStateOf("")
     }
     val hapticFeedback = LocalHapticFeedback.current
     val keepScreenOn = sessionState == BreathHoldSessionState.COUNTDOWN ||
@@ -197,6 +210,13 @@ fun BreathHoldGameScreen(
         }
     }
 
+    BackHandler(enabled = historySelectionMode) {
+        // 选择模式优先消费系统返回键，只退出管理状态，不误删记录也不离开页面。
+        selectedRecordIds = emptySet()
+        historySelectionMode = false
+        historyOperationMessage = ""
+    }
+
     if (showSafetyDialog) {
         BreathHoldSafetyDialog(
             onDismiss = {
@@ -211,16 +231,29 @@ fun BreathHoldGameScreen(
         )
     }
 
-    if (showClearDialog) {
-        BreathHoldClearDialog(
+    if (showDeleteDialog) {
+        BreathHoldDeleteDialog(
+            selectedCount = selectedRecordIds.size,
             onDismiss = {
-                showClearDialog = false
+                // 取消二次确认时保留当前勾选，方便用户继续核对或调整。
+                showDeleteDialog = false
             },
             onConfirm = {
-                if (repository.clearRecords()) {
-                    records = emptyList()
+                val selectedIdsSnapshot = selectedRecordIds
+                val updatedRecords = repository.deleteRecords(selectedIdsSnapshot)
+                val deletionSucceeded = updatedRecords.none { record ->
+                    record.id in selectedIdsSnapshot
                 }
-                showClearDialog = false
+                if (deletionSucceeded) {
+                    val deletedCount = (records.size - updatedRecords.size).coerceAtLeast(0)
+                    records = updatedRecords
+                    selectedRecordIds = emptySet()
+                    historySelectionMode = false
+                    historyOperationMessage = "已删除${deletedCount}条，统计已按剩余记录更新"
+                } else {
+                    historyOperationMessage = "删除失败，原记录仍保留，请重试"
+                }
+                showDeleteDialog = false
             }
         )
     }
@@ -254,9 +287,54 @@ fun BreathHoldGameScreen(
             when (state) {
                 BreathHoldSessionState.READY -> BreathHoldReadyContent(
                     records = records,
-                    onBack = onBack,
-                    onStart = { showSafetyDialog = true },
-                    onClearHistory = { showClearDialog = true }
+                    historySelectionMode = historySelectionMode,
+                    selectedRecordIds = selectedRecordIds,
+                    historyOperationMessage = historyOperationMessage,
+                    onBack = {
+                        if (historySelectionMode) {
+                            selectedRecordIds = emptySet()
+                            historySelectionMode = false
+                            historyOperationMessage = ""
+                        } else {
+                            onBack()
+                        }
+                    },
+                    onStart = {
+                        selectedRecordIds = emptySet()
+                        historySelectionMode = false
+                        historyOperationMessage = ""
+                        showSafetyDialog = true
+                    },
+                    onEnterHistorySelection = {
+                        selectedRecordIds = emptySet()
+                        historySelectionMode = true
+                        historyOperationMessage = ""
+                    },
+                    onCancelHistorySelection = {
+                        selectedRecordIds = emptySet()
+                        historySelectionMode = false
+                        historyOperationMessage = ""
+                    },
+                    onToggleRecordSelection = { recordId ->
+                        selectedRecordIds = if (recordId in selectedRecordIds) {
+                            selectedRecordIds - recordId
+                        } else {
+                            selectedRecordIds + recordId
+                        }
+                    },
+                    onToggleSelectAll = {
+                        val allRecordIds = records.mapTo(linkedSetOf(), BreathHoldRecord::id)
+                        selectedRecordIds = if (selectedRecordIds == allRecordIds) {
+                            emptySet()
+                        } else {
+                            allRecordIds
+                        }
+                    },
+                    onDeleteSelected = {
+                        if (selectedRecordIds.isNotEmpty()) {
+                            showDeleteDialog = true
+                        }
+                    }
                 )
 
                 BreathHoldSessionState.COUNTDOWN -> BreathHoldCountdownContent(
@@ -400,19 +478,37 @@ private fun BreathHoldOceanAnimation(
  * 显示开始前的安全提示、个人数据、开始按钮和本机历史。
  *
  * @param records 当前本机历史。
+ * @param historySelectionMode 是否正在选择要删除的历史记录。
+ * @param selectedRecordIds 当前已勾选记录的稳定ID集合。
+ * @param historyOperationMessage 最近一次删除操作反馈；没有反馈时为空字符串。
  * @param onBack 返回功能中心回调。
  * @param onStart 请求开始并打开安全确认的回调。
- * @param onClearHistory 请求清空历史确认的回调。
+ * @param onEnterHistorySelection 进入历史选择模式的回调。
+ * @param onCancelHistorySelection 取消选择并清空勾选的回调。
+ * @param onToggleRecordSelection 切换单条记录勾选状态的回调。
+ * @param onToggleSelectAll 在全选和取消全选之间切换的回调。
+ * @param onDeleteSelected 请求删除当前勾选记录并打开二次确认的回调。
  * @return 无返回值。
  */
 @Composable
 private fun BreathHoldReadyContent(
     records: List<BreathHoldRecord>,
+    historySelectionMode: Boolean,
+    selectedRecordIds: Set<String>,
+    historyOperationMessage: String,
     onBack: () -> Unit,
     onStart: () -> Unit,
-    onClearHistory: () -> Unit
+    onEnterHistorySelection: () -> Unit,
+    onCancelHistorySelection: () -> Unit,
+    onToggleRecordSelection: (String) -> Unit,
+    onToggleSelectAll: () -> Unit,
+    onDeleteSelected: () -> Unit
 ) {
     val summary = calculateBreathHoldSummary(records)
+    val allRecordIds = remember(records) {
+        records.mapTo(linkedSetOf(), BreathHoldRecord::id)
+    }
+    val allRecordsSelected = allRecordIds.isNotEmpty() && selectedRecordIds == allRecordIds
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(20.dp),
@@ -473,16 +569,67 @@ private fun BreathHoldReadyContent(
             ) {
                 Text(
                     modifier = Modifier.weight(1f),
-                    text = "本机记录",
+                    text = if (historySelectionMode) {
+                        "已选择 ${selectedRecordIds.size}/${records.size}"
+                    } else {
+                        "本机记录"
+                    },
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.Bold,
                     color = Color.White
                 )
                 if (records.isNotEmpty()) {
-                    TextButton(onClick = onClearHistory) {
-                        Text(text = "清空", color = Color.White.copy(alpha = 0.78f))
+                    if (historySelectionMode) {
+                        TextButton(onClick = onToggleSelectAll) {
+                            Text(
+                                text = if (allRecordsSelected) "取消全选" else "全选",
+                                color = Color.White.copy(alpha = 0.84f)
+                            )
+                        }
+                        TextButton(onClick = onCancelHistorySelection) {
+                            Text(text = "取消", color = Color.White.copy(alpha = 0.84f))
+                        }
+                    } else {
+                        TextButton(onClick = onEnterHistorySelection) {
+                            Text(text = "选择删除", color = Color.White.copy(alpha = 0.84f))
+                        }
                     }
                 }
+            }
+        }
+        if (historySelectionMode) {
+            item {
+                OutlinedButton(
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = selectedRecordIds.isNotEmpty(),
+                    onClick = onDeleteSelected
+                ) {
+                    Text(
+                        text = if (selectedRecordIds.isEmpty()) {
+                            "请先选择要删除的记录"
+                        } else {
+                            "删除选中的${selectedRecordIds.size}条记录"
+                        },
+                        color = if (selectedRecordIds.isEmpty()) {
+                            Color.White.copy(alpha = 0.42f)
+                        } else {
+                            Color(0xFFFFB4AB)
+                        }
+                    )
+                }
+            }
+        }
+        if (historyOperationMessage.isNotBlank()) {
+            item {
+                Text(
+                    text = historyOperationMessage,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if ("失败" in historyOperationMessage) {
+                        Color(0xFFFFB4AB)
+                    } else {
+                        Color(0xFFBCEFFF)
+                    }
+                )
             }
         }
         if (records.isEmpty()) {
@@ -496,7 +643,12 @@ private fun BreathHoldReadyContent(
             }
         } else {
             items(items = records, key = BreathHoldRecord::id) { record ->
-                BreathHoldHistoryRow(record)
+                BreathHoldHistoryRow(
+                    record = record,
+                    selectionMode = historySelectionMode,
+                    selected = record.id in selectedRecordIds,
+                    onToggleSelection = { onToggleRecordSelection(record.id) }
+                )
             }
         }
     }
@@ -853,15 +1005,43 @@ private fun BreathHoldSummaryMetric(
  * 显示一条本机历史记录。
  *
  * @param record 已校验的憋气记录。
+ * @param selectionMode 是否处于历史多选删除模式。
+ * @param selected 当前记录是否已被勾选。
+ * @param onToggleSelection 切换当前记录勾选状态的回调。
  * @return 无返回值。
  */
 @Composable
-private fun BreathHoldHistoryRow(record: BreathHoldRecord) {
-    BreathHoldGlassCard {
+private fun BreathHoldHistoryRow(
+    record: BreathHoldRecord,
+    selectionMode: Boolean,
+    selected: Boolean,
+    onToggleSelection: () -> Unit
+) {
+    BreathHoldGlassCard(
+        containerColor = if (selected) {
+            Color(0xFF77DFF6).copy(alpha = 0.22f)
+        } else {
+            Color.White.copy(alpha = 0.11f)
+        }
+    ) {
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .toggleable(
+                    value = selected,
+                    enabled = selectionMode,
+                    role = Role.Checkbox,
+                    onValueChange = { onToggleSelection() }
+                ),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            if (selectionMode) {
+                Checkbox(
+                    checked = selected,
+                    onCheckedChange = null
+                )
+                Spacer(modifier = Modifier.size(8.dp))
+            }
             Surface(
                 modifier = Modifier.size(40.dp),
                 shape = CircleShape,
@@ -900,15 +1080,19 @@ private fun BreathHoldHistoryRow(record: BreathHoldRecord) {
 /**
  * 提供半透明深海玻璃卡片容器。
  *
+ * @param containerColor 卡片背景色；历史选中项可传入更明显的蓝色透明背景。
  * @param content 卡片内部内容。
  * @return 无返回值。
  */
 @Composable
-private fun BreathHoldGlassCard(content: @Composable () -> Unit) {
+private fun BreathHoldGlassCard(
+    containerColor: Color = Color.White.copy(alpha = 0.11f),
+    content: @Composable () -> Unit
+) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(22.dp),
-        colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.11f)),
+        colors = CardDefaults.cardColors(containerColor = containerColor),
         border = androidx.compose.foundation.BorderStroke(
             1.dp,
             Color.White.copy(alpha = 0.14f)
@@ -954,24 +1138,34 @@ private fun BreathHoldSafetyDialog(
 }
 
 /**
- * 显示清空本机憋气历史的二次确认。
+ * 显示删除指定憋气历史的二次确认。
  *
+ * @param selectedCount 用户已经勾选且即将删除的记录数量。
  * @param onDismiss 取消回调。
- * @param onConfirm 最终清空回调。
+ * @param onConfirm 最终删除所选记录的回调。
  * @return 无返回值。
  */
 @Composable
-private fun BreathHoldClearDialog(
+private fun BreathHoldDeleteDialog(
+    selectedCount: Int,
     onDismiss: () -> Unit,
     onConfirm: () -> Unit
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(text = "清空全部记录？") },
-        text = { Text(text = "个人最佳、平均值和最近30次本机记录都会删除，且无法恢复。") },
+        title = { Text(text = "删除选中的${selectedCount}条记录？") },
+        text = {
+            Text(text = "删除后无法恢复；次数、最佳和平均成绩会立即按剩余记录重新计算。")
+        },
         confirmButton = {
-            Button(onClick = onConfirm) {
-                Text(text = "确认清空")
+            Button(
+                onClick = onConfirm,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.error,
+                    contentColor = MaterialTheme.colorScheme.onError
+                )
+            ) {
+                Text(text = "确认删除")
             }
         },
         dismissButton = {

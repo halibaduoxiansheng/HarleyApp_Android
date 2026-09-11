@@ -57,7 +57,6 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -65,6 +64,7 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -87,7 +87,12 @@ import com.example.harleyapp.model.WebsiteShortcut
 import com.example.harleyapp.system.DeviceMonitor
 import com.example.harleyapp.system.NetworkSample
 import com.example.harleyapp.system.OfflineEnglishTtsState
+import com.example.harleyapp.ui.components.HarleyPageBackground
+import com.example.harleyapp.ui.components.HarleySectionHeader
+import com.example.harleyapp.ui.components.HarleyStatusPill
+import com.example.harleyapp.ui.components.HarleySymbolBadge
 import com.example.harleyapp.ui.components.bouncyClickable
+import com.example.harleyapp.ui.components.harleyCardBorder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -232,18 +237,7 @@ fun HomeScreen(
         }
     }
 
-    Box(
-        modifier = modifier
-            .fillMaxSize()
-            .background(
-                Brush.verticalGradient(
-                    colors = listOf(
-                        MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f),
-                        MaterialTheme.colorScheme.background
-                    )
-                )
-            )
-    ) {
+    HarleyPageBackground(modifier = modifier) {
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize(),
@@ -434,23 +428,22 @@ private fun HomeQuickSearchBar(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 18.dp, vertical = 10.dp),
-        shape = RoundedCornerShape(28.dp),
-        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.98f),
-        tonalElevation = 5.dp,
-        shadowElevation = 5.dp
+        shape = RoundedCornerShape(26.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.98f),
+        border = harleyCardBorder(alpha = 0.78f),
+        tonalElevation = 2.dp,
+        shadowElevation = 4.dp
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(56.dp)
-                .padding(start = 18.dp, end = 8.dp),
+                .heightIn(min = 58.dp)
+                .padding(start = 18.dp, end = 7.dp, top = 5.dp, bottom = 5.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Canvas(
-                modifier = Modifier
-                    .size(22.dp)
-                    .semantics { contentDescription = "全局搜索" }
+                modifier = Modifier.size(22.dp)
             ) {
                 val strokeWidth = 1.8.dp.toPx()
                 drawCircle(
@@ -470,6 +463,7 @@ private fun HomeQuickSearchBar(
             BasicTextField(
                 modifier = Modifier
                     .weight(1f)
+                    .semantics { contentDescription = "全局搜索" }
                     .onFocusChanged { state -> onFocusChanged(state.isFocused) },
                 value = query,
                 onValueChange = onQueryChanged,
@@ -498,31 +492,25 @@ private fun HomeQuickSearchBar(
 
             QrScannerShortcut(onClick = onOpenQrScanner)
 
-            Surface(
-                enabled = query.isNotBlank(),
-                onClick = onSearch,
-                shape = RoundedCornerShape(20.dp),
-                color = if (query.isNotBlank()) {
-                    MaterialTheme.colorScheme.primary
-                } else {
-                    MaterialTheme.colorScheme.surfaceContainerHighest
-                }
-            ) {
-                Box(
-                    modifier = Modifier
-                        .height(40.dp)
-                        .width(64.dp),
-                    contentAlignment = Alignment.Center
+            AnimatedVisibility(visible = query.isNotBlank()) {
+                Surface(
+                    enabled = query.isNotBlank(),
+                    onClick = onSearch,
+                    shape = RoundedCornerShape(18.dp),
+                    color = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary
                 ) {
-                    Text(
-                        text = "搜索",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = if (query.isNotBlank()) {
-                            MaterialTheme.colorScheme.onPrimary
-                        } else {
-                            MaterialTheme.colorScheme.onSurfaceVariant
-                        }
-                    )
+                    Box(
+                        modifier = Modifier
+                            .height(48.dp)
+                            .width(72.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "搜索",
+                            style = MaterialTheme.typography.labelLarge
+                        )
+                    }
                 }
             }
         }
@@ -546,13 +534,13 @@ private fun QrScannerShortcut(onClick: () -> Unit) {
 
     Surface(
         modifier = Modifier
-            .size(40.dp)
+            .size(48.dp)
             .semantics { contentDescription = "快捷扫描二维码" },
         onClick = onClick,
         shape = CircleShape,
         color = MaterialTheme.colorScheme.primaryContainer
     ) {
-        Canvas(modifier = Modifier.padding(10.dp)) {
+        Canvas(modifier = Modifier.padding(12.dp)) {
             val module = size.minDimension / 7f
             val finderStroke = (module * 0.72f).coerceAtLeast(1f)
 
@@ -729,6 +717,30 @@ private fun homeFeatureEntries(
             symbol = "文",
             statusLabel = "分级",
             onClick = { onOpenFeature(HomeFeatureId.CHINESE_GROWTH) }
+        ),
+        HomeFeatureEntry(
+            id = HomeFeatureId.FLASHLIGHT,
+            title = "手电筒",
+            description = "亮度、频率与明灭时长控制",
+            symbol = "光",
+            statusLabel = "设备",
+            onClick = { onOpenFeature(HomeFeatureId.FLASHLIGHT) }
+        ),
+        HomeFeatureEntry(
+            id = HomeFeatureId.MAO_QUOTES,
+            title = "毛主席语录",
+            description = "章节阅读、搜索收藏与本地导入",
+            symbol = "录",
+            statusLabel = "离线",
+            onClick = { onOpenFeature(HomeFeatureId.MAO_QUOTES) }
+        ),
+        HomeFeatureEntry(
+            id = HomeFeatureId.DUAL_CAMERA,
+            title = "前后双摄",
+            description = "前后画面等分同屏并独立变焦",
+            symbol = "双",
+            statusLabel = "设备",
+            onClick = { onOpenFeature(HomeFeatureId.DUAL_CAMERA) }
         )
     )
 }
@@ -1011,6 +1023,9 @@ private fun HomeFeaturePager(
     features: List<HomeFeatureEntry>,
     modifier: Modifier = Modifier
 ) {
+    val fontScale = LocalDensity.current.fontScale
+    val pageHeight = HOME_FEATURE_PAGE_HEIGHT * fontScale.coerceIn(1f, 1.35f)
+
     BoxWithConstraints(modifier = modifier.fillMaxWidth()) {
         val itemsPerPage = if (maxWidth >= THREE_ITEM_PAGE_MIN_WIDTH) 3 else 2
         val pages = features.chunked(itemsPerPage)
@@ -1028,7 +1043,7 @@ private fun HomeFeaturePager(
                 state = pagerState,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(HOME_FEATURE_PAGE_HEIGHT),
+                    .height(pageHeight),
                 pageSpacing = 12.dp,
                 beyondViewportPageCount = 1,
                 userScrollEnabled = pages.size > 1
@@ -1100,28 +1115,29 @@ private fun HomeFeatureCard(
             role = Role.Button,
             onClick = feature.onClick
         ),
-        shape = RoundedCornerShape(22.dp),
+        shape = MaterialTheme.shapes.large,
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surface
+            containerColor = MaterialTheme.colorScheme.surfaceContainerLow
         ),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+        border = harleyCardBorder(),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
     ) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(7.dp)
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Surface(
-                shape = RoundedCornerShape(12.dp),
-                color = MaterialTheme.colorScheme.primaryContainer
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                    text = feature.symbol,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                HarleySymbolBadge(symbol = feature.symbol)
+                HarleyStatusPill(
+                    label = feature.statusLabel,
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer
                 )
             }
 
@@ -1138,11 +1154,6 @@ private fun HomeFeatureCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis
-            )
-            Text(
-                text = feature.statusLabel,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.primary
             )
         }
     }
@@ -1161,10 +1172,11 @@ private fun EmptyHomeFeatureCard(onManage: () -> Unit) {
         modifier = Modifier
             .fillMaxWidth()
             .bouncyClickable(role = Role.Button, onClick = onManage),
-        shape = RoundedCornerShape(22.dp),
+        shape = MaterialTheme.shapes.large,
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f)
-        )
+            containerColor = MaterialTheme.colorScheme.surfaceContainerLow
+        ),
+        border = harleyCardBorder()
     ) {
         Row(
             modifier = Modifier.padding(20.dp),
@@ -1312,18 +1324,11 @@ private fun SectionTitle(
     subtitle: String,
     modifier: Modifier = Modifier
 ) {
-    Column(modifier = modifier) {
-        Text(
-            text = title,
-            style = MaterialTheme.typography.titleLarge,
-            fontWeight = FontWeight.Bold
-        )
-        Text(
-            text = subtitle,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-    }
+    HarleySectionHeader(
+        modifier = modifier,
+        title = title,
+        subtitle = subtitle
+    )
 }
 
 /**
@@ -1345,32 +1350,34 @@ private fun MetricCard(
     highlighted: Boolean,
     modifier: Modifier = Modifier
 ) {
-    val containerColor = if (highlighted) {
+    val badgeContainerColor = if (highlighted) {
         MaterialTheme.colorScheme.secondaryContainer
     } else {
         MaterialTheme.colorScheme.tertiaryContainer
     }
+    val badgeContentColor = if (highlighted) {
+        MaterialTheme.colorScheme.onSecondaryContainer
+    } else {
+        MaterialTheme.colorScheme.onTertiaryContainer
+    }
 
     Card(
         modifier = modifier,
-        shape = RoundedCornerShape(22.dp),
-        colors = CardDefaults.cardColors(containerColor = containerColor)
+        shape = MaterialTheme.shapes.large,
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainerLow
+        ),
+        border = harleyCardBorder()
     ) {
         Column(
             modifier = Modifier.padding(18.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            Surface(
-                shape = RoundedCornerShape(10.dp),
-                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.7f)
-            ) {
-                Text(
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                    text = symbol,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold
-                )
-            }
+            HarleySymbolBadge(
+                symbol = symbol,
+                containerColor = badgeContainerColor,
+                contentColor = badgeContentColor
+            )
 
             Text(
                 text = title,
@@ -1401,10 +1408,11 @@ private fun EmptyShortcutCard(onManageShortcuts: () -> Unit) {
         modifier = Modifier
             .fillMaxWidth()
             .bouncyClickable(onClick = onManageShortcuts),
-        shape = RoundedCornerShape(22.dp),
+        shape = MaterialTheme.shapes.large,
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f)
-        )
+            containerColor = MaterialTheme.colorScheme.surfaceContainerLow
+        ),
+        border = harleyCardBorder()
     ) {
         Row(
             modifier = Modifier.padding(20.dp),

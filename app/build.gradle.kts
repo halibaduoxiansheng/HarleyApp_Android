@@ -70,6 +70,7 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime.ktx)
     // CameraX只提供本机相机预览；ZXing二维码解码在设备端完成，不上传画面或依赖在线服务。
     implementation(libs.androidx.camera.camera2)
+    implementation(libs.androidx.camera.compose)
     implementation(libs.androidx.camera.lifecycle)
     implementation(libs.androidx.camera.view)
     implementation(libs.zxing.core)

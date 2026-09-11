@@ -25,12 +25,36 @@ enum class EbookReadAloudState {
  * @param name 系统Voice稳定名称，用于重新选择同一音色。
  * @param displayName 面向用户的语言、地区和音色名称。
  * @param languageCode ISO语言代码，目前阅读器使用zh或en。
+ * @param qualityLabel 根据Android Voice质量等级生成的中文说明。
+ * @param isRecommended true表示该音色是当前语言按质量、地区和延迟排序后的首选项。
  */
 data class EbookTtsVoiceOption(
     val name: String,
     val displayName: String,
-    val languageCode: String
+    val languageCode: String,
+    val qualityLabel: String,
+    val isRecommended: Boolean
 )
+
+/**
+ * 把Android TTS Voice的数值质量等级转换为稳定的中文说明。
+ *
+ * 使用方法：
+ * 构建音色列表时传入[Voice.getQuality]的返回值。Android规定质量数值越大越好；为兼容部分引擎返回
+ * 非标准中间值，函数按官方等级阈值向下归类，而不是只接受五个固定常量。
+ *
+ * @param quality Android TTS Voice报告的质量数值。
+ * @return 面向中文界面的质量标签；从低到高为“低品质”“较低品质”“普通品质”“高品质”“极高品质”。
+ */
+internal fun ebookTtsVoiceQualityLabel(quality: Int): String {
+    return when {
+        quality >= Voice.QUALITY_VERY_HIGH -> "极高品质"
+        quality >= Voice.QUALITY_HIGH -> "高品质"
+        quality >= Voice.QUALITY_NORMAL -> "普通品质"
+        quality >= Voice.QUALITY_LOW -> "较低品质"
+        else -> "低品质"
+    }
+}
 
 /**
  * 一段可直接交给Android TTS的电子书原文区间。
@@ -44,16 +68,12 @@ data class EbookTtsVoiceOption(
  * @param startOffset 当前块在整页文字中的UTF-16起点，包含该位置。
  * @param endOffsetExclusive 当前块在整页文字中的UTF-16终点，不包含该位置。
  * @param pauseAfterMillis 自然朗读时本块完成后的停顿毫秒数；普通朗读固定为0。
- * @param speechRateMultiplier 相对于用户朗读速度的轻微倍率；普通朗读固定为1。
- * @param pitch 交给Android TTS的音高倍率；普通朗读固定为1。
  */
 internal data class EbookSpeechChunk(
     val text: String,
     val startOffset: Int,
     val endOffsetExclusive: Int,
-    val pauseAfterMillis: Long,
-    val speechRateMultiplier: Float,
-    val pitch: Float
+    val pauseAfterMillis: Long
 ) {
 
     init {
@@ -63,8 +83,6 @@ internal data class EbookSpeechChunk(
             "Speech chunk offsets must match its UTF-16 length"
         }
         require(pauseAfterMillis >= 0L) { "Speech chunk pause must be non-negative" }
-        require(speechRateMultiplier > 0f) { "Speech chunk rate must be positive" }
-        require(pitch > 0f) { "Speech chunk pitch must be positive" }
     }
 }
 
@@ -116,16 +134,12 @@ private enum class EbookNaturalSpeechBoundary {
 }
 
 /**
- * 一个自然边界对应的轻微韵律调整。
+ * 一个自然边界对应的句间停顿设置。
  *
  * @param pauseAfterMillis 当前句结束后的停顿毫秒数。
- * @param speechRateMultiplier 当前句相对于用户设置速度的倍率。
- * @param pitch 当前句的音高倍率。
  */
 private data class EbookNaturalSpeechCadence(
-    val pauseAfterMillis: Long,
-    val speechRateMultiplier: Float,
-    val pitch: Float
+    val pauseAfterMillis: Long
 )
 
 /**
@@ -133,13 +147,13 @@ private data class EbookNaturalSpeechCadence(
  *
  * 使用方法：
  * 控制器在每次[speak][EbookReadAloudController.speak]前调用。普通模式只按[maxChunkLength]切分，
- * 不附加停顿、变速或变调；自然模式优先在中英文句号、问号、感叹号、分号和换行处分句，单句仍然
+ * 不附加停顿；自然模式优先在中英文句号、问号、感叹号、分号和换行处分句，单句仍然
  * 过长时再在长度限制内寻找空白或逗号等安全位置。所有[text][EbookSpeechChunk.text]均为输入原文
  * 的准确子串，区间使用与Android TTS范围回调一致的UTF-16索引。
  *
  * @param text 当前阅读页的完整原文。
  * @param maxChunkLength Android TTS允许单次提交的最大UTF-16长度，必须至少为2。
- * @param naturalReadingEnabled true表示启用自然分句、轻微韵律和句间停顿；false表示普通安全分块。
+ * @param naturalReadingEnabled true表示启用自然分句和句间停顿；false表示普通安全分块。
  * @return 按原文顺序排列且每块不超过[maxChunkLength]的列表；空白正文返回空列表。
  */
 internal fun buildEbookSpeechChunks(
@@ -269,9 +283,7 @@ private fun appendBoundedEbookSpeechRange(
                 text = chunkText,
                 startOffset = chunkStart,
                 endOffsetExclusive = chunkEnd,
-                pauseAfterMillis = 0L,
-                speechRateMultiplier = 1f,
-                pitch = 1f
+                pauseAfterMillis = 0L
             )
         }
         chunkStart = chunkEnd
@@ -281,9 +293,7 @@ private fun appendBoundedEbookSpeechRange(
         val cadence = ebookNaturalSpeechCadence(boundary)
         val lastIndex = destination.lastIndex
         destination[lastIndex] = destination[lastIndex].copy(
-            pauseAfterMillis = cadence.pauseAfterMillis,
-            speechRateMultiplier = cadence.speechRateMultiplier,
-            pitch = cadence.pitch
+            pauseAfterMillis = cadence.pauseAfterMillis
         )
     }
 }
@@ -386,6 +396,10 @@ private fun consumeEbookNaturalSpeechBoundary(
         end += 1
     }
     if (boundary != EbookNaturalSpeechBoundary.LINE_BREAK) {
+        // “……”“？！”等连续句末符号必须留在同一个语音块中，避免生成只含标点的空洞试听与双重停顿。
+        while (end < text.length && text[end] in NATURAL_SPEECH_TERMINAL_CHARACTERS) {
+            end += 1
+        }
         while (end < text.length && text[end] in NATURAL_SPEECH_CLOSING_CHARACTERS) {
             end += 1
         }
@@ -397,21 +411,21 @@ private fun consumeEbookNaturalSpeechBoundary(
 }
 
 /**
- * 返回某类句末使用的轻微韵律。
+ * 返回某类句末使用的自然停顿。
  *
  * @param boundary 当前句末类型。
- * @return 可直接写入[EbookSpeechChunk]的停顿、速度倍率和音高。
+ * @return 可直接写入[EbookSpeechChunk]的句后停顿设置。
  */
 private fun ebookNaturalSpeechCadence(
     boundary: EbookNaturalSpeechBoundary
 ): EbookNaturalSpeechCadence {
     return when (boundary) {
-        EbookNaturalSpeechBoundary.PERIOD -> EbookNaturalSpeechCadence(160L, 0.98f, 0.995f)
-        EbookNaturalSpeechBoundary.QUESTION -> EbookNaturalSpeechCadence(180L, 0.98f, 1.02f)
-        EbookNaturalSpeechBoundary.EXCLAMATION -> EbookNaturalSpeechCadence(140L, 1.01f, 1.02f)
-        EbookNaturalSpeechBoundary.SEMICOLON -> EbookNaturalSpeechCadence(90L, 0.99f, 1f)
-        EbookNaturalSpeechBoundary.LINE_BREAK -> EbookNaturalSpeechCadence(210L, 0.98f, 0.995f)
-        EbookNaturalSpeechBoundary.NONE -> EbookNaturalSpeechCadence(0L, 1f, 1f)
+        EbookNaturalSpeechBoundary.PERIOD -> EbookNaturalSpeechCadence(160L)
+        EbookNaturalSpeechBoundary.QUESTION -> EbookNaturalSpeechCadence(180L)
+        EbookNaturalSpeechBoundary.EXCLAMATION -> EbookNaturalSpeechCadence(140L)
+        EbookNaturalSpeechBoundary.SEMICOLON -> EbookNaturalSpeechCadence(90L)
+        EbookNaturalSpeechBoundary.LINE_BREAK -> EbookNaturalSpeechCadence(210L)
+        EbookNaturalSpeechBoundary.NONE -> EbookNaturalSpeechCadence(0L)
     }
 }
 
@@ -467,6 +481,7 @@ class EbookReadAloudController(
     private var engine: TextToSpeech? = null
     private var state = EbookReadAloudState.INITIALIZING
     private var voices: List<Voice> = emptyList()
+    private var systemDefaultVoiceName = ""
     private var released = false
     private var speechGeneration = 0L
     private var activeSpeechRequest: ActiveEbookSpeechRequest? = null
@@ -481,15 +496,22 @@ class EbookReadAloudController(
     /**
      * 返回某种语言在当前TTS引擎中可用且不要求联网的音色。
      *
+     * 使用方法：
+     * 音色设置界面传入正文语言代码并展示返回列表。列表已经按质量、设备地区、系统默认和延迟
+     * 排序，第一项会标记为推荐音色；系统内部名称仍保留在[displayName][EbookTtsVoiceOption.displayName]
+     * 中，便于用户区分同地区的多个Voice。
+     *
      * @param languageCode ISO语言代码，当前支持传入zh或en。
-     * @return 按地区和系统名称排序的音色；初始化未完成或没有语音包时为空。
+     * @return 推荐音色位于第一项的离线已安装音色；初始化未完成或没有语音包时为空。
      */
     fun availableVoices(languageCode: String): List<EbookTtsVoiceOption> {
-        return voicesForLanguage(languageCode).map { voice ->
+        return voicesForLanguage(languageCode).mapIndexed { index, voice ->
             EbookTtsVoiceOption(
                 name = voice.name,
                 displayName = buildVoiceDisplayName(voice),
-                languageCode = voice.locale.language
+                languageCode = voice.locale.language,
+                qualityLabel = ebookTtsVoiceQualityLabel(voice.quality),
+                isRecommended = index == 0
             )
         }
     }
@@ -523,6 +545,90 @@ class EbookReadAloudController(
         return preferences.edit()
             .putString(voicePreferenceKey(languageCode), voiceName)
             .commit()
+    }
+
+    /**
+     * 恢复并立即应用指定语言按当前设备环境计算出的推荐音色。
+     *
+     * 使用方法：
+     * 用户选择“推荐音色”或“恢复推荐”时传入zh或en。函数先应用[voicesForLanguage]排序后的第一项，
+     * 再删除该语言原先保存的具体Voice名称；以后系统语音包或地区发生变化时，阅读器会重新选择新的
+     * 推荐首项，而不会被旧名称锁定。
+     *
+     * @param languageCode 要恢复推荐音色的ISO语言代码，当前支持zh或en。
+     * @return 推荐音色存在、系统接受且保存偏好成功清除时返回true，否则返回false。
+     */
+    fun selectRecommendedVoice(languageCode: String): Boolean {
+        val recommendedVoice = voicesForLanguage(languageCode).firstOrNull() ?: return false
+        val currentEngine = engine ?: return false
+        if (currentEngine.setVoice(recommendedVoice) != TextToSpeech.SUCCESS) {
+            Log.e(TAG, "Failed to select recommended ebook Android TTS voice")
+            return false
+        }
+        val cleared = preferences.edit()
+            .remove(voicePreferenceKey(languageCode))
+            .commit()
+        if (!cleared) {
+            Log.e(TAG, "Failed to clear saved ebook Android TTS voice preference")
+        }
+        return cleared
+    }
+
+    /**
+     * 使用指定系统音色朗读一条固定短句，便于用户在保存前比较实际听感。
+     *
+     * 使用方法：
+     * 音色设置界面把[availableVoices]返回的语言代码和Voice名称传入。函数会先使当前整页任务失效并
+     * 停止本控制器的既有输出，再以标准音高、用户当前速度和QUEUE_FLUSH提交固定中英文试听短句。
+     * 试听使用独立内部标识且不会创建活动整页任务，因此现有朗读进度回调会自然忽略它；本函数也不会
+     * 写入音色偏好，只有随后显式调用[selectVoice]才会保存选择。
+     *
+     * @param languageCode 试听短句语言代码，当前支持zh或en。
+     * @param voiceName [availableVoices]返回的系统Voice稳定名称。
+     * @return 音色存在、控制器就绪且试听短句成功提交给Android TTS时返回true，否则返回false。
+     */
+    fun previewVoice(languageCode: String, voiceName: String): Boolean {
+        val currentEngine = engine
+        if (released || state != EbookReadAloudState.READY || currentEngine == null) return false
+
+        val normalizedLanguage = languageCode.lowercase(Locale.ROOT)
+        val previewText = when (normalizedLanguage) {
+            Locale.CHINESE.language -> CHINESE_VOICE_PREVIEW_TEXT
+            Locale.ENGLISH.language -> ENGLISH_VOICE_PREVIEW_TEXT
+            else -> return false
+        }
+        val targetVoice = voicesForLanguage(normalizedLanguage).firstOrNull { voice ->
+            voice.name == voiceName
+        } ?: return false
+
+        // 试听不属于整页朗读任务；先清除任务代际，随后到达的旧任务或试听回调都会被现有匹配逻辑忽略。
+        invalidateActiveSpeechRequest()
+        if (currentEngine.stop() != TextToSpeech.SUCCESS) {
+            Log.w(TAG, "Android TTS did not confirm stopping before ebook voice preview")
+        }
+        onSpeakingChanged(false)
+        if (currentEngine.setVoice(targetVoice) != TextToSpeech.SUCCESS) {
+            Log.e(TAG, "Failed to select ebook Android TTS preview voice")
+            return false
+        }
+        if (
+            currentEngine.setPitch(STANDARD_SPEECH_PITCH) != TextToSpeech.SUCCESS ||
+            currentEngine.setSpeechRate(speechRate()) != TextToSpeech.SUCCESS
+        ) {
+            Log.e(TAG, "Failed to apply standard ebook Android TTS preview prosody")
+            return false
+        }
+
+        val result = currentEngine.speak(
+            previewText,
+            TextToSpeech.QUEUE_FLUSH,
+            null,
+            "${PREVIEW_UTTERANCE_PREFIX}${speechGeneration}"
+        )
+        if (result != TextToSpeech.SUCCESS) {
+            Log.e(TAG, "Failed to submit ebook Android TTS voice preview")
+        }
+        return result == TextToSpeech.SUCCESS
     }
 
     /**
@@ -560,7 +666,7 @@ class EbookReadAloudController(
      * @param text 要朗读的当前页完整正文，分块时不会改写原文字符。
      * @param languageCode 正文语言代码zh或en。
      * @param utteranceId 本次整页朗读唯一标识，所有对外回调会原样返回。
-     * @param naturalReadingEnabled true表示按句分块并应用轻微韵律和句间停顿；false仅做长度安全切块。
+     * @param naturalReadingEnabled true表示按句分块并应用句间停顿；false仅做长度安全切块。
      * @return 第一块已经提交给系统TTS返回true；未就绪、缺少音色、正文为空或提交失败返回false。
      */
     fun speak(
@@ -591,6 +697,15 @@ class EbookReadAloudController(
         currentEngine.stop()
         if (currentEngine.setVoice(selectedVoice) != TextToSpeech.SUCCESS) {
             Log.e(TAG, "Failed to select ebook Android TTS voice")
+            onSpeakingChanged(false)
+            return false
+        }
+        // 每页只设置一次固定音高和用户速度，避免逐句重设参数让部分离线引擎产生机械或电音感。
+        if (
+            currentEngine.setPitch(STANDARD_SPEECH_PITCH) != TextToSpeech.SUCCESS ||
+            currentEngine.setSpeechRate(speechRate()) != TextToSpeech.SUCCESS
+        ) {
+            Log.e(TAG, "Failed to apply standard ebook Android TTS prosody")
             onSpeakingChanged(false)
             return false
         }
@@ -652,6 +767,7 @@ class EbookReadAloudController(
         engine?.shutdown()
         engine = null
         voices = emptyList()
+        systemDefaultVoiceName = ""
         state = EbookReadAloudState.RELEASED
     }
 
@@ -673,9 +789,10 @@ class EbookReadAloudController(
         voices = currentEngine.voices.orEmpty()
             .filter { voice ->
                 !voice.isNetworkConnectionRequired &&
+                    TextToSpeech.Engine.KEY_FEATURE_NOT_INSTALLED !in voice.features.orEmpty() &&
                     voice.locale.language in SUPPORTED_LANGUAGE_CODES
             }
-            .sortedWith(compareBy({ it.locale.language }, { it.locale.country }, Voice::getName))
+        systemDefaultVoiceName = currentEngine.defaultVoice?.name.orEmpty()
         if (voices.isEmpty()) {
             Log.w(TAG, "No offline Chinese or English TTS voice is installed")
             updateState(EbookReadAloudState.MISSING_OFFLINE_VOICE)
@@ -726,12 +843,13 @@ class EbookReadAloudController(
      *
      * 使用方法：
      * 第一块由[speak]使用QUEUE_FLUSH调用，后续块只在上一块完成后使用QUEUE_ADD调用。函数在提交前
-     * 写入内部块标识和韵律，回调必须同时匹配任务代际及该内部标识才会被接受。
+     * 写入内部块标识；本页固定音高和速度已经由[speak]统一设置，回调必须同时匹配任务代际及该内部
+     * 标识才会被接受。
      *
      * @param request 当前整页任务。
      * @param chunkIndex 要提交的零基块序号。
      * @param queueMode Android TTS的QUEUE_FLUSH或QUEUE_ADD模式。
-     * @return 韵律设置和块提交均成功返回true，否则返回false。
+     * @return 当前块成功提交给Android TTS返回true；任务失效、索引越界或引擎拒绝时返回false。
      */
     private fun submitActiveSpeechChunk(
         request: ActiveEbookSpeechRequest,
@@ -748,10 +866,6 @@ class EbookReadAloudController(
         }
         val currentEngine = engine ?: return false
         val chunk = request.chunks[chunkIndex]
-        val effectiveRate = (speechRate() * chunk.speechRateMultiplier)
-            .coerceIn(MIN_SPEECH_RATE, MAX_SPEECH_RATE)
-        if (currentEngine.setPitch(chunk.pitch) != TextToSpeech.SUCCESS) return false
-        if (currentEngine.setSpeechRate(effectiveRate) != TextToSpeech.SUCCESS) return false
 
         val engineUtteranceId = "${INTERNAL_UTTERANCE_PREFIX}${request.generation}_$chunkIndex"
         request.currentChunkIndex = chunkIndex
@@ -967,14 +1081,50 @@ class EbookReadAloudController(
      * @return 无返回值；引擎不存在或拒绝设置时无需额外报错，因为当前朗读已经结束。
      */
     private fun resetEbookSpeechProsody() {
-        engine?.setPitch(1f)
+        engine?.setPitch(STANDARD_SPEECH_PITCH)
         engine?.setSpeechRate(speechRate())
     }
 
-    /** @return 指定语言的离线系统Voice。 */
+    /**
+     * 返回指定语言的离线已安装Voice，并计算稳定的推荐顺序。
+     *
+     * 使用方法：
+     * 所有音色展示、保存、试听和正式朗读都通过本函数取得同一份顺序。先按Voice质量从高到低排列，
+     * 避免地区匹配但明显低品质的音色继续被推荐；质量相同时，若设备当前系统语言与目标语言相同，
+     * 优先选择相同国家或地区，否则中文优先zh-CN、英语优先en-US。随后尊重系统默认Voice，再按预计
+     * 延迟从低到高、稳定名称字典序排列。
+     *
+     * @param languageCode 目标ISO语言代码，当前支持zh或en；比较时忽略大小写。
+     * @return 已经过质量、地区、系统默认、延迟和名称排序的Voice列表；没有匹配音色时返回空列表。
+     */
     private fun voicesForLanguage(languageCode: String): List<Voice> {
         val normalizedLanguage = languageCode.lowercase(Locale.ROOT)
-        return voices.filter { voice -> voice.locale.language == normalizedLanguage }
+        val deviceLocale = Locale.getDefault()
+        val deviceCountry = deviceLocale.country.takeIf {
+            deviceLocale.language.equals(normalizedLanguage, ignoreCase = true)
+        }.orEmpty()
+        val fallbackCountry = when (normalizedLanguage) {
+            Locale.CHINESE.language -> Locale.CHINA.country
+            Locale.ENGLISH.language -> Locale.US.country
+            else -> ""
+        }
+        return voices
+            .filter { voice -> voice.locale.language == normalizedLanguage }
+            .sortedWith(
+                compareByDescending<Voice> { voice -> voice.quality }
+                    .thenBy { voice ->
+                        when {
+                            deviceCountry.isNotBlank() &&
+                                voice.locale.country.equals(deviceCountry, ignoreCase = true) -> 0
+                            fallbackCountry.isNotBlank() &&
+                                voice.locale.country.equals(fallbackCountry, ignoreCase = true) -> 1
+                            else -> 2
+                        }
+                    }
+                    .thenBy { voice -> if (voice.name == systemDefaultVoiceName) 0 else 1 }
+                    .thenBy { voice -> voice.latency }
+                    .thenBy { voice -> voice.name }
+            )
     }
 
     /** @return 面向中文界面的音色说明。 */
@@ -1002,7 +1152,7 @@ class EbookReadAloudController(
     companion object {
         const val MIN_SPEECH_RATE = 0.5f
         const val MAX_SPEECH_RATE = 2.0f
-        const val DEFAULT_SPEECH_RATE = 0.9f
+        const val DEFAULT_SPEECH_RATE = 1.0f
 
         private const val TAG = "EbookReadAloud"
         private const val PREFERENCES_NAME = "harley_ebook_reader_settings"
@@ -1010,6 +1160,11 @@ class EbookReadAloudController(
         private const val KEY_ENGLISH_VOICE = "english_voice"
         private const val KEY_SPEECH_RATE = "speech_rate"
         private const val INTERNAL_UTTERANCE_PREFIX = "ebook_internal_chunk_"
+        private const val PREVIEW_UTTERANCE_PREFIX = "ebook_voice_preview_"
+        private const val CHINESE_VOICE_PREVIEW_TEXT = "你好，这是一段电子书朗读音色试听。"
+        private const val ENGLISH_VOICE_PREVIEW_TEXT =
+            "Hello, this is a preview of the ebook reading voice."
+        private const val STANDARD_SPEECH_PITCH = 1.0f
         private val SUPPORTED_LANGUAGE_CODES = setOf(
             Locale.CHINESE.language,
             Locale.ENGLISH.language
@@ -1041,6 +1196,9 @@ private const val LANGUAGE_SAMPLE_SIZE = 240
 private const val MIN_TTS_CHUNK_LENGTH = 2
 private val CHINESE_UNICODE_RANGE = 0x4E00..0x9FFF
 private val NATURAL_SPEECH_SOFT_BREAK_CHARACTERS = setOf(',', '，', '、', ':', '：')
+private val NATURAL_SPEECH_TERMINAL_CHARACTERS = setOf(
+    '.', '。', '…', '?', '？', '!', '！', ';', '；'
+)
 private val NATURAL_SPEECH_CLOSING_CHARACTERS = setOf(
     '"', '\'', '”', '’', '」', '』', '》', ')', '）', ']', '】'
 )

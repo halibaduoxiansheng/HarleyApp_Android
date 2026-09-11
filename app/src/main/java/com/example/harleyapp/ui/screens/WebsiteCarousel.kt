@@ -40,6 +40,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -48,6 +49,7 @@ import com.example.harleyapp.model.WebsitePalette
 import com.example.harleyapp.model.WebsiteShortcut
 import com.example.harleyapp.model.nextWebsiteCarouselPage
 import com.example.harleyapp.model.normalizeWebsiteUrl
+import com.example.harleyapp.ui.components.harleyCardBorder
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import java.net.URI
@@ -91,6 +93,8 @@ fun WebsiteCarousel(
         WebsiteCardBackgroundStore(context.applicationContext)
     }
     val pagerState = rememberPagerState(pageCount = { websites.size })
+    // 正常字号下主动收紧首屏高度；开启大字体时按比例留出按钮和说明文字的完整空间。
+    val carouselHeight = 210.dp * LocalDensity.current.fontScale.coerceIn(1f, 1.25f)
     var editorVisible by remember {
         mutableStateOf(false)
     }
@@ -214,7 +218,7 @@ fun WebsiteCarousel(
                 state = pagerState,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(236.dp),
+                    .height(carouselHeight),
                 pageSpacing = 12.dp,
                 beyondViewportPageCount = 1
             ) { page ->
@@ -301,9 +305,10 @@ private fun WebsiteCarouselCard(
 
     Card(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(28.dp),
+        shape = MaterialTheme.shapes.extraLarge,
         colors = CardDefaults.cardColors(containerColor = Color.Transparent),
-        elevation = CardDefaults.cardElevation(defaultElevation = 6.dp)
+        border = harleyCardBorder(alpha = 0.48f),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
         Box(
             modifier = Modifier
@@ -318,89 +323,98 @@ private fun WebsiteCarouselCard(
                     contentScale = ContentScale.Crop
                 )
             }
-            if (backgroundImage != null || website.customColorArgb != null) {
-                Box(
-                    modifier = Modifier
-                        .matchParentSize()
-                        .background(
-                            Color.Black.copy(
-                                alpha = if (backgroundImage != null) 0.38f else 0.12f
-                            )
+            // 无论用户选择图片、自定义纯色还是预设渐变，都叠加稳定暗角，保证白色文字与操作区可读。
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .background(
+                        Brush.verticalGradient(
+                            colors = if (backgroundImage != null) {
+                                listOf(
+                                    Color.Black.copy(alpha = 0.30f),
+                                    Color.Black.copy(alpha = 0.60f)
+                                )
+                            } else {
+                                listOf(
+                                    Color.Black.copy(alpha = 0.16f),
+                                    Color.Black.copy(alpha = 0.46f)
+                                )
+                            }
                         )
-                )
-            }
+                    )
+            )
 
             Column(
                 modifier = Modifier.padding(22.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    modifier = Modifier.weight(1f),
-                    text = dateText,
-                    color = Color.White.copy(alpha = 0.78f),
-                    style = MaterialTheme.typography.labelLarge
-                )
-                Surface(
-                    onClick = onSetDefault,
-                    enabled = !isDefault,
-                    shape = RoundedCornerShape(50),
-                    color = Color.White.copy(alpha = if (isDefault) 0.24f else 0.92f)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
-                        text = if (isDefault) "默认网站" else "设为默认",
-                        color = if (isDefault) Color.White else style.actionColor,
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.Bold
+                        modifier = Modifier.weight(1f),
+                        text = dateText,
+                        color = Color.White.copy(alpha = 0.84f),
+                        style = MaterialTheme.typography.labelLarge
                     )
+                    Surface(
+                        onClick = onSetDefault,
+                        enabled = !isDefault,
+                        shape = RoundedCornerShape(50),
+                        color = Color.White.copy(alpha = if (isDefault) 0.24f else 0.92f)
+                    ) {
+                        Text(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                            text = if (isDefault) "默认网站" else "设为默认",
+                            color = if (isDefault) Color.White else style.actionColor,
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
                 }
-            }
-            Text(
-                text = website.title,
-                color = Color.White,
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Bold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            Text(
-                text = websiteHost(website.url),
-                color = Color.White.copy(alpha = 0.88f),
-                style = MaterialTheme.typography.bodyMedium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Button(
-                    onClick = onOpen,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = Color.White.copy(alpha = 0.94f),
-                        contentColor = style.actionColor
-                    )
-                ) {
-                    Text(text = "访问网站")
-                }
+                Text(
+                    text = website.title,
+                    color = Color.White,
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = websiteHost(website.url),
+                    color = Color.White.copy(alpha = 0.90f),
+                    style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
 
                 Row(
-                    modifier = Modifier.weight(1f),
-                    horizontalArrangement = Arrangement.End
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    TextButton(onClick = onEdit) {
-                        Text(text = "编辑", color = Color.White)
+                    Button(
+                        onClick = onOpen,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color.White.copy(alpha = 0.94f),
+                            contentColor = style.actionColor
+                        )
+                    ) {
+                        Text(text = "访问网站")
                     }
-                    TextButton(onClick = onDelete) {
-                        Text(text = "删除", color = Color.White)
+
+                    Row(
+                        modifier = Modifier.weight(1f),
+                        horizontalArrangement = Arrangement.End
+                    ) {
+                        TextButton(onClick = onEdit) {
+                            Text(text = "编辑", color = Color.White)
+                        }
+                        TextButton(onClick = onDelete) {
+                            Text(text = "删除", color = Color.White)
+                        }
                     }
                 }
-            }
             }
         }
     }

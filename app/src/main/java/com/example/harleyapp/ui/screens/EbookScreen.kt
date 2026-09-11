@@ -92,13 +92,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
-import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.boundsInRoot
@@ -107,6 +108,7 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
@@ -2445,7 +2447,8 @@ private fun EbookReader(
     var autoPageIntervalSeconds by rememberSaveable(book.id) {
         mutableIntStateOf(DEFAULT_EBOOK_AUTO_PAGE_INTERVAL_SECONDS)
     }
-    var naturalReadingEnabled by rememberSaveable(book.id) { mutableStateOf(true) }
+    // 默认让系统TTS一次处理完整页面，避免部分引擎逐句重新合成时出现音色跳变或金属感。
+    var naturalReadingEnabled by rememberSaveable(book.id) { mutableStateOf(false) }
     var isReaderForeground by remember(book.id) { mutableStateOf(false) }
     var isPageScrollInProgress by remember(book.id) { mutableStateOf(false) }
     var settledPage by remember(book.id) { mutableIntStateOf(currentPage) }
@@ -2453,6 +2456,7 @@ private fun EbookReader(
         mutableStateOf(EbookReadAloudState.INITIALIZING.name)
     }
     var showReadAloudDialog by rememberSaveable(book.id) { mutableStateOf(false) }
+    var readAloudSettingsMessage by remember(book.id) { mutableStateOf("") }
     var readAloudLaunchMessage by remember(book.id) { mutableStateOf("") }
     var startReadAloudAfterNotificationPermission by remember(book.id) {
         mutableStateOf(false)
@@ -2493,6 +2497,8 @@ private fun EbookReader(
             snapshot.status != EbookReadAloudPlaybackStatus.STOPPED
     }
     val isReadAloudSessionActive = currentBookPlayback != null
+    val isAnyReadAloudSessionActive = playbackSnapshot.status != EbookReadAloudPlaybackStatus.IDLE &&
+        playbackSnapshot.status != EbookReadAloudPlaybackStatus.STOPPED
     val readingMode = EbookReadingMode.entries.firstOrNull { mode ->
         mode.name == readingModeName
     } ?: EbookReadingMode.HORIZONTAL
@@ -3441,6 +3447,7 @@ private fun EbookReader(
             },
             onReadAloudSettings = {
                 showReaderSettings = false
+                readAloudSettingsMessage = ""
                 showReadAloudDialog = true
             },
             onEnterImmersive = {
@@ -3540,23 +3547,67 @@ private fun EbookReader(
             voices = voiceOptions,
             selectedVoiceName = selectedVoiceName,
             speechRate = speechRate,
+            controlsEnabled = !isAnyReadAloudSessionActive,
+            operationMessage = readAloudSettingsMessage,
             onVoiceSelected = { voiceName ->
                 if (readAloudSettingsController.selectVoice(readAloudLanguageCode, voiceName)) {
                     selectedVoiceName = voiceName
+                    readAloudSettingsMessage = "音色已保存，可点击试听确认听感"
+                } else {
+                    readAloudSettingsMessage = "音色切换失败，请检查系统TTS音色是否可用"
+                }
+            },
+            onRecommendedVoiceSelected = {
+                if (readAloudSettingsController.selectRecommendedVoice(readAloudLanguageCode)) {
+                    selectedVoiceName = readAloudSettingsController.selectedVoiceName(
+                        readAloudLanguageCode
+                    )
+                    readAloudSettingsMessage = "已恢复当前语言的推荐音色"
+                } else {
+                    readAloudSettingsMessage = "推荐音色不可用，请检查系统TTS设置"
+                }
+            },
+            onPreviewVoice = {
+                val previewStarted = readAloudSettingsController.previewVoice(
+                    languageCode = readAloudLanguageCode,
+                    voiceName = selectedVoiceName
+                )
+                readAloudSettingsMessage = if (previewStarted) {
+                    "正在试听；若没有声音，请检查系统媒体音量与TTS语音包"
+                } else {
+                    "试听启动失败，请更换音色或检查系统TTS设置"
                 }
             },
             onSpeechRateChanged = { rate -> speechRate = rate },
             onSpeechRateChangeFinished = {
-                readAloudSettingsController.setSpeechRate(speechRate)
+                if (
+                    !isAnyReadAloudSessionActive &&
+                    !readAloudSettingsController.setSpeechRate(speechRate)
+                ) {
+                    readAloudSettingsMessage = "朗读速度保存失败，请稍后重试"
+                }
+            },
+            onStandardSpeechRateSelected = {
+                val standardRate = EbookReadAloudController.DEFAULT_SPEECH_RATE
+                if (readAloudSettingsController.setSpeechRate(standardRate)) {
+                    speechRate = standardRate
+                    readAloudSettingsMessage = "已恢复标准1.0倍速"
+                } else {
+                    readAloudSettingsMessage = "朗读速度设置失败，请稍后重试"
+                }
             },
             onOpenSystemSettings = {
+                readAloudSettingsController.stop()
                 runCatching {
                     context.startActivity(Intent(EBOOK_TTS_SETTINGS_ACTION))
                 }.recoverCatching {
                     context.startActivity(Intent(Settings.ACTION_SETTINGS))
                 }
             },
-            onDismiss = { showReadAloudDialog = false }
+            onDismiss = {
+                readAloudSettingsController.stop()
+                showReadAloudDialog = false
+            }
         )
     }
 }
@@ -3647,9 +3698,14 @@ private fun EbookTranslationDialog(
  * @param voices 当前语言的离线音色。
  * @param selectedVoiceName 已选系统Voice名称。
  * @param speechRate 当前倍速。
+ * @param controlsEnabled 当前是否允许调整和试听；任意电子书正在后台朗读时应为false。
+ * @param operationMessage 最近一次选择、试听或恢复操作的反馈文字；没有反馈时为空字符串。
  * @param onVoiceSelected 音色选择回调。
+ * @param onRecommendedVoiceSelected 恢复当前语言推荐音色的回调。
+ * @param onPreviewVoice 使用当前音色播放固定短句的回调。
  * @param onSpeechRateChanged 拖动速度时的即时页面状态回调。
  * @param onSpeechRateChangeFinished 保存最终速度回调。
+ * @param onStandardSpeechRateSelected 恢复标准1.0倍速并立即保存的回调。
  * @param onOpenSystemSettings 跳转系统TTS设置回调。
  * @param onDismiss 关闭设置回调。
  * @return 无返回值。
@@ -3661,9 +3717,14 @@ private fun EbookReadAloudDialog(
     voices: List<EbookTtsVoiceOption>,
     selectedVoiceName: String,
     speechRate: Float,
+    controlsEnabled: Boolean,
+    operationMessage: String,
     onVoiceSelected: (String) -> Unit,
+    onRecommendedVoiceSelected: () -> Unit,
+    onPreviewVoice: () -> Unit,
     onSpeechRateChanged: (Float) -> Unit,
     onSpeechRateChangeFinished: () -> Unit,
+    onStandardSpeechRateSelected: () -> Unit,
     onOpenSystemSettings: () -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -3685,12 +3746,29 @@ private fun EbookReadAloudDialog(
                         LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
                         Text("正在连接Android文字转语音服务…")
                     }
+                    state == EbookReadAloudState.ERROR -> {
+                        Text(
+                            "Android文字转语音服务初始化失败，请检查系统TTS引擎后重试。",
+                            color = MaterialTheme.colorScheme.error
+                        )
+                        OutlinedButton(
+                            enabled = controlsEnabled,
+                            onClick = onOpenSystemSettings
+                        ) {
+                            Text("打开系统TTS设置")
+                        }
+                    }
                     voices.isEmpty() -> {
                         Text(
                             "手机没有安装该语言的离线音色。可进入系统设置下载语音数据，返回后重新打开阅读器。",
                             color = MaterialTheme.colorScheme.error
                         )
-                        OutlinedButton(onClick = onOpenSystemSettings) { Text("打开系统TTS设置") }
+                        OutlinedButton(
+                            enabled = controlsEnabled,
+                            onClick = onOpenSystemSettings
+                        ) {
+                            Text("打开系统TTS设置")
+                        }
                     }
                     else -> {
                         Text("离线音色（${voices.size}）", fontWeight = FontWeight.Bold)
@@ -3698,30 +3776,98 @@ private fun EbookReadAloudDialog(
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .clickable { onVoiceSelected(voice.name) }
+                                    .clickable(
+                                        enabled = controlsEnabled,
+                                        onClick = { onVoiceSelected(voice.name) }
+                                    )
                                     .padding(vertical = 2.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 RadioButton(
                                     selected = selectedVoiceName == voice.name,
+                                    enabled = controlsEnabled,
                                     onClick = { onVoiceSelected(voice.name) }
                                 )
-                                Text(
-                                    modifier = Modifier.weight(1f),
-                                    text = voice.displayName,
-                                    style = MaterialTheme.typography.bodySmall
-                                )
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = voice.displayName,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontWeight = if (voice.isRecommended) {
+                                            FontWeight.SemiBold
+                                        } else {
+                                            FontWeight.Normal
+                                        }
+                                    )
+                                    Text(
+                                        text = buildString {
+                                            if (voice.isRecommended) append("推荐 · ")
+                                            append(voice.qualityLabel)
+                                        },
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = if (voice.isRecommended) {
+                                            MaterialTheme.colorScheme.primary
+                                        } else {
+                                            MaterialTheme.colorScheme.onSurfaceVariant
+                                        }
+                                    )
+                                }
                             }
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            OutlinedButton(
+                                modifier = Modifier.weight(1f),
+                                enabled = controlsEnabled,
+                                onClick = onRecommendedVoiceSelected
+                            ) {
+                                Text("使用推荐")
+                            }
+                            OutlinedButton(
+                                modifier = Modifier.weight(1f),
+                                enabled = controlsEnabled && selectedVoiceName.isNotBlank(),
+                                onClick = onPreviewVoice
+                            ) {
+                                Text("试听当前音色")
+                            }
+                        }
+                        if (!controlsEnabled) {
+                            Text(
+                                "请先停止正在后台运行的电子书朗读，再调整音色、速度或试听。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        TextButton(
+                            enabled = controlsEnabled,
+                            onClick = onOpenSystemSettings
+                        ) {
+                            Text("管理或下载系统音色")
                         }
                     }
                 }
-                Text(
-                    text = "阅读速度：${String.format(Locale.CHINA, "%.1f×", speechRate)}",
-                    fontWeight = FontWeight.Bold
-                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        modifier = Modifier.weight(1f),
+                        text = "阅读速度：${String.format(Locale.CHINA, "%.1f×", speechRate)}",
+                        fontWeight = FontWeight.Bold
+                    )
+                    TextButton(
+                        enabled = controlsEnabled &&
+                            speechRate != EbookReadAloudController.DEFAULT_SPEECH_RATE,
+                        onClick = onStandardSpeechRateSelected
+                    ) {
+                        Text("恢复1.0×")
+                    }
+                }
                 Slider(
                     value = speechRate,
                     onValueChange = onSpeechRateChanged,
+                    enabled = controlsEnabled,
                     valueRange = EbookReadAloudController.MIN_SPEECH_RATE..EbookReadAloudController.MAX_SPEECH_RATE,
                     steps = 14,
                     onValueChangeFinished = onSpeechRateChangeFinished
@@ -3739,6 +3885,17 @@ private fun EbookReadAloudDialog(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                if (operationMessage.isNotBlank()) {
+                    Text(
+                        text = operationMessage,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if ("失败" in operationMessage) {
+                            MaterialTheme.colorScheme.error
+                        } else {
+                            MaterialTheme.colorScheme.primary
+                        }
+                    )
+                }
             }
         },
         confirmButton = {
@@ -3822,7 +3979,7 @@ private fun ebookReaderPalette(background: EbookReadingBackground): EbookReaderP
  * @param readAloudPlaybackStatus 当前书籍的后台朗读状态；null表示没有活动会话。
  * @param isTimedAutoPageTurning 当前是否开启按固定间隔自动翻页。
  * @param autoPageIntervalSeconds 定时自动翻页的单页停留秒数。
- * @param naturalReadingEnabled 是否按标点分句并应用轻微停顿、语速和音高变化。
+ * @param naturalReadingEnabled 是否按标点分句并应用稳定音高与速度下的自然停顿。
  * @param onReadingModeChanged 翻页模式变化回调。
  * @param onReadingBackgroundChanged 阅读背景变化回调。
  * @param onFontScaleChanged 字号变化回调。
@@ -3835,7 +3992,7 @@ private fun ebookReaderPalette(background: EbookReadingBackground): EbookReaderP
  * @param onAutoPageIntervalChanged 修改单页停留秒数的回调。
  * @param onToggleReadAloud 按当前状态开始、暂停、继续或重试朗读的回调。
  * @param onStopReadAloud 显式结束前台服务并移除媒体通知的回调。
- * @param onNaturalReadingChanged 开启或关闭自然朗读的回调。
+ * @param onNaturalReadingChanged 开启或关闭自然停顿的回调。
  * @param onReadAloudSettings 打开音色与速度设置的回调。
  * @param onEnterImmersive 进入无干扰阅读的回调。
  * @param onDismiss 关闭面板的回调。
@@ -4078,12 +4235,12 @@ private fun EbookReaderSettingsSheet(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Column(modifier = Modifier.weight(1f)) {
-                    Text("自然朗读", fontWeight = FontWeight.SemiBold)
+                    Text("自然停顿", fontWeight = FontWeight.SemiBold)
                     Text(
                         if (isReadAloudSessionActive) {
-                            "请先停止当前朗读再切换；开启后会按标点分句并加入自然停顿与轻微语调变化。"
+                            "请先停止当前朗读再切换；开启后会按标点分句并加入停顿，音高和速度保持稳定。"
                         } else {
-                            "按标点和段落分句，加入自然停顿与轻微语调变化；实际效果取决于系统离线音色。"
+                            "按标点和段落分句并加入停顿，不再逐句变调；若仍有拼接感，可保持关闭。"
                         },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -4173,7 +4330,11 @@ private fun EbookPageContainer(
     val latestOnPageChanged by rememberUpdatedState(onPageChanged)
     val latestOnPageScrollStateChanged by rememberUpdatedState(onPageScrollStateChanged)
     val latestOnPageSettled by rememberUpdatedState(onPageSettled)
-    val pageContent: @Composable (Int) -> Unit = { page ->
+    val pageContent: @Composable (Int, Int, String, EbookSpeechTextRange?) -> Unit = {
+        page,
+        overridePage,
+        overrideText,
+        overrideReadAloudRange ->
         if (book.format == EbookFormat.PDF) {
             PdfEbookPage(
                 book = book,
@@ -4183,8 +4344,8 @@ private fun EbookPageContainer(
             )
         } else {
             TextEbookPage(
-                text = if (page == currentPage) {
-                    currentTextOverride
+                text = if (page == overridePage) {
+                    overrideText
                 } else {
                     textPages.getOrElse(page) { "没有可显示的正文" }
                 },
@@ -4195,7 +4356,7 @@ private fun EbookPageContainer(
                 backgroundColor = readerPalette.background,
                 textColor = readerPalette.text,
                 readAloudHighlightColor = readerPalette.readAloudHighlight,
-                readAloudRange = readAloudRange.takeIf { page == currentPage },
+                readAloudRange = overrideReadAloudRange.takeIf { page == overridePage },
                 onCreateNote = { excerpt -> onCreateNote(excerpt, page) },
                 onOpenNotes = { onOpenPageNotes(page) }
             )
@@ -4212,11 +4373,34 @@ private fun EbookPageContainer(
     ) {
         when (readingMode) {
         EbookReadingMode.PAGE_CURL -> {
-            val density = LocalDensity.current
+            val usesDarkPageCurlLighting = readerPalette.background.luminance() < 0.2f
             val pagerState = rememberPagerState(
                 initialPage = currentPage.coerceIn(0, pageCount - 1),
                 pageCount = { pageCount }
             )
+            var settledContentPage by remember(book.id) {
+                mutableIntStateOf(currentPage.coerceIn(0, pageCount - 1))
+            }
+            var settledContentText by remember(book.id) { mutableStateOf(currentTextOverride) }
+            var settledContentReadAloudRange by remember(book.id) { mutableStateOf(readAloudRange) }
+
+            LaunchedEffect(
+                currentPage,
+                currentTextOverride,
+                readAloudRange,
+                pagerState.settledPage,
+                pagerState.isScrollInProgress
+            ) {
+                if (
+                    !pagerState.isScrollInProgress &&
+                    currentPage == pagerState.settledPage
+                ) {
+                    // 只在完整落页后更新快照，避免翻译文字或朗读高亮在动画半程跳到另一张纸上。
+                    settledContentPage = currentPage
+                    settledContentText = currentTextOverride
+                    settledContentReadAloudRange = readAloudRange
+                }
+            }
             LaunchedEffect(currentPage) {
                 if (!pagerState.isScrollInProgress && pagerState.currentPage != currentPage) {
                     if ((pagerState.currentPage - currentPage).absoluteValue == 1) {
@@ -4227,7 +4411,8 @@ private fun EbookPageContainer(
                 }
             }
             LaunchedEffect(pagerState) {
-                snapshotFlow { pagerState.currentPage }.collect { page ->
+                // 仿真翻页等纸张完全落稳后再提交页码，避免百分之五十位置提前切换业务正文。
+                snapshotFlow { pagerState.settledPage }.collect { page ->
                     latestOnPageChanged(page)
                 }
             }
@@ -4242,50 +4427,70 @@ private fun EbookPageContainer(
                 state = pagerState,
                 beyondViewportPageCount = 1
             ) { page ->
-                val signedOffset = (
-                    pagerState.currentPage - page + pagerState.currentPageOffsetFraction
-                ).coerceIn(-1f, 1f)
+                val currentPageOffsetFraction = pagerState.currentPageOffsetFraction
+                val signedOffset = calculateEbookPagerSignedPageOffset(
+                    currentPage = pagerState.currentPage,
+                    pageIndex = page,
+                    currentPageOffsetFraction = currentPageOffsetFraction
+                )
+                val targetPage = resolveEbookPageCurlTargetPage(
+                    settledPage = pagerState.settledPage,
+                    currentPage = pagerState.currentPage,
+                    targetPage = pagerState.targetPage,
+                    currentPageOffsetFraction = currentPageOffsetFraction,
+                    pageCount = pageCount
+                )
+                val visualState = resolveEbookPageCurlVisualState(
+                    pageIndex = page,
+                    settledPage = pagerState.settledPage,
+                    targetPage = targetPage,
+                    signedPageOffset = signedOffset
+                )
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .graphicsLayer {
-                            // 以书页内侧为轴做透视旋转，并随拖动增加阴影，形成纸页翻动效果。
-                            rotationY = signedOffset * -34f
-                            cameraDistance = 22f * density.density
-                            transformOrigin = if (signedOffset < 0f) {
-                                TransformOrigin(0f, 0.5f)
+                        .then(
+                            if (page != pagerState.settledPage) {
+                                // 动画中的底页、上一页和透明预加载页不重复暴露给TalkBack。
+                                Modifier.clearAndSetSemantics { }
                             } else {
-                                TransformOrigin(1f, 0.5f)
+                                Modifier
                             }
-                            shadowElevation = with(density) {
-                                (signedOffset.absoluteValue * 18f).dp.toPx()
-                            }
-                            alpha = 1f - signedOffset.absoluteValue * 0.08f
+                        )
+                        .zIndex(visualState.zIndex)
+                        .graphicsLayer {
+                            // 抵消Pager默认横移，把固定底页和唯一翻动页叠放在同一视口内。
+                            translationX = visualState.pagerTranslationCorrectionFraction * size.width
+                            alpha = visualState.alpha
                         }
-                        .background(readerPalette.background)
                 ) {
-                    pageContent(page)
-                    if (signedOffset.absoluteValue > 0.01f) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxHeight()
-                                .width(34.dp)
-                                .align(
-                                    if (signedOffset < 0f) {
-                                        Alignment.CenterStart
-                                    } else {
-                                        Alignment.CenterEnd
-                                    }
-                                )
-                                .background(
-                                    Brush.horizontalGradient(
-                                        colors = if (signedOffset < 0f) {
-                                            listOf(Color.Black.copy(alpha = 0.20f), Color.Transparent)
-                                        } else {
-                                            listOf(Color.Transparent, Color.Black.copy(alpha = 0.20f))
-                                        }
-                                    )
-                                )
+                    EbookCurvedPageSurface(
+                        modifier = Modifier.fillMaxSize(),
+                        visualState = visualState,
+                        backgroundColor = readerPalette.background,
+                        textColor = readerPalette.text,
+                        usesDarkLighting = usesDarkPageCurlLighting
+                    ) {
+                        pageContent(
+                            page,
+                            settledContentPage,
+                            settledContentText,
+                            settledContentReadAloudRange
+                        )
+                    }
+
+                    if (
+                        visualState.layer == EbookPageCurlLayer.BASE &&
+                        visualState.curlStrength > 0.001f
+                    ) {
+                        EbookPageCurlBaseShadow(
+                            modifier = Modifier.fillMaxSize(),
+                            visualState = visualState,
+                            shadowColor = if (usesDarkPageCurlLighting) {
+                                readerPalette.text
+                            } else {
+                                Color.Black
+                            }
                         )
                     }
                 }
@@ -4321,7 +4526,9 @@ private fun EbookPageContainer(
                 modifier = Modifier.fillMaxSize(),
                 state = pagerState,
                 beyondViewportPageCount = 1
-            ) { page -> pageContent(page) }
+            ) { page ->
+                pageContent(page, currentPage, currentTextOverride, readAloudRange)
+            }
         }
 
         EbookReadingMode.VERTICAL -> {
@@ -4353,7 +4560,9 @@ private fun EbookPageContainer(
                 modifier = Modifier.fillMaxSize(),
                 state = pagerState,
                 beyondViewportPageCount = 1
-            ) { page -> pageContent(page) }
+            ) { page ->
+                pageContent(page, currentPage, currentTextOverride, readAloudRange)
+            }
         }
 
             EbookReadingMode.FADE -> {
@@ -4369,7 +4578,9 @@ private fun EbookPageContainer(
                     targetState = currentPage,
                     transitionSpec = { fadeIn() togetherWith fadeOut() },
                     label = "ebook_fade_page"
-                ) { page -> pageContent(page) }
+                ) { page ->
+                    pageContent(page, currentPage, currentTextOverride, readAloudRange)
+                }
             }
     }
     }
