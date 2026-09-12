@@ -1,7 +1,7 @@
 # HarleyApp Android
 
 Harley生活助手是一款使用Kotlin和Jetpack Compose开发的本地Android应用，包含首页设备状态、
-自定义网站轮播、伙伴成长、记账、运动监督、快捷应用、微信相关辅助和本机清理等功能。
+自定义网站收藏轮播、电子书、英语单词、伙伴成长、记账、运动监督、快捷应用、微信相关辅助和本机清理等功能。
 
 ## 仓库中包含什么
 
@@ -17,10 +17,11 @@ Harley生活助手是一款使用Kotlin和Jetpack Compose开发的本地Android�
 ## 另一台电脑首次运行
 
 1. 安装Android Studio，并确保其内置或配置的Gradle JDK为JDK 25。
+
 2. 使用Git克隆本仓库：
 
    ```bash
-git clone https://github.com/halibaduoxiansheng/HarleyApp_Android.git
+   git clone https://github.com/halibaduoxiansheng/HarleyApp_Android.git
    ```
 
 3. 在Android Studio中选择 **Open**，打开克隆后的仓库根目录。

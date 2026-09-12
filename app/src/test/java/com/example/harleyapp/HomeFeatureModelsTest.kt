@@ -4,6 +4,7 @@ import com.example.harleyapp.model.DEFAULT_HOME_FEATURE_IDS
 import com.example.harleyapp.model.HomeFeatureId
 import com.example.harleyapp.model.decodeHomeFeatureIds
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Test
 
 /** 验证首页功能选择的默认值和持久化名称兼容行为。 */
@@ -24,6 +25,7 @@ class HomeFeatureModelsTest {
             ),
             DEFAULT_HOME_FEATURE_IDS
         )
+        assertFalse(HomeFeatureId.LIVE_TRANSLATION in DEFAULT_HOME_FEATURE_IDS)
     }
 
     /**
@@ -37,12 +39,17 @@ class HomeFeatureModelsTest {
             setOf(
                 HomeFeatureId.MOBILE_DATA.name,
                 "STORAGE_MANAGER",
-                HomeFeatureId.TODAY.name
+                HomeFeatureId.TODAY.name,
+                HomeFeatureId.LIVE_TRANSLATION.name
             )
         )
 
         assertEquals(
-            linkedSetOf(HomeFeatureId.TODAY, HomeFeatureId.MOBILE_DATA),
+            linkedSetOf(
+                HomeFeatureId.TODAY,
+                HomeFeatureId.MOBILE_DATA,
+                HomeFeatureId.LIVE_TRANSLATION
+            ),
             decoded
         )
     }

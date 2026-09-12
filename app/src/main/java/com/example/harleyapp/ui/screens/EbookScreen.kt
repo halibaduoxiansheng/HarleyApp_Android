@@ -34,6 +34,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -50,7 +51,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.VerticalPager
 import androidx.compose.foundation.pager.rememberPagerState
@@ -82,6 +85,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -108,7 +112,12 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.progressBarRangeInfo
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.setProgress
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
@@ -5038,6 +5047,7 @@ private fun EbookTableOfContentsDialog(
     onDismiss: () -> Unit
 ) {
     var query by remember(chapters) { mutableStateOf("") }
+    val listState = rememberLazyListState()
     val currentChapterIndex = chapters.indexOfLast { chapter -> chapter.pageIndex <= currentPage }
     val currentChapter = chapters.getOrNull(currentChapterIndex)
     val filteredChapters = remember(chapters, query) {
@@ -5084,67 +5094,388 @@ private fun EbookTableOfContentsDialog(
                         )
                     }
                 } else {
-                    LazyColumn(
-                        modifier = Modifier.weight(1f),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f)
                     ) {
-                        items(
-                            items = filteredChapters,
-                            key = { chapter -> "${chapter.pageIndex}_${chapter.title}" }
-                        ) { chapter ->
-                            val selected = chapter == currentChapter
-                            Surface(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { onChapterSelected(chapter) },
-                                shape = RoundedCornerShape(10.dp),
-                                color = if (selected) {
-                                    MaterialTheme.colorScheme.primaryContainer
-                                } else {
-                                    Color.Transparent
-                                }
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(
-                                        start = (12 + (chapter.level - 1).coerceIn(0, 3) * 12).dp,
-                                        end = 12.dp,
-                                        top = 10.dp,
-                                        bottom = 10.dp
-                                    ),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            text = chapter.title,
-                                            fontWeight = if (selected) {
-                                                FontWeight.Bold
-                                            } else {
-                                                FontWeight.Normal
-                                            },
-                                            maxLines = 3,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                        if (selected) {
-                                            Text(
-                                                text = "当前阅读章节",
-                                                color = MaterialTheme.colorScheme.primary,
-                                                style = MaterialTheme.typography.labelSmall
-                                            )
-                                        }
+                        LazyColumn(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(end = 32.dp),
+                            state = listState,
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            items(
+                                items = filteredChapters,
+                                key = { chapter -> "${chapter.pageIndex}_${chapter.title}" }
+                            ) { chapter ->
+                                val selected = chapter == currentChapter
+                                Surface(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { onChapterSelected(chapter) },
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = if (selected) {
+                                        MaterialTheme.colorScheme.primaryContainer
+                                    } else {
+                                        Color.Transparent
                                     }
-                                    Text(
-                                        text = "${chapter.pageIndex + 1}页",
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        style = MaterialTheme.typography.labelSmall
-                                    )
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(
+                                            start = (12 + (chapter.level - 1).coerceIn(0, 3) * 12).dp,
+                                            end = 12.dp,
+                                            top = 10.dp,
+                                            bottom = 10.dp
+                                        ),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = chapter.title,
+                                                fontWeight = if (selected) {
+                                                    FontWeight.Bold
+                                                } else {
+                                                    FontWeight.Normal
+                                                },
+                                                maxLines = 3,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            if (selected) {
+                                                Text(
+                                                    text = "当前阅读章节",
+                                                    color = MaterialTheme.colorScheme.primary,
+                                                    style = MaterialTheme.typography.labelSmall
+                                                )
+                                            }
+                                        }
+                                        Text(
+                                            text = "${chapter.pageIndex + 1}页",
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            style = MaterialTheme.typography.labelSmall
+                                        )
+                                    }
                                 }
                             }
                         }
+
+                        EbookTableOfContentsScrollbar(
+                            modifier = Modifier
+                                .align(Alignment.CenterEnd)
+                                .fillMaxHeight(),
+                            listState = listState,
+                            itemCount = filteredChapters.size
+                        )
                     }
                 }
             }
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } }
+    )
+}
+
+/**
+ * 在章节目录右侧显示与列表同步、可直接拖拽的垂直滑轮。
+ *
+ * 使用方法：
+ * 将本组件与目录[LazyColumn]放在同一个[Box]中，并把同一个[listState]同时传给两者。用户普通
+ * 滚动目录时，滑块会按当前可见章节同步移动；用户按住滑块或轨道后上下拖动时，会按全目录比例
+ * 快速定位。目录全部可以在一屏内显示时，本组件不会绘制无意义的滑轮。
+ *
+ * @param listState 目录列表正在使用的滚动状态，负责读取当前位置并执行拖拽定位。
+ * @param itemCount 当前搜索结果中的目录项总数，用于保证快速定位索引始终有效。
+ * @param modifier 滑轮在父布局中的尺寸和对齐方式；调用方应提供完整可滚动高度。
+ * @return 无返回值，直接绘制目录滑轮并处理拖拽与无障碍进度操作。
+ */
+@Composable
+private fun EbookTableOfContentsScrollbar(
+    listState: LazyListState,
+    itemCount: Int,
+    modifier: Modifier = Modifier
+) {
+    val scrollIndicatorState = listState.scrollIndicatorState ?: return
+    val contentSize = scrollIndicatorState.contentSize
+    val viewportSize = scrollIndicatorState.viewportSize
+    val canScroll = listState.canScrollBackward || listState.canScrollForward
+    if (!canScroll || contentSize <= viewportSize || viewportSize <= 0) return
+
+    val density = LocalDensity.current
+    var trackHeightPx by remember { mutableFloatStateOf(0f) }
+    val minimumThumbHeightPx = with(density) { 48.dp.toPx() }
+    val thumbHeightPx = calculateEbookScrollbarThumbHeight(
+        trackHeightPx = trackHeightPx,
+        minimumThumbHeightPx = minimumThumbHeightPx,
+        contentSize = contentSize,
+        viewportSize = viewportSize
+    )
+    val thumbTravelPx = (trackHeightPx - thumbHeightPx).coerceAtLeast(0f)
+    val thumbHeightDp = with(density) { thumbHeightPx.toDp() }
+
+    val requestScrollToFraction: (Float) -> Unit = { requestedFraction ->
+        val currentIndicatorState = listState.scrollIndicatorState
+        if (currentIndicatorState != null && itemCount > 0) {
+            val target = calculateEbookScrollbarScrollTarget(
+                scrollFraction = requestedFraction,
+                contentSize = currentIndicatorState.contentSize,
+                viewportSize = currentIndicatorState.viewportSize,
+                itemCount = itemCount
+            )
+            listState.requestScrollToItem(
+                index = target.itemIndex,
+                scrollOffset = target.itemScrollOffset
+            )
+        }
+    }
+    val currentRequestScrollToFraction by rememberUpdatedState(requestScrollToFraction)
+    val currentThumbHeightPx by rememberUpdatedState(thumbHeightPx)
+    val currentThumbTravelPx by rememberUpdatedState(thumbTravelPx)
+
+    Box(
+        modifier = modifier
+            .width(32.dp)
+            .onSizeChanged { size -> trackHeightPx = size.height.toFloat() }
+            .semantics {
+                val currentIndicatorState = listState.scrollIndicatorState
+                val currentScrollFraction = if (currentIndicatorState == null) {
+                    0f
+                } else {
+                    calculateEbookScrollbarScrollFraction(
+                        scrollOffset = currentIndicatorState.scrollOffset,
+                        contentSize = currentIndicatorState.contentSize,
+                        viewportSize = currentIndicatorState.viewportSize
+                    )
+                }
+                contentDescription = "目录滚动滑轮"
+                progressBarRangeInfo = ProgressBarRangeInfo(currentScrollFraction, 0f..1f)
+                setProgress { requestedFraction ->
+                    currentRequestScrollToFraction(requestedFraction)
+                    true
+                }
+            }
+            .pointerInput(listState) {
+                var dragGrabOffsetPx = 0f
+                detectVerticalDragGestures(
+                    onDragStart = { startPosition ->
+                        val currentIndicatorState = listState.scrollIndicatorState
+                        val currentScrollFraction = if (currentIndicatorState == null) {
+                            0f
+                        } else {
+                            calculateEbookScrollbarScrollFraction(
+                                scrollOffset = currentIndicatorState.scrollOffset,
+                                contentSize = currentIndicatorState.contentSize,
+                                viewportSize = currentIndicatorState.viewportSize
+                            )
+                        }
+                        val thumbTop = currentThumbTravelPx * currentScrollFraction
+                        val thumbBottom = thumbTop + currentThumbHeightPx
+                        dragGrabOffsetPx = if (startPosition.y in thumbTop..thumbBottom) {
+                            startPosition.y - thumbTop
+                        } else {
+                            currentThumbHeightPx / 2f
+                        }
+                        currentRequestScrollToFraction(
+                            calculateEbookScrollbarDragFraction(
+                                pointerYPx = startPosition.y,
+                                dragGrabOffsetPx = dragGrabOffsetPx,
+                                thumbTravelPx = currentThumbTravelPx
+                            )
+                        )
+                    },
+                    onVerticalDrag = { change, _ ->
+                        change.consume()
+                        currentRequestScrollToFraction(
+                            calculateEbookScrollbarDragFraction(
+                                pointerYPx = change.position.y,
+                                dragGrabOffsetPx = dragGrabOffsetPx,
+                                thumbTravelPx = currentThumbTravelPx
+                            )
+                        )
+                    }
+                )
+            }
+    ) {
+        Box(
+            modifier = Modifier
+                .align(Alignment.Center)
+                .fillMaxHeight()
+                .width(4.dp)
+                .background(
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.18f),
+                    shape = RoundedCornerShape(2.dp)
+                )
+        )
+
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .offset {
+                    val currentIndicatorState = listState.scrollIndicatorState
+                    val currentScrollFraction = if (currentIndicatorState == null) {
+                        0f
+                    } else {
+                        calculateEbookScrollbarScrollFraction(
+                            scrollOffset = currentIndicatorState.scrollOffset,
+                            contentSize = currentIndicatorState.contentSize,
+                            viewportSize = currentIndicatorState.viewportSize
+                        )
+                    }
+                    IntOffset(
+                        x = 0,
+                        y = (currentThumbTravelPx * currentScrollFraction).roundToInt()
+                    )
+                }
+                .width(10.dp)
+                .height(thumbHeightDp)
+                .background(
+                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.88f),
+                    shape = RoundedCornerShape(4.dp)
+                )
+        )
+    }
+}
+
+/**
+ * 计算目录滑轮的滑块高度。
+ *
+ * 使用方法：
+ * 布局取得轨道像素高度后调用。函数按“目录可视区域高度/目录内容总高度”计算滑块比例，同时保证
+ * 滑块不小于可触摸的最小高度，也不会超过轨道。
+ *
+ * @param trackHeightPx 滑轮轨道的实际像素高度。
+ * @param minimumThumbHeightPx 滑块允许使用的最小像素高度。
+ * @param contentSize 目录全部内容的估算像素高度。
+ * @param viewportSize 目录当前可视区域的像素高度。
+ * @return 合法的滑块像素高度；参数不足以形成滑轮时返回0。
+ */
+internal fun calculateEbookScrollbarThumbHeight(
+    trackHeightPx: Float,
+    minimumThumbHeightPx: Float,
+    contentSize: Int,
+    viewportSize: Int
+): Float {
+    if (!trackHeightPx.isFinite() || trackHeightPx <= 0f || contentSize <= 0 || viewportSize <= 0) {
+        return 0f
+    }
+
+    val visibleFraction = viewportSize.coerceAtMost(contentSize).toFloat() / contentSize.toFloat()
+    val minimumHeight = if (minimumThumbHeightPx.isFinite()) {
+        minimumThumbHeightPx.coerceIn(0f, trackHeightPx)
+    } else {
+        0f
+    }
+    return (trackHeightPx * visibleFraction).coerceIn(minimumHeight, trackHeightPx)
+}
+
+/**
+ * 把目录列表当前位置换算为滑轮使用的零到一进度。
+ *
+ * 使用方法：
+ * 每次[LazyListState]布局或滚动变化时调用。函数使用列表提供的像素级滚动指标，使不同高度的
+ * 章节目录项以及普通手指慢速滚动都能得到连续一致的滑块位置。
+ *
+ * @param scrollOffset 目录当前已经滚过的估算像素距离。
+ * @param contentSize 目录全部内容的估算像素高度。
+ * @param viewportSize 目录当前可视区域的像素高度。
+ * @return 位于0到1之间的滑轮进度；0表示开头，1表示末尾。
+ */
+internal fun calculateEbookScrollbarScrollFraction(
+    scrollOffset: Int,
+    contentSize: Int,
+    viewportSize: Int
+): Float {
+    val maximumScrollOffset = (contentSize - viewportSize).coerceAtLeast(0)
+    if (maximumScrollOffset == 0) return 0f
+    return (scrollOffset.toFloat() / maximumScrollOffset.toFloat()).coerceIn(0f, 1f)
+}
+
+/**
+ * 把用户拖拽位置换算为滑轮进度。
+ *
+ * 使用方法：
+ * 拖拽开始时记录手指在滑块内部的抓取偏移，后续把每次手指纵坐标传入本函数。保留抓取偏移可避免
+ * 用户按住滑块边缘时滑块突然跳到手指中心，超出轨道的拖动会自动限制到首尾。
+ *
+ * @param pointerYPx 手指当前相对于轨道顶部的纵坐标像素值。
+ * @param dragGrabOffsetPx 手指按下点相对于滑块顶部的像素偏移。
+ * @param thumbTravelPx 滑块顶部从轨道开头移动到末尾的最大像素距离。
+ * @return 位于0到1之间的目标滑轮进度；没有可移动距离时返回0。
+ */
+internal fun calculateEbookScrollbarDragFraction(
+    pointerYPx: Float,
+    dragGrabOffsetPx: Float,
+    thumbTravelPx: Float
+): Float {
+    if (
+        !pointerYPx.isFinite() ||
+        !dragGrabOffsetPx.isFinite() ||
+        !thumbTravelPx.isFinite() ||
+        thumbTravelPx <= 0f
+    ) {
+        return 0f
+    }
+    return ((pointerYPx - dragGrabOffsetPx) / thumbTravelPx).coerceIn(0f, 1f)
+}
+
+/**
+ * 表示目录滑轮快速定位所需的列表项索引和项内像素偏移。
+ *
+ * @property itemIndex 需要放到可视区域开头附近的零基目录项索引。
+ * @property itemScrollOffset 目标目录项需要继续向上滚出的像素距离。
+ */
+internal data class EbookScrollbarScrollTarget(
+    val itemIndex: Int,
+    val itemScrollOffset: Int
+)
+
+/**
+ * 把滑轮目标进度换算为可直接请求的目录项位置。
+ *
+ * 使用方法：
+ * 用户拖动或无障碍服务设置滑轮进度时调用，再把返回值传给[LazyListState.requestScrollToItem]。
+ * 函数用内容总高度估算单项跨度，远距离拖动时直接定位到目标附近，不会逐项测量被跨过的章节；
+ * 开头和末尾使用固定索引，确保一次拖动可以覆盖完整目录。
+ *
+ * @param scrollFraction 目标滑轮进度，函数会把超出0到1的输入限制到合法范围。
+ * @param contentSize 目录全部内容的估算像素高度。
+ * @param viewportSize 目录当前可视区域的像素高度。
+ * @param itemCount 当前搜索结果中的目录项总数。
+ * @return 合法的目录项索引和项内像素偏移；参数无效或目标在开头时两项都为0。
+ */
+internal fun calculateEbookScrollbarScrollTarget(
+    scrollFraction: Float,
+    contentSize: Int,
+    viewportSize: Int,
+    itemCount: Int
+): EbookScrollbarScrollTarget {
+    val safeScrollFraction = if (scrollFraction.isFinite()) {
+        scrollFraction.coerceIn(0f, 1f)
+    } else {
+        0f
+    }
+    if (itemCount <= 1 || contentSize <= 0 || viewportSize <= 0 || safeScrollFraction <= 0f) {
+        return EbookScrollbarScrollTarget(itemIndex = 0, itemScrollOffset = 0)
+    }
+    if (safeScrollFraction >= 1f) {
+        return EbookScrollbarScrollTarget(itemIndex = itemCount - 1, itemScrollOffset = 0)
+    }
+
+    val maximumScrollOffset = (contentSize - viewportSize).coerceAtLeast(0)
+    if (maximumScrollOffset == 0) {
+        return EbookScrollbarScrollTarget(itemIndex = 0, itemScrollOffset = 0)
+    }
+
+    val targetOffset = safeScrollFraction * maximumScrollOffset.toFloat()
+    val estimatedItemExtent = (contentSize.toFloat() / itemCount.toFloat()).coerceAtLeast(1f)
+    val targetIndex = (targetOffset / estimatedItemExtent)
+        .toInt()
+        .coerceIn(0, itemCount - 1)
+    val itemScrollOffset = (targetOffset - targetIndex * estimatedItemExtent)
+        .roundToInt()
+        .coerceAtLeast(0)
+    return EbookScrollbarScrollTarget(
+        itemIndex = targetIndex,
+        itemScrollOffset = itemScrollOffset
     )
 }
 

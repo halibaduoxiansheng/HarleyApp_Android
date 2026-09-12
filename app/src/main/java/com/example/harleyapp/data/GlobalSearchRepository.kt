@@ -354,6 +354,13 @@ class GlobalSearchRepository(
             SearchableFeature("mobile", "手机流量", "移动网络用量统计", "数据 网络 流量", "MOBILE_DATA"),
             SearchableFeature("flashlight", "手电筒", "亮度、频率和明灭时长控制", "闪光灯 爆闪 频闪", "FLASHLIGHT"),
             SearchableFeature("mao-quotes", "毛主席语录", "章节阅读、搜索收藏与本地导入", "毛泽东 毛主席 小红书 语录 章节 收藏 导入", "MAO_QUOTES"),
+            SearchableFeature(
+                "live-translation",
+                "实时翻译",
+                "内录英/日语声音并悬浮显示中文字幕",
+                "翻译 字幕 外语 外国电影 内录 实时 英语 日语 日文 中文 英译中 日译中",
+                "LIVE_TRANSLATION"
+            ),
             SearchableFeature("profile", "我的", "个人资料、主题、版本和快捷应用", "外观 设置 头像", "PROFILE")
         )
     }

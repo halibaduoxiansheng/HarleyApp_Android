@@ -34,6 +34,11 @@ android {
         versionCode = 5
         versionName = "1.0.5"
 
+        ndk {
+            // 静态sherpa AAR仅在过时32位x86目录残留共享ORT；排除该ABI可让其与M2M的ORT 1.28.0完全隔离。
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+        }
+
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField(
             type = "String",
@@ -57,6 +62,14 @@ android {
         compose = true
         buildConfig = true
     }
+
+    packaging {
+        jniLibs {
+            // static sherpa AAR的32位x86目录仍残留共享ORT；该ABI已不支持，合并阶段也必须显式排除。
+            excludes += "lib/x86/**"
+        }
+    }
+
 }
 
 dependencies {
@@ -74,7 +87,13 @@ dependencies {
     implementation(libs.androidx.camera.lifecycle)
     implementation(libs.androidx.camera.view)
     implementation(libs.zxing.core)
-    // ML Kit按需下载约30MB语言模型，模型就绪后翻译在手机本地完成，不上传书籍正文。
+    // sherpa-onnx把其ONNX Runtime静态链接进自身JNI，不再携带同名libonnxruntime.so，可与实时翻译运行库隔离。
+    implementation(files("libs/sherpa-onnx-static-link-onnxruntime-1.13.7.aar"))
+    // M2M100使用官方ONNX Runtime 1.28.0，避开1.27.0在新一代ARM处理器上的KleidiAI量化计算问题。
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.28.0")
+    // 仅用于安全解压官方tar.bz2模型包，运行时不会把音频或字幕发送给该库或外部服务。
+    implementation("org.apache.commons:commons-compress:1.28.0")
+    // ML Kit仅供现有电子书离线翻译使用；实时字幕翻译不创建ML Kit客户端，也不依赖其语言包。
     implementation("com.google.mlkit:translate:17.0.3")
     implementation(libs.androidx.health.connect.client)
     implementation(libs.androidx.room.runtime)

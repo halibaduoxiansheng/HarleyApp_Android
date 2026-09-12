@@ -1,0 +1,75 @@
+HarleyApp 实时翻译第三方组件与模型说明
+
+本文件用于保留实时翻译功能依赖项的名称、来源和许可入口。运行时音频与字幕不会发送给这些项目的维护者。
+
+1. SenseVoice Small int8（2024-07-17）
+   作者/权利方：Alibaba Group / FunAudioLLM / FunASR contributors
+   用途：英语、日语语音识别
+   模型名称：sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17
+   模型来源：https://github.com/k2-fsa/sherpa-onnx/releases/tag/asr-models
+   原项目：https://github.com/FunAudioLLM/SenseVoice
+   许可：FunASR Model Open Source License Agreement 1.1
+   完整许可：本目录 FUNASR_MODEL_LICENSE_1_1.txt
+
+2. sherpa-onnx 1.13.7
+   作者：sherpa development team / k2-fsa contributors
+   用途：Android 端 ONNX 语音识别和 VAD 推理
+   来源：https://github.com/k2-fsa/sherpa-onnx
+   许可：Apache License 2.0
+   完整许可：本目录 APACHE_LICENSE_2_0.txt
+
+3. Silero VAD
+   作者：Silero Team / snakers4 contributors
+   用途：本地语音活动检测
+   来源：https://github.com/snakers4/silero-vad
+   许可：MIT License
+   完整许可：本目录 SILERO_VAD_LICENSE.txt
+
+4. ONNX Runtime 1.28.0
+   作者：Microsoft Corporation
+   用途：M2M100 本地翻译的 Android Java 推理运行时；sherpa-onnx 使用其静态链接运行时
+   来源：https://github.com/microsoft/onnxruntime
+   许可：MIT License
+   完整许可：本目录 ONNX_RUNTIME_LICENSE.txt
+
+5. Apache Commons Compress 1.28.0
+   作者：The Apache Software Foundation
+   用途：流式解压本地模型归档
+   来源：https://commons.apache.org/proper/commons-compress/
+   许可：Apache License 2.0
+   完整许可：本目录 APACHE_LICENSE_2_0.txt
+   项目声明：本目录 APACHE_COMMONS_COMPRESS_NOTICE.txt
+
+6. Google ML Kit on-device Translation 17.0.3
+   用途：仅供现有电子书离线翻译；实时字幕翻译不创建 ML Kit 客户端或下载其语言包
+   使用指南：https://developers.google.com/ml-kit/language/translation/translation-terms
+   归属要求：https://cloud.google.com/translate/attribution
+   归属徽标：https://docs.cloud.google.com/static/translate/images/google-translate-attribution.zip
+   电子书译文适用 Google 的归属与免责声明；实时字幕译文由下述 M2M100 模型生成，不适用 Google attribution。
+
+   Required disclaimer:
+   THIS SERVICE MAY CONTAIN TRANSLATIONS POWERED BY GOOGLE. GOOGLE DISCLAIMS ALL WARRANTIES RELATED TO THE TRANSLATIONS, EXPRESS OR IMPLIED, INCLUDING ANY WARRANTIES OF ACCURACY, RELIABILITY, AND ANY IMPLIED WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+
+7. M2M100-418M
+   作者/权利方：Meta Platforms, Inc. and affiliates
+   用途：英语、日语到简体中文的本地实时字幕翻译
+   上游模型：https://huggingface.co/facebook/m2m100_418M
+   许可：MIT License
+   完整许可：本目录 M2M100_MODEL_LICENSE.txt
+
+8. Xenova/m2m100_418M ONNX conversion
+   用途：M2M100-418M 的第三方 INT8 ONNX 转换文件；不是 Meta 官方 ONNX 发布
+   固定提交：https://huggingface.co/Xenova/m2m100_418M/commit/cce333fc730dab2125fbc054a18fa2565db31095
+   下载文件：encoder_model_quantized.onnx、decoder_model_quantized.onnx、decoder_with_past_model_quantized.onnx、sentencepiece.bpe.model
+   上游模型许可：MIT License（本目录 M2M100_MODEL_LICENSE.txt）
+
+9. SentencePiece / Hugging Face M2M100 tokenizer contract
+   用途：本地 BPE 分词及 M2M100 语言 token 约定
+   来源：https://github.com/google/sentencepiece 与 https://github.com/huggingface/transformers
+   许可：Apache License 2.0
+   完整许可：本目录 APACHE_LICENSE_2_0.txt
+
+重要说明：
+- “本地运行”表示模型准备完成后的识别与翻译推理在手机上执行，不代表所有第三方组件均采用同一种许可。
+- 首次准备模型需要联网下载。各组件和模型仍受上述许可及使用条款约束。
+- 应用不会绕过 Android 播放音频捕获、DRM 或播放器悬浮窗限制。

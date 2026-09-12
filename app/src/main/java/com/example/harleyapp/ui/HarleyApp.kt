@@ -1332,6 +1332,11 @@ fun HarleyApp(
                             featureCenterPageName = FeatureCenterPage.DUAL_CAMERA.name
                             currentSectionName = AppSection.FEATURES.name
                         }
+
+                        HomeFeatureId.LIVE_TRANSLATION -> {
+                            featureCenterPageName = FeatureCenterPage.LIVE_TRANSLATION.name
+                            currentSectionName = AppSection.FEATURES.name
+                        }
                     }
                 },
                 englishWord = homeEnglishWord,

@@ -91,7 +91,8 @@ enum class FeatureCenterPage {
     QR_SCANNER,
     FLASHLIGHT,
     MAO_QUOTES,
-    DUAL_CAMERA
+    DUAL_CAMERA,
+    LIVE_TRANSLATION
 }
 
 /** 功能入口按下时的缩放比例，既要让反馈明显，也要避免文字产生过大的视觉抖动。 */
@@ -285,6 +286,9 @@ fun FeatureCenterScreen(
             onOpenDualCamera = {
                 onPageChanged(FeatureCenterPage.DUAL_CAMERA)
             },
+            onOpenLiveTranslation = {
+                onPageChanged(FeatureCenterPage.LIVE_TRANSLATION)
+            },
             onOpenWechatReminder = {
                 onPageChanged(FeatureCenterPage.WECHAT_REMINDER)
             },
@@ -417,6 +421,11 @@ fun FeatureCenterScreen(
             modifier = modifier,
             onBack = { onPageChanged(FeatureCenterPage.OVERVIEW) }
         )
+
+        FeatureCenterPage.LIVE_TRANSLATION -> LiveTranslationScreen(
+            modifier = modifier,
+            onBack = { onPageChanged(FeatureCenterPage.OVERVIEW) }
+        )
     }
 }
 
@@ -450,6 +459,7 @@ fun FeatureCenterScreen(
  * @param onOpenFlashlight 打开可调频率、时长和亮度的手电筒页回调。
  * @param onOpenMaoQuotes 打开毛主席语录章节阅读、搜索收藏与本地导入页的回调。
  * @param onOpenDualCamera 打开前后摄像头等分同屏预览页的回调。
+ * @param onOpenLiveTranslation 打开内录声音并显示悬浮字幕的实时翻译页回调。
  *
  * @return 无返回值，直接输出功能入口网格。
  */
@@ -479,6 +489,7 @@ private fun FeatureCenterOverview(
     onOpenFlashlight: () -> Unit,
     onOpenMaoQuotes: () -> Unit,
     onOpenDualCamera: () -> Unit,
+    onOpenLiveTranslation: () -> Unit,
     onOpenWechatReminder: () -> Unit,
     onOpenGeneralReminder: () -> Unit,
     onOpenLocalCleanup: () -> Unit
@@ -511,6 +522,7 @@ private fun FeatureCenterOverview(
         onOpenFlashlight = onOpenFlashlight,
         onOpenMaoQuotes = onOpenMaoQuotes,
         onOpenDualCamera = onOpenDualCamera,
+        onOpenLiveTranslation = onOpenLiveTranslation,
         onOpenWechatReminder = onOpenWechatReminder,
         onOpenGeneralReminder = onOpenGeneralReminder,
         onOpenLocalCleanup = onOpenLocalCleanup
@@ -725,6 +737,7 @@ private data class FeatureEntry(
  * @param onOpenFlashlight 打开手电筒和爆闪控制页回调。
  * @param onOpenMaoQuotes 打开毛主席语录章节阅读、搜索收藏与本地导入页的回调。
  * @param onOpenDualCamera 打开前后摄像头等分同屏预览页的回调。
+ * @param onOpenLiveTranslation 打开内录声音并显示悬浮字幕的实时翻译页回调。
  * @param onOpenWechatReminder 打开微信消息提醒的回调。
  * @param onOpenGeneralReminder 打开通知提醒的回调。
  * @param onOpenLocalCleanup 打开手机清理的回调。
@@ -749,6 +762,7 @@ private fun featureCenterEntries(
     onOpenFlashlight: () -> Unit,
     onOpenMaoQuotes: () -> Unit,
     onOpenDualCamera: () -> Unit,
+    onOpenLiveTranslation: () -> Unit,
     onOpenWechatReminder: () -> Unit,
     onOpenGeneralReminder: () -> Unit,
     onOpenLocalCleanup: () -> Unit
@@ -773,7 +787,8 @@ private fun featureCenterEntries(
         FeatureEntry(HomeFeatureId.BREATH_HOLD, "息", "深海憋气", "沉浸计时与本机记录", onOpenBreathHold),
         FeatureEntry(HomeFeatureId.FLASHLIGHT, "光", "手电筒", "亮度、频率与明灭时长控制", onOpenFlashlight),
         FeatureEntry(HomeFeatureId.MAO_QUOTES, "录", "毛主席语录", "章节阅读、搜索收藏与本地导入", onOpenMaoQuotes),
-        FeatureEntry(HomeFeatureId.DUAL_CAMERA, "双", "前后双摄", "等分同屏、点击互换与手势变焦", onOpenDualCamera)
+        FeatureEntry(HomeFeatureId.DUAL_CAMERA, "双", "前后双摄", "等分同屏、点击互换与手势变焦", onOpenDualCamera),
+        FeatureEntry(HomeFeatureId.LIVE_TRANSLATION, "译", "实时翻译", "内录英/日语声音并悬浮显示中文字幕", onOpenLiveTranslation)
     )
 }
 
@@ -808,6 +823,7 @@ private fun FeatureEntryCard(
         HomeFeatureId.APP_USAGE,
         HomeFeatureId.FLASHLIGHT,
         HomeFeatureId.DUAL_CAMERA,
+        HomeFeatureId.LIVE_TRANSLATION,
         HomeFeatureId.LOCAL_CLEANUP,
         HomeFeatureId.BACKUP -> {
             MaterialTheme.colorScheme.secondaryContainer to

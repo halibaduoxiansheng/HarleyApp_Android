@@ -29,6 +29,7 @@ class FeatureCenterOrderModelsTest {
         assertEquals(HomeFeatureId.TODAY, result[1])
         assertEquals(HomeFeatureId.entries.size, result.size)
         assertEquals(HomeFeatureId.entries.toSet(), result.toSet())
+        assertEquals(HomeFeatureId.LIVE_TRANSLATION, result.last())
     }
 
     /**

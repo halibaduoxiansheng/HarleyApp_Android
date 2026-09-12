@@ -14,6 +14,10 @@ import com.example.harleyapp.system.splitEbookTranslationText
 import com.example.harleyapp.ui.screens.EbookMeasuredTextPage
 import com.example.harleyapp.ui.screens.buildEbookShelfPages
 import com.example.harleyapp.ui.screens.buildEbookTableOfContents
+import com.example.harleyapp.ui.screens.calculateEbookScrollbarDragFraction
+import com.example.harleyapp.ui.screens.calculateEbookScrollbarScrollFraction
+import com.example.harleyapp.ui.screens.calculateEbookScrollbarScrollTarget
+import com.example.harleyapp.ui.screens.calculateEbookScrollbarThumbHeight
 import com.example.harleyapp.ui.screens.createOpaqueArgb
 import com.example.harleyapp.ui.screens.findEbookPageIndexForExcerpt
 import com.example.harleyapp.ui.screens.findEbookPageIndexForOffset
@@ -381,6 +385,171 @@ class EbookModelsTest {
         assertEquals("第一章 山边小村", chapters.first().title)
         assertEquals(0, chapters.first().pageIndex)
         assertEquals("第2000章 标题2000", chapters.last().title)
+    }
+
+    /**
+     * 验证目录滑轮会按可见比例设置滑块高度，并保证超长目录仍保留足够大的触摸区域。
+     *
+     * @return 无返回值；比例高度、最小触摸高度或非法输入处理错误时由JUnit报告失败。
+     */
+    @Test
+    fun tableOfContentsScrollbarKeepsVisibleAndTouchableThumb() {
+        assertEquals(
+            200f,
+            calculateEbookScrollbarThumbHeight(
+                trackHeightPx = 400f,
+                minimumThumbHeightPx = 48f,
+                contentSize = 800,
+                viewportSize = 400
+            ),
+            0.001f
+        )
+        assertEquals(
+            48f,
+            calculateEbookScrollbarThumbHeight(
+                trackHeightPx = 400f,
+                minimumThumbHeightPx = 48f,
+                contentSize = 80_000,
+                viewportSize = 400
+            ),
+            0.001f
+        )
+        assertEquals(
+            0f,
+            calculateEbookScrollbarThumbHeight(
+                trackHeightPx = 0f,
+                minimumThumbHeightPx = 48f,
+                contentSize = 8_000,
+                viewportSize = 400
+            ),
+            0.001f
+        )
+    }
+
+    /**
+     * 验证目录普通滚动时，滑轮进度可以准确覆盖开头、中间和末尾位置。
+     *
+     * @return 无返回值；首尾固定值或中间项内偏移换算错误时由JUnit报告失败。
+     */
+    @Test
+    fun tableOfContentsScrollbarTracksListPosition() {
+        assertEquals(
+            0f,
+            calculateEbookScrollbarScrollFraction(
+                scrollOffset = 0,
+                contentSize = 10_000,
+                viewportSize = 1_000
+            ),
+            0.001f
+        )
+        assertEquals(
+            0.5f,
+            calculateEbookScrollbarScrollFraction(
+                scrollOffset = 4_500,
+                contentSize = 10_000,
+                viewportSize = 1_000
+            ),
+            0.001f
+        )
+        assertEquals(
+            1f,
+            calculateEbookScrollbarScrollFraction(
+                scrollOffset = 9_000,
+                contentSize = 10_000,
+                viewportSize = 1_000
+            ),
+            0.001f
+        )
+    }
+
+    /**
+     * 验证手动拖拽会保留滑块内抓取点、限制轨道边界，并直接定位到目标目录项附近。
+     *
+     * @return 无返回值；拖拽比例、边界限制或目标目录项位置错误时由JUnit报告失败。
+     */
+    @Test
+    fun tableOfContentsScrollbarDragMapsToFullCatalog() {
+        assertEquals(
+            0.5f,
+            calculateEbookScrollbarDragFraction(
+                pointerYPx = 190f,
+                dragGrabOffsetPx = 10f,
+                thumbTravelPx = 360f
+            ),
+            0.001f
+        )
+        assertEquals(
+            0f,
+            calculateEbookScrollbarDragFraction(
+                pointerYPx = -20f,
+                dragGrabOffsetPx = 10f,
+                thumbTravelPx = 360f
+            ),
+            0.001f
+        )
+        assertEquals(
+            1f,
+            calculateEbookScrollbarDragFraction(
+                pointerYPx = 500f,
+                dragGrabOffsetPx = 10f,
+                thumbTravelPx = 360f
+            ),
+            0.001f
+        )
+        assertEquals(
+            0f,
+            calculateEbookScrollbarDragFraction(
+                pointerYPx = Float.NaN,
+                dragGrabOffsetPx = 10f,
+                thumbTravelPx = 360f
+            ),
+            0.001f
+        )
+        assertEquals(
+            0,
+            calculateEbookScrollbarScrollTarget(
+                scrollFraction = -1f,
+                contentSize = 2_000,
+                viewportSize = 800,
+                itemCount = 20
+            ).itemIndex
+        )
+        assertEquals(
+            6,
+            calculateEbookScrollbarScrollTarget(
+                scrollFraction = 0.5f,
+                contentSize = 2_000,
+                viewportSize = 800,
+                itemCount = 20
+            ).itemIndex
+        )
+        assertEquals(
+            60,
+            calculateEbookScrollbarScrollTarget(
+                scrollFraction = 0.55f,
+                contentSize = 2_000,
+                viewportSize = 800,
+                itemCount = 20
+            ).itemScrollOffset
+        )
+        assertEquals(
+            1_999,
+            calculateEbookScrollbarScrollTarget(
+                scrollFraction = 1f,
+                contentSize = 200_000,
+                viewportSize = 800,
+                itemCount = 2_000
+            ).itemIndex
+        )
+        assertEquals(
+            0,
+            calculateEbookScrollbarScrollTarget(
+                scrollFraction = Float.NaN,
+                contentSize = 2_000,
+                viewportSize = 800,
+                itemCount = 20
+            ).itemIndex
+        )
     }
 
     /**

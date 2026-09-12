@@ -3,4 +3,4 @@
     android:antialias="true"
     android:filter="true"
     android:gravity="fill"
-    android:src="@drawable/ic_family_launcher_art" />
+    android:src="@drawable/ic_watermelon_launcher_art" />

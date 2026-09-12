@@ -741,6 +741,14 @@ private fun homeFeatureEntries(
             symbol = "双",
             statusLabel = "设备",
             onClick = { onOpenFeature(HomeFeatureId.DUAL_CAMERA) }
+        ),
+        HomeFeatureEntry(
+            id = HomeFeatureId.LIVE_TRANSLATION,
+            title = "实时翻译",
+            description = "内录英/日语声音并显示中文字幕",
+            symbol = "译",
+            statusLabel = "本地",
+            onClick = { onOpenFeature(HomeFeatureId.LIVE_TRANSLATION) }
         )
     )
 }

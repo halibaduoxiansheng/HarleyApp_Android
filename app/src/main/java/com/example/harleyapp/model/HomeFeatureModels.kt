@@ -27,7 +27,8 @@ enum class HomeFeatureId {
     BREATH_HOLD,
     FLASHLIGHT,
     MAO_QUOTES,
-    DUAL_CAMERA
+    DUAL_CAMERA,
+    LIVE_TRANSLATION
 }
 
 /** 首次安装或旧版本升级时沿用首页原有的三个功能入口。 */
