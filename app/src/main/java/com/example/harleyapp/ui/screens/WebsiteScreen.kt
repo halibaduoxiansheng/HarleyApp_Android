@@ -11,8 +11,12 @@ import android.graphics.Bitmap
 import android.os.Handler
 import android.os.Looper
 import android.os.Message
+import android.os.SystemClock
 import android.util.Log
+import android.view.HapticFeedbackConstants
+import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.ViewGroup
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
@@ -21,6 +25,7 @@ import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.FrameLayout
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -120,6 +125,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.roundToInt
 
 /**
@@ -398,6 +404,12 @@ private fun WebsiteTabSession(
     var fullscreenBallOffsetY by remember(tab.id) {
         mutableFloatStateOf(0f)
     }
+    var fullscreenHoldDirection by remember(tab.id) {
+        mutableStateOf<FullscreenHoldDirection?>(null)
+    }
+    var fullscreenHoldRevision by remember(tab.id) {
+        mutableIntStateOf(0)
+    }
     val currentOnFullscreenChanged by rememberUpdatedState(onFullscreenChanged)
     val currentOnEbookDownloadRequested by rememberUpdatedState(onEbookDownloadRequested)
     val currentOnBookmarkCurrentPage by rememberUpdatedState(onBookmarkCurrentPage)
@@ -435,6 +447,8 @@ private fun WebsiteTabSession(
     /** 关闭当前全屏View并只回调网站一次。 */
     fun exitFullscreen() {
         val content = fullscreenContent ?: return
+        fullscreenHoldRevision++
+        fullscreenHoldDirection = null
         fullscreenContent = null
         fullscreenControlsLocked = false
         fullscreenControlsVisible = false
@@ -481,6 +495,8 @@ private fun WebsiteTabSession(
                     fullscreenControlsVisible = false
                     showFullscreenRatePicker = false
                     fullscreenBallOffsetY = 0f
+                    fullscreenHoldRevision++
+                    fullscreenHoldDirection = null
                     fullscreenControlRevision++
                 } else {
                     callback.onCustomViewHidden()
@@ -514,6 +530,66 @@ private fun WebsiteTabSession(
                     currentOnOpenChildTab(url)
                 }
             }
+        )
+    }
+    val webViewReleased = remember(webView) {
+        AtomicBoolean(false)
+    }
+
+    /**
+     * 启动一次全屏左右半屏长按媒体操作。
+     *
+     * 使用方法：仅由全屏原生触摸容器在系统长按阈值成立后调用。函数用修订号隔离异步脚本回调，
+     * 防止用户快速松手或重新长按后，旧回调覆盖新一轮界面状态。
+     *
+     * @param direction 本次长按位于左侧快退区还是右侧快进区。
+     * @return 无返回值；网页没有可控制的标准HTML媒体时通过顶部提示告知用户。
+     */
+    fun beginFullscreenHold(direction: FullscreenHoldDirection) {
+        if (webViewReleased.get()) return
+
+        fullscreenHoldRevision++
+        val requestRevision = fullscreenHoldRevision
+        fullscreenHoldDirection = direction
+        val onMediaCount: (Int) -> Unit = { count ->
+            if (!webViewReleased.get() &&
+                requestRevision == fullscreenHoldRevision &&
+                count <= 0
+            ) {
+                fullscreenHoldDirection = null
+                toolMessage = "当前全屏内容暂不支持长按控制"
+            }
+        }
+
+        when (direction) {
+            FullscreenHoldDirection.REWIND -> {
+                scriptController.beginFullscreenHoldRewind(webView, onMediaCount)
+            }
+
+            FullscreenHoldDirection.FAST_FORWARD -> {
+                scriptController.beginFullscreenHoldFastForward(webView, onMediaCount)
+            }
+        }
+    }
+
+    /**
+     * 结束当前全屏长按操作并让网页脚本恢复原播放状态或原倍速。
+     *
+     * 使用方法：原生触摸容器会在抬手、系统取消、多指接管、禁用手势及脱离窗口时调用。脚本侧清理
+     * 本身幂等，因此退出全屏和生命周期清理重复触发也不会二次改变媒体状态。
+     *
+     * @param restorePlayback true表示用户正常抬手、触摸被系统取消或在前台退出全屏，可恢复左侧回退前
+     * 的播放状态；false用于切换标签、进入后台或销毁页面，只清理会话而不重新播放媒体。
+     * @return 无返回值。
+     */
+    fun endFullscreenHold(restorePlayback: Boolean = true) {
+        fullscreenHoldRevision++
+        fullscreenHoldDirection = null
+        if (webViewReleased.get()) return
+
+        scriptController.endFullscreenHold(
+            webView = webView,
+            restorePlayback = restorePlayback
         )
     }
 
@@ -596,6 +672,7 @@ private fun WebsiteTabSession(
         if (isActive) {
             webView.onResume()
         } else {
+            endFullscreenHold(restorePlayback = false)
             exitFullscreen()
             pauseWebsiteMedia(webView)
             webView.keepScreenOn = false
@@ -694,6 +771,11 @@ private fun WebsiteTabSession(
             if (currentIsActive) {
                 currentOnFullscreenChanged(false)
             }
+            scriptController.endFullscreenHold(
+                webView = webView,
+                restorePlayback = false
+            )
+            webViewReleased.set(true)
             webView.keepScreenOn = false
             webView.onPause()
             webView.stopLoading()
@@ -718,9 +800,31 @@ private fun WebsiteTabSession(
         ) {
             AndroidView(
                 modifier = Modifier.fillMaxSize(),
-                factory = {
-                    (content.view.parent as? ViewGroup)?.removeView(content.view)
-                    content.view
+                factory = { androidContext ->
+                    FullscreenHoldGestureHost(androidContext).apply {
+                        attachContent(content.view)
+                        updateGestureHandling(
+                            enabled = !fullscreenControlsLocked && !showFullscreenRatePicker,
+                            onHoldStarted = ::beginFullscreenHold,
+                            onHoldEnded = { restorePlayback ->
+                                endFullscreenHold(
+                                    restorePlayback = restorePlayback && currentIsActive
+                                )
+                            }
+                        )
+                    }
+                },
+                update = { gestureHost ->
+                    gestureHost.attachContent(content.view)
+                    gestureHost.updateGestureHandling(
+                        enabled = !fullscreenControlsLocked && !showFullscreenRatePicker,
+                        onHoldStarted = ::beginFullscreenHold,
+                        onHoldEnded = { restorePlayback ->
+                            endFullscreenHold(
+                                restorePlayback = restorePlayback && currentIsActive
+                            )
+                        }
+                    )
                 }
             )
 
@@ -746,6 +850,34 @@ private fun WebsiteTabSession(
                         text = message,
                         color = Color.White,
                         style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
+
+            fullscreenHoldDirection?.let { direction ->
+                val isRewinding = direction == FullscreenHoldDirection.REWIND
+                val holdDescription = if (isRewinding) {
+                    "左侧长按，正在三倍速倒退"
+                } else {
+                    "右侧长按，正在三倍速播放"
+                }
+                Surface(
+                    modifier = Modifier
+                        .align(if (isRewinding) Alignment.CenterStart else Alignment.CenterEnd)
+                        .padding(horizontal = 48.dp)
+                        .clearAndSetSemantics {
+                            contentDescription = holdDescription
+                        },
+                    color = Color.Black.copy(alpha = 0.62f),
+                    shape = MaterialTheme.shapes.extraLarge,
+                    shadowElevation = 8.dp
+                ) {
+                    Text(
+                        modifier = Modifier.padding(horizontal = 18.dp, vertical = 10.dp),
+                        text = if (isRewinding) "◀◀ 3× 倒退" else "3× 加速 ▶▶",
+                        color = Color.White,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
                     )
                 }
             }
@@ -1778,7 +1910,8 @@ private fun WebsiteNewTabPage(
  *
  * 使用方法：
  * 标签切到后台或用户离开“网站”一级页面时，在[WebView.onPause]之前调用。函数只执行pause，
- * 不修改播放进度、页面地址、历史或DOM；跨域iframe和非标准播放器仍由WebView自身的onPause处理。
+ * 不修改播放进度、页面地址、历史或DOM。已注入工具脚本时也会暂停可访问的同源iframe；跨域iframe
+ * 和非标准播放器仍由WebView自身的onPause处理。
  *
  * @param webView 需要暂停媒体但继续保留页面状态的标签WebView。
  * @return 无返回值；网页没有标准媒体元素时安全地不执行任何操作。
@@ -1787,8 +1920,12 @@ private fun pauseWebsiteMedia(webView: WebView) {
     webView.evaluateJavascript(
         """
         (function() {
-          document.querySelectorAll('video, audio').forEach(function(media) {
-            if (!media.paused) media.pause();
+          var tools = window.__harleyWebToolsV1;
+          var documents = tools && tools.documents ? tools.documents() : [document];
+          documents.forEach(function(doc) {
+            doc.querySelectorAll('video, audio').forEach(function(media) {
+              if (!media.paused) media.pause();
+            });
           });
         })();
         """.trimIndent(),
@@ -2440,6 +2577,324 @@ private class PopupCleanupWebChromeClient(
     }
 }
 
+/** 全屏长按所在区域，左侧连续倒退，右侧临时加速播放。 */
+internal enum class FullscreenHoldDirection {
+    REWIND,
+    FAST_FORWARD
+}
+
+/**
+ * 根据触点位置判断全屏长按操作方向。
+ *
+ * 使用方法：原生全屏手势容器收到单指按下时调用。屏幕中线归入右侧快进区，底部播放器控制条
+ * 安全带不启动长按；无效尺寸、非有限坐标或落在View边界外的坐标返回null。
+ *
+ * @param pointerX 触点相对全屏容器左边缘的横坐标，单位为像素。
+ * @param pointerY 触点相对全屏容器上边缘的纵坐标，单位为像素。
+ * @param viewWidth 全屏容器当前宽度，单位为像素。
+ * @param viewHeight 全屏容器当前高度，单位为像素。
+ * @param bottomExclusionHeight 为播放器进度条和底部原生控件预留的高度，单位为像素。
+ * @return 左侧返回[FullscreenHoldDirection.REWIND]，右侧返回
+ * [FullscreenHoldDirection.FAST_FORWARD]，无效输入返回null。
+ */
+internal fun fullscreenHoldDirectionForPosition(
+    pointerX: Float,
+    pointerY: Float,
+    viewWidth: Int,
+    viewHeight: Int,
+    bottomExclusionHeight: Float
+): FullscreenHoldDirection? {
+    val safeBottomExclusion = bottomExclusionHeight
+        .takeIf { it.isFinite() }
+        ?.coerceIn(0f, viewHeight.coerceAtLeast(0).toFloat())
+        ?: return null
+    val gestureBottom = viewHeight - safeBottomExclusion
+    if (!pointerX.isFinite() ||
+        !pointerY.isFinite() ||
+        viewWidth <= 0 ||
+        viewHeight <= 0 ||
+        pointerX < 0f ||
+        pointerX > viewWidth.toFloat() ||
+        pointerY < 0f ||
+        pointerY >= gestureBottom
+    ) {
+        return null
+    }
+    return if (pointerX < viewWidth / 2f) {
+        FullscreenHoldDirection.REWIND
+    } else {
+        FullscreenHoldDirection.FAST_FORWARD
+    }
+}
+
+/**
+ * 在不破坏播放器短按和拖动的前提下识别全屏左右半屏长按。
+ *
+ * 使用方法：通过[attachContent]挂载Chromium提供的全屏View，再由[updateGestureHandling]传入当前
+ * 是否允许手势及开始、结束回调。未达到系统长按阈值的事件会完整转发给子View；长按成立后先向
+ * 子View发送ACTION_CANCEL，再由本容器接管到抬手或取消，避免网页播放器同时执行自身长按动作。
+ *
+ * @param context 当前全屏页面使用的Android上下文。
+ */
+private class FullscreenHoldGestureHost(context: Context) : FrameLayout(context) {
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val touchSlopSquared = ViewConfiguration.get(context).scaledTouchSlop.let { slop ->
+        slop.toFloat() * slop.toFloat()
+    }
+    private val bottomControlExclusionPixels =
+        FULLSCREEN_HOLD_BOTTOM_CONTROL_EXCLUSION_DP * resources.displayMetrics.density
+    private var gestureHandlingEnabled = true
+    private var sequenceActive = false
+    private var longPressEligible = false
+    private var holdStarted = false
+    private var captureUntilGestureEnd = false
+    private var activePointerId = INVALID_POINTER_ID
+    private var downTimeMillis = 0L
+    private var downX = 0f
+    private var downY = 0f
+    private var lastX = 0f
+    private var lastY = 0f
+    private var pendingDirection: FullscreenHoldDirection? = null
+    private var onHoldStarted: (FullscreenHoldDirection) -> Unit = {}
+    private var onHoldEnded: (Boolean) -> Unit = {}
+    private val beginHoldRunnable = Runnable { beginHoldIfEligible() }
+
+    /**
+     * 把当前Chromium全屏View挂入手势容器并铺满可用区域。
+     *
+     * @param contentView WebChromeClient交给宿主显示的全屏View。
+     * @return 无返回值；重复传入同一View时不会重新挂载或打断当前触摸。
+     */
+    fun attachContent(contentView: View) {
+        if (childCount == 1 && getChildAt(0) === contentView) return
+
+        cancelPendingLongPress()
+        finishActiveHold(restorePlayback = false)
+        resetTouchSequence()
+        (contentView.parent as? ViewGroup)?.removeView(contentView)
+        removeAllViews()
+        addView(
+            contentView,
+            LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)
+        )
+    }
+
+    /**
+     * 更新长按开关与回调，供Compose重组时同步锁屏和倍速选择器状态。
+     *
+     * @param enabled true允许新长按；false取消尚未成立的长按并结束已启动操作。
+     * @param onHoldStarted 长按成立后的方向回调，每轮触摸最多调用一次。
+     * @param onHoldEnded 已成立长按结束后的清理回调；参数true允许恢复播放，false只做安全清理。
+     * @return 无返回值。
+     */
+    fun updateGestureHandling(
+        enabled: Boolean,
+        onHoldStarted: (FullscreenHoldDirection) -> Unit,
+        onHoldEnded: (Boolean) -> Unit
+    ) {
+        this.onHoldStarted = onHoldStarted
+        this.onHoldEnded = onHoldEnded
+        if (gestureHandlingEnabled && !enabled) {
+            cancelPendingLongPress()
+            finishActiveHold(restorePlayback = true)
+        }
+        gestureHandlingEnabled = enabled
+    }
+
+    /**
+     * 旁路观察全屏播放器触摸，并在长按成立前保持对子View的原始事件转发。
+     *
+     * @param event Android触摸事件。
+     * @return 当前序列由子View或本容器接收时返回true，确保后续事件持续到达同一容器。
+     */
+    override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+        if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+            prepareTouchSequence(event)
+        } else if (sequenceActive) {
+            updateTouchSequence(event)
+        }
+
+        val sequenceWasActive = sequenceActive
+        val capturedBeforeDispatch = captureUntilGestureEnd
+        val childHandled = if (capturedBeforeDispatch) {
+            false
+        } else {
+            super.dispatchTouchEvent(event)
+        }
+
+        if (event.actionMasked == MotionEvent.ACTION_UP ||
+            event.actionMasked == MotionEvent.ACTION_CANCEL
+        ) {
+            cancelPendingLongPress()
+            finishActiveHold(restorePlayback = true)
+            resetTouchSequence()
+        }
+
+        return childHandled || sequenceWasActive || capturedBeforeDispatch
+    }
+
+    /**
+     * View脱离全屏窗口时结束脚本操作；外层会结合页面生命周期决定是否真正恢复播放。
+     *
+     * @return 无返回值。
+     */
+    override fun onDetachedFromWindow() {
+        cancelPendingLongPress()
+        finishActiveHold(restorePlayback = true)
+        resetTouchSequence()
+        super.onDetachedFromWindow()
+    }
+
+    /**
+     * 初始化单指触摸序列并安排系统标准长按超时。
+     *
+     * @param event 当前ACTION_DOWN事件。
+     * @return 无返回值。
+     */
+    private fun prepareTouchSequence(event: MotionEvent) {
+        cancelPendingLongPress()
+        finishActiveHold(restorePlayback = true)
+        resetTouchSequence()
+
+        sequenceActive = true
+        activePointerId = event.getPointerId(0)
+        downTimeMillis = event.downTime
+        downX = event.x
+        downY = event.y
+        lastX = event.x
+        lastY = event.y
+        pendingDirection = fullscreenHoldDirectionForPosition(
+            pointerX = event.x,
+            pointerY = event.y,
+            viewWidth = width,
+            viewHeight = height,
+            bottomExclusionHeight = bottomControlExclusionPixels
+        )
+        longPressEligible = gestureHandlingEnabled && pendingDirection != null
+        if (longPressEligible) {
+            mainHandler.postDelayed(
+                beginHoldRunnable,
+                ViewConfiguration.getLongPressTimeout().toLong()
+            )
+        }
+    }
+
+    /**
+     * 更新移动、多指和结束事件对应的长按资格。
+     *
+     * @param event 当前非ACTION_DOWN触摸事件。
+     * @return 无返回值；长按成立前明显移动或加入第二根手指时会取消本轮资格。
+     */
+    private fun updateTouchSequence(event: MotionEvent) {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_POINTER_DOWN -> {
+                cancelPendingLongPress()
+                finishActiveHold(restorePlayback = true)
+            }
+
+            MotionEvent.ACTION_MOVE -> {
+                val pointerIndex = event.findPointerIndex(activePointerId)
+                if (pointerIndex < 0) {
+                    cancelPendingLongPress()
+                    finishActiveHold(restorePlayback = true)
+                    return
+                }
+                lastX = event.getX(pointerIndex)
+                lastY = event.getY(pointerIndex)
+                if (!holdStarted) {
+                    val deltaX = lastX - downX
+                    val deltaY = lastY - downY
+                    if (deltaX * deltaX + deltaY * deltaY > touchSlopSquared) {
+                        cancelPendingLongPress()
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * 在触点仍有效时正式接管长按，并先取消子播放器收到的原始触摸序列。
+     *
+     * @return 无返回值；资格已取消、手势被禁用或方向无效时安全忽略。
+     */
+    private fun beginHoldIfEligible() {
+        val direction = pendingDirection
+        if (!sequenceActive || !gestureHandlingEnabled || !longPressEligible || direction == null) {
+            return
+        }
+
+        longPressEligible = false
+        holdStarted = true
+        captureUntilGestureEnd = true
+        sendCancelToContent()
+        performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+        onHoldStarted(direction)
+    }
+
+    /**
+     * 向已收到ACTION_DOWN的播放器补发ACTION_CANCEL，让长按后由宿主独占剩余事件。
+     *
+     * @return 无返回值。
+     */
+    private fun sendCancelToContent() {
+        val cancelEvent = MotionEvent.obtain(
+            downTimeMillis,
+            SystemClock.uptimeMillis(),
+            MotionEvent.ACTION_CANCEL,
+            lastX,
+            lastY,
+            0
+        )
+        try {
+            super.dispatchTouchEvent(cancelEvent)
+        } finally {
+            cancelEvent.recycle()
+        }
+    }
+
+    /**
+     * 取消尚未成立的长按计时，不改变已经接管的触摸序列。
+     *
+     * @return 无返回值。
+     */
+    private fun cancelPendingLongPress() {
+        mainHandler.removeCallbacks(beginHoldRunnable)
+        longPressEligible = false
+        pendingDirection = null
+    }
+
+    /**
+     * 已启动长按存在时只回调一次结束处理。
+     *
+     * @param restorePlayback true允许恢复左侧长按前的播放状态；false只停止操作。
+     * @return 无返回值。
+     */
+    private fun finishActiveHold(restorePlayback: Boolean) {
+        if (!holdStarted) return
+        holdStarted = false
+        onHoldEnded(restorePlayback)
+    }
+
+    /**
+     * 清空当前原生触摸序列的全部瞬时字段，供抬手、取消和View解绑后复用宿主。
+     *
+     * @return 无返回值。
+     */
+    private fun resetTouchSequence() {
+        sequenceActive = false
+        longPressEligible = false
+        holdStarted = false
+        captureUntilGestureEnd = false
+        activePointerId = INVALID_POINTER_ID
+        downTimeMillis = 0L
+        pendingDirection = null
+    }
+
+    private companion object {
+        const val INVALID_POINTER_ID = -1
+    }
+}
+
 /**
  * 保存一次WebView自定义全屏会话并保证完成回调最多执行一次。
  *
@@ -2654,6 +3109,8 @@ private const val TAB_OVERVIEW_SCRIM_ANIMATION_MILLIS = 180
 private const val POPUP_CAPTURE_TIMEOUT_MILLIS = 15_000L
 /** 普通网页模式检查视频播放状态的间隔，兼顾自动弹出及时性和WebView脚本开销。 */
 private const val PLAYING_VIDEO_CHECK_INTERVAL_MILLIS = 1_200L
+/** 全屏底部为原生进度条和播放器按钮预留的长按禁用高度，单位为dp。 */
+private const val FULLSCREEN_HOLD_BOTTOM_CONTROL_EXCLUSION_DP = 88f
 private val FULLSCREEN_FLOATING_BALL_SIZE = 52.dp
 private val FULLSCREEN_FLOATING_BALL_MAX_VERTICAL_OFFSET = 120.dp
 private val FULLSCREEN_FLOATING_PANEL_MAX_WIDTH = 520.dp

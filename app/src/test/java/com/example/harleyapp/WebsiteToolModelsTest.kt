@@ -8,11 +8,14 @@ import com.example.harleyapp.model.MIN_TEXT_ZOOM_PERCENT
 import com.example.harleyapp.model.MIN_WEBSITE_PLAYBACK_RATE
 import com.example.harleyapp.model.WebsiteBookmarkSaveResult
 import com.example.harleyapp.model.WebsiteToolSettings
+import com.example.harleyapp.ui.screens.FullscreenHoldDirection
 import com.example.harleyapp.ui.screens.calculateFullscreenBallOffset
+import com.example.harleyapp.ui.screens.fullscreenHoldDirectionForPosition
 import com.example.harleyapp.ui.screens.shouldShowInlineWebsiteScriptTools
 import com.example.harleyapp.ui.screens.websiteBookmarkSaveMessage
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -95,6 +98,99 @@ class WebsiteToolModelsTest {
         assertEquals(120f, calculateFullscreenBallOffset(80f, 90f, 120f), 0.001f)
         assertEquals(-120f, calculateFullscreenBallOffset(-80f, -90f, 120f), 0.001f)
         assertEquals(0f, calculateFullscreenBallOffset(20f, 10f, -1f), 0.001f)
+    }
+
+    /**
+     * 验证全屏左、右半区和中线分别映射到正确的三倍速长按方向。
+     *
+     * @return 无返回值；任一合法坐标被分配到错误区域时由JUnit报告失败。
+     */
+    @Test
+    fun fullscreenHoldUsesLeftAndRightScreenHalves() {
+        assertEquals(
+            FullscreenHoldDirection.REWIND,
+            fullscreenHoldDirectionForPosition(
+                pointerX = 0f,
+                pointerY = 100f,
+                viewWidth = 1_000,
+                viewHeight = 600,
+                bottomExclusionHeight = 80f
+            )
+        )
+        assertEquals(
+            FullscreenHoldDirection.REWIND,
+            fullscreenHoldDirectionForPosition(
+                pointerX = 499.9f,
+                pointerY = 519.9f,
+                viewWidth = 1_000,
+                viewHeight = 600,
+                bottomExclusionHeight = 80f
+            )
+        )
+        assertEquals(
+            FullscreenHoldDirection.FAST_FORWARD,
+            fullscreenHoldDirectionForPosition(
+                pointerX = 500f,
+                pointerY = 100f,
+                viewWidth = 1_000,
+                viewHeight = 600,
+                bottomExclusionHeight = 80f
+            )
+        )
+        assertEquals(
+            FullscreenHoldDirection.FAST_FORWARD,
+            fullscreenHoldDirectionForPosition(
+                pointerX = 1_000f,
+                pointerY = 100f,
+                viewWidth = 1_000,
+                viewHeight = 600,
+                bottomExclusionHeight = 80f
+            )
+        )
+    }
+
+    /**
+     * 验证布局无有效宽度或触点位于容器外时不会启动媒体长按操作。
+     *
+     * @return 无返回值；任一无效输入产生方向时由JUnit报告失败。
+     */
+    @Test
+    fun fullscreenHoldRejectsInvalidCoordinates() {
+        /**
+         * 使用统一的有效容器尺寸构造待验证坐标。
+         *
+         * @param pointerX 待验证横坐标。
+         * @param pointerY 待验证纵坐标。
+         * @param viewWidth 容器宽度。
+         * @param viewHeight 容器高度。
+         * @param bottomExclusionHeight 底部控制区排除高度。
+         * @return 合法触点对应方向，无效输入返回null。
+         */
+        fun direction(
+            pointerX: Float = 10f,
+            pointerY: Float = 10f,
+            viewWidth: Int = 1_000,
+            viewHeight: Int = 600,
+            bottomExclusionHeight: Float = 80f
+        ): FullscreenHoldDirection? {
+            return fullscreenHoldDirectionForPosition(
+                pointerX = pointerX,
+                pointerY = pointerY,
+                viewWidth = viewWidth,
+                viewHeight = viewHeight,
+                bottomExclusionHeight = bottomExclusionHeight
+            )
+        }
+
+        assertNull(direction(viewWidth = 0))
+        assertNull(direction(viewHeight = 0))
+        assertNull(direction(pointerX = -0.1f))
+        assertNull(direction(pointerX = 1_000.1f))
+        assertNull(direction(pointerY = -0.1f))
+        assertNull(direction(pointerY = 520f))
+        assertNull(direction(pointerX = Float.NaN))
+        assertNull(direction(pointerY = Float.NaN))
+        assertNull(direction(bottomExclusionHeight = Float.NaN))
     }
 
     /**
