@@ -28,6 +28,7 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -57,6 +58,7 @@ import androidx.compose.ui.zIndex
 import com.example.harleyapp.model.HomeFeatureId
 import com.example.harleyapp.data.ChineseGrowthRepository
 import com.example.harleyapp.data.EbookRepository
+import com.example.harleyapp.model.CookCatalog
 import com.example.harleyapp.model.EnglishWord
 import com.example.harleyapp.model.LocalCleanupResult
 import com.example.harleyapp.model.LocalCleanupStatus
@@ -92,7 +94,8 @@ enum class FeatureCenterPage {
     FLASHLIGHT,
     MAO_QUOTES,
     DUAL_CAMERA,
-    LIVE_TRANSLATION
+    LIVE_TRANSLATION,
+    COOK
 }
 
 /** 功能入口按下时的缩放比例，既要让反馈明显，也要避免文字产生过大的视觉抖动。 */
@@ -141,6 +144,10 @@ private const val FEATURE_ENTRY_COLOR_ANIMATION_MILLIS = 90
  * @param initialEnglishWordId 全局搜索要求直接打开的英语单词id。
  * @param initialNotebookArticleId 全局搜索要求直接打开的记事本文章id。
  * @param initialEbookId 全局搜索要求直接打开的电子书id。
+ * @param initialCookRecipeId 全局搜索要求直接打开的菜谱id。
+ * @param cookCatalog 已在后台加载的完整离线菜谱目录；加载中或失败时为null。
+ * @param cookLoadError 菜谱目录加载失败的用户提示；加载中时为空字符串。
+ * @param onReloadCookCatalog 用户在失败提示中点击重试后的回调。
  * @param ebookRepository 电子书原文件、离线索引和阅读进度仓库。
  * @param chineseGrowthRepository 语文年级选择、在线阅读和缓存仓库。
  * @param onEbookImmersiveChanged 电子书沉浸阅读状态变化回调，用于隐藏或恢复App底部导航栏。
@@ -205,6 +212,10 @@ fun FeatureCenterScreen(
     initialEnglishWordId: String?,
     initialNotebookArticleId: String?,
     initialEbookId: String?,
+    initialCookRecipeId: String?,
+    cookCatalog: CookCatalog?,
+    cookLoadError: String,
+    onReloadCookCatalog: () -> Unit,
     ebookRepository: EbookRepository,
     chineseGrowthRepository: ChineseGrowthRepository,
     onEbookImmersiveChanged: (Boolean) -> Unit,
@@ -288,6 +299,9 @@ fun FeatureCenterScreen(
             },
             onOpenLiveTranslation = {
                 onPageChanged(FeatureCenterPage.LIVE_TRANSLATION)
+            },
+            onOpenCook = {
+                onPageChanged(FeatureCenterPage.COOK)
             },
             onOpenWechatReminder = {
                 onPageChanged(FeatureCenterPage.WECHAT_REMINDER)
@@ -426,6 +440,39 @@ fun FeatureCenterScreen(
             modifier = modifier,
             onBack = { onPageChanged(FeatureCenterPage.OVERVIEW) }
         )
+
+        FeatureCenterPage.COOK -> {
+            val loadedCatalog = cookCatalog
+            if (loadedCatalog != null) {
+                CookScreen(
+                    modifier = modifier,
+                    catalog = loadedCatalog,
+                    initialRecipeId = initialCookRecipeId,
+                    onInitialRecipeConsumed = onInitialSearchTargetConsumed,
+                    onBack = { onPageChanged(FeatureCenterPage.OVERVIEW) }
+                )
+            } else {
+                FeatureCardDetailScreen(
+                    modifier = modifier,
+                    title = "Cook 菜谱",
+                    subtitle = "正在准备离线菜谱库",
+                    onBack = { onPageChanged(FeatureCenterPage.OVERVIEW) }
+                ) {
+                    if (cookLoadError.isBlank()) {
+                        CircularProgressIndicator()
+                        Text("正在读取离线菜谱和本地图片…")
+                    } else {
+                        Text(
+                            text = cookLoadError,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                        TextButton(onClick = onReloadCookCatalog) {
+                            Text("重新读取")
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -460,6 +507,7 @@ fun FeatureCenterScreen(
  * @param onOpenMaoQuotes 打开毛主席语录章节阅读、搜索收藏与本地导入页的回调。
  * @param onOpenDualCamera 打开前后摄像头等分同屏预览页的回调。
  * @param onOpenLiveTranslation 打开内录声音并显示悬浮字幕的实时翻译页回调。
+ * @param onOpenCook 打开离线菜谱搜索与食材匹配页的回调。
  *
  * @return 无返回值，直接输出功能入口网格。
  */
@@ -490,6 +538,7 @@ private fun FeatureCenterOverview(
     onOpenMaoQuotes: () -> Unit,
     onOpenDualCamera: () -> Unit,
     onOpenLiveTranslation: () -> Unit,
+    onOpenCook: () -> Unit,
     onOpenWechatReminder: () -> Unit,
     onOpenGeneralReminder: () -> Unit,
     onOpenLocalCleanup: () -> Unit
@@ -523,6 +572,7 @@ private fun FeatureCenterOverview(
         onOpenMaoQuotes = onOpenMaoQuotes,
         onOpenDualCamera = onOpenDualCamera,
         onOpenLiveTranslation = onOpenLiveTranslation,
+        onOpenCook = onOpenCook,
         onOpenWechatReminder = onOpenWechatReminder,
         onOpenGeneralReminder = onOpenGeneralReminder,
         onOpenLocalCleanup = onOpenLocalCleanup
@@ -738,6 +788,7 @@ private data class FeatureEntry(
  * @param onOpenMaoQuotes 打开毛主席语录章节阅读、搜索收藏与本地导入页的回调。
  * @param onOpenDualCamera 打开前后摄像头等分同屏预览页的回调。
  * @param onOpenLiveTranslation 打开内录声音并显示悬浮字幕的实时翻译页回调。
+ * @param onOpenCook 打开离线菜谱搜索与食材匹配页的回调。
  * @param onOpenWechatReminder 打开微信消息提醒的回调。
  * @param onOpenGeneralReminder 打开通知提醒的回调。
  * @param onOpenLocalCleanup 打开手机清理的回调。
@@ -763,6 +814,7 @@ private fun featureCenterEntries(
     onOpenMaoQuotes: () -> Unit,
     onOpenDualCamera: () -> Unit,
     onOpenLiveTranslation: () -> Unit,
+    onOpenCook: () -> Unit,
     onOpenWechatReminder: () -> Unit,
     onOpenGeneralReminder: () -> Unit,
     onOpenLocalCleanup: () -> Unit
@@ -788,7 +840,8 @@ private fun featureCenterEntries(
         FeatureEntry(HomeFeatureId.FLASHLIGHT, "光", "手电筒", "亮度、频率与明灭时长控制", onOpenFlashlight),
         FeatureEntry(HomeFeatureId.MAO_QUOTES, "录", "毛主席语录", "章节阅读、搜索收藏与本地导入", onOpenMaoQuotes),
         FeatureEntry(HomeFeatureId.DUAL_CAMERA, "双", "前后双摄", "等分同屏、点击互换与手势变焦", onOpenDualCamera),
-        FeatureEntry(HomeFeatureId.LIVE_TRANSLATION, "译", "实时翻译", "内录英/日语声音并悬浮显示中文字幕", onOpenLiveTranslation)
+        FeatureEntry(HomeFeatureId.LIVE_TRANSLATION, "译", "实时翻译", "内录英/日语声音并悬浮显示中文字幕", onOpenLiveTranslation),
+        FeatureEntry(HomeFeatureId.COOK, "厨", "Cook 菜谱", "搜索做法，按现有食材推理可做菜品", onOpenCook)
     )
 }
 
@@ -813,7 +866,8 @@ private fun FeatureEntryCard(
         HomeFeatureId.EBOOKS,
         HomeFeatureId.CHINESE_GROWTH,
         HomeFeatureId.ENGLISH_WORDS,
-        HomeFeatureId.MAO_QUOTES -> {
+        HomeFeatureId.MAO_QUOTES,
+        HomeFeatureId.COOK -> {
             MaterialTheme.colorScheme.primaryContainer to
                 MaterialTheme.colorScheme.onPrimaryContainer
         }

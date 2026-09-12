@@ -1,11 +1,14 @@
 package com.example.harleyapp.data
 
-import com.example.harleyapp.model.LedgerEntry
-import com.example.harleyapp.model.LedgerType
+import com.example.harleyapp.model.CookRecipe
+import com.example.harleyapp.model.CookRecipeSearchFilter
 import com.example.harleyapp.model.EnglishWord
 import com.example.harleyapp.model.LaunchableApp
+import com.example.harleyapp.model.LedgerEntry
+import com.example.harleyapp.model.LedgerType
 import com.example.harleyapp.model.LocalSearchResult
 import com.example.harleyapp.model.LocalSearchType
+import com.example.harleyapp.model.searchCookRecipes
 import com.example.harleyapp.model.searchEnglishWords
 import java.math.BigDecimal
 import java.math.RoundingMode
@@ -15,7 +18,7 @@ import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 /**
- * 汇总账目、提醒、运动、网站、英语、记事本、电子书、手机应用和功能入口的纯本地搜索。
+ * 汇总账目、提醒、运动、网站、英语、记事本、电子书、菜谱、手机应用和功能入口的纯本地搜索。
  *
  * 使用方法：
  * 使用已经在HarleyApp中复用的仓库创建实例，页面在输入至少一个字符后调用[search]。
@@ -43,6 +46,7 @@ class GlobalSearchRepository(
      * @param rawQuery 用户输入内容；会去除首尾空格并忽略大小写。
      * @param englishWords 已在宿主读取并合并学习进度的完整离线单词，避免每次输入重新解析词库。
      * @param launchableApps 宿主已经读取的手机可启动应用列表。
+     * @param cookRecipes 宿主已经异步加载的完整离线菜谱；目录尚未就绪时传空列表。
      * @param limit 最大返回数量，防止大量历史记录影响页面流畅度。
      * @return 先按关键词相关程度、再按相关内容时间倒序排列的本地结果；空关键词返回空列表。
      */
@@ -50,6 +54,7 @@ class GlobalSearchRepository(
         rawQuery: String,
         englishWords: List<EnglishWord> = emptyList(),
         launchableApps: List<LaunchableApp> = emptyList(),
+        cookRecipes: List<CookRecipe> = emptyList(),
         limit: Int = DEFAULT_RESULT_LIMIT
     ): List<LocalSearchResult> {
         val query = rawQuery.trim().lowercase(Locale.CHINA)
@@ -230,6 +235,27 @@ class GlobalSearchRepository(
             }
         }
 
+        // 菜谱目录由宿主提前在后台读取，此处只执行内存检索，输入时不会重复访问assets。
+        searchCookRecipes(
+            recipes = cookRecipes,
+            filter = CookRecipeSearchFilter(query = rawQuery)
+        ).take(MAX_COOK_RESULTS).forEach { recipe ->
+            val metadata = listOf(recipe.categoryName, recipe.difficulty, recipe.calories)
+                .filter(String::isNotBlank)
+                .joinToString(" · ")
+            results += LocalSearchResult(
+                stableId = "cook:${recipe.id}",
+                type = LocalSearchType.COOK,
+                title = recipe.name,
+                subtitle = listOf(metadata, recipe.summary)
+                    .filter(String::isNotBlank)
+                    .joinToString(" · ")
+                    .take(MAX_SUBTITLE_LENGTH),
+                sortTimeMillis = 0L,
+                targetValue = recipe.id
+            )
+        }
+
         launchableApps.asSequence()
             .filter { app ->
                 query in "${app.label} ${app.packageName}".lowercase(Locale.CHINA)
@@ -334,6 +360,7 @@ class GlobalSearchRepository(
         const val MILLIS_PER_DAY = 86_400_000L
         const val MAX_SUBTITLE_LENGTH = 100
         const val MAX_ENGLISH_RESULTS = 40
+        const val MAX_COOK_RESULTS = 40
         const val MAX_APP_RESULTS = 40
         val DATE_TIME_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPattern("MM-dd HH:mm")
 
@@ -349,6 +376,7 @@ class GlobalSearchRepository(
             SearchableFeature("english", "英语单词", "5000词、例句和离线朗读", "英语 学习 词库", "ENGLISH_WORDS"),
             SearchableFeature("notebook", "记事本", "富内容文章、查询和往期推荐", "文章 笔记", "NOTEBOOK"),
             SearchableFeature("ebooks", "电子书", "导入书籍、多种翻页和阅读进度", "书架 阅读 PDF EPUB DOCX", "EBOOKS"),
+            SearchableFeature("cook", "Cook 菜谱", "搜索做法并按现有食材推荐菜品", "做饭 做菜 食谱 菜谱 原料 食材 今日随机", "COOK"),
             SearchableFeature("backup", "本地备份", "导出、校验和换机恢复", "导入 导出 恢复", "BACKUP"),
             SearchableFeature("hot", "每日热点", "查看当天热点内容", "新闻 热搜", "HOT_TOPICS"),
             SearchableFeature("mobile", "手机流量", "移动网络用量统计", "数据 网络 流量", "MOBILE_DATA"),

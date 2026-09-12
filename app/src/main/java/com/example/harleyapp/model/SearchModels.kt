@@ -13,6 +13,7 @@ package com.example.harleyapp.model
  * @property EBOOK 本地电子书。
  * @property APP 手机中可启动的应用。
  * @property FEATURE Harley App内部功能入口。
+ * @property COOK 随App发布的离线HowToCook菜谱。
  */
 enum class LocalSearchType(val title: String, val symbol: String) {
     LEDGER("账目", "¥"),
@@ -24,7 +25,8 @@ enum class LocalSearchType(val title: String, val symbol: String) {
     NOTEBOOK("记事本", "记"),
     EBOOK("电子书", "书"),
     APP("应用", "启"),
-    FEATURE("功能", "功")
+    FEATURE("功能", "功"),
+    COOK("菜谱", "厨")
 }
 
 /**

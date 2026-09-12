@@ -28,7 +28,8 @@ enum class HomeFeatureId {
     FLASHLIGHT,
     MAO_QUOTES,
     DUAL_CAMERA,
-    LIVE_TRANSLATION
+    LIVE_TRANSLATION,
+    COOK
 }
 
 /** 首次安装或旧版本升级时沿用首页原有的三个功能入口。 */

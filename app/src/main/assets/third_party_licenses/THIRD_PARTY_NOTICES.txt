@@ -69,6 +69,14 @@ HarleyApp 实时翻译第三方组件与模型说明
    许可：Apache License 2.0
    完整许可：本目录 APACHE_LICENSE_2_0.txt
 
+10. HowToCook
+   作者/权利方：Anduin2017 / HowToCook contributors
+   用途：Cook 功能的离线菜谱文本与配图
+   来源：https://github.com/Anduin2017/HowToCook
+   固定提交：https://github.com/Anduin2017/HowToCook/commit/2b19c9e9ee926fd925a68207a57582a338813f9c
+   许可：The Unlicense
+   完整许可：应用资产 cook/HOWTOCOOK_LICENSE.txt
+
 重要说明：
 - “本地运行”表示模型准备完成后的识别与翻译推理在手机上执行，不代表所有第三方组件均采用同一种许可。
 - 首次准备模型需要联网下载。各组件和模型仍受上述许可及使用条款约束。

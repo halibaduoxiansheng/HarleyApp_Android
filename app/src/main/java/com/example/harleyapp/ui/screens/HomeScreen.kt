@@ -749,6 +749,14 @@ private fun homeFeatureEntries(
             symbol = "译",
             statusLabel = "本地",
             onClick = { onOpenFeature(HomeFeatureId.LIVE_TRANSLATION) }
+        ),
+        HomeFeatureEntry(
+            id = HomeFeatureId.COOK,
+            title = "Cook 菜谱",
+            description = "搜做法、按现有食材找菜",
+            symbol = "厨",
+            statusLabel = "离线",
+            onClick = { onOpenFeature(HomeFeatureId.COOK) }
         )
     )
 }

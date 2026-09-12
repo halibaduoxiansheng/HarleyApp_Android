@@ -31,6 +31,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.harleyapp.data.GlobalSearchRepository
+import com.example.harleyapp.model.CookRecipe
 import com.example.harleyapp.model.EnglishWord
 import com.example.harleyapp.model.LaunchableApp
 import com.example.harleyapp.model.LocalSearchResult
@@ -46,6 +47,7 @@ import com.example.harleyapp.model.LocalSearchType
  * @param repository 全局本地搜索仓库。
  * @param englishWords 已加载的5000词离线词库和学习进度。
  * @param launchableApps 手机中已读取的可启动应用列表。
+ * @param cookRecipes 已在后台读取的离线菜谱列表；尚未加载完成时为空列表。
  * @param initialQuery 首页快捷搜索传入的一次性初始关键词；空文本表示不覆盖当前输入。
  * @param onInitialQueryConsumed 初始关键词写入本页状态后的消费回调，防止重组时重复覆盖用户修改。
  * @param onOpenResult 点击结果后的导航回调。
@@ -59,6 +61,7 @@ fun GlobalSearchScreen(
     repository: GlobalSearchRepository,
     englishWords: List<EnglishWord>,
     launchableApps: List<LaunchableApp>,
+    cookRecipes: List<CookRecipe>,
     initialQuery: String,
     onInitialQueryConsumed: () -> Unit,
     onOpenResult: (LocalSearchResult) -> Unit,
@@ -76,11 +79,12 @@ fun GlobalSearchScreen(
             onInitialQueryConsumed()
         }
     }
-    val allResults = remember(query, englishWords, launchableApps) {
+    val allResults = remember(query, englishWords, launchableApps, cookRecipes) {
         repository.search(
             rawQuery = query,
             englishWords = englishWords,
-            launchableApps = launchableApps
+            launchableApps = launchableApps,
+            cookRecipes = cookRecipes
         )
     }
     val selectedType = LocalSearchType.entries.firstOrNull { type ->
@@ -109,7 +113,7 @@ fun GlobalSearchScreen(
                 fontWeight = FontWeight.Bold
             )
             Text(
-                text = "覆盖账目、提醒、运动、网站、英语、记事本、电子书、手机应用和功能入口，不保存搜索词。",
+                text = "覆盖账目、提醒、运动、网站、英语、记事本、电子书、菜谱、手机应用和功能入口，不保存搜索词。",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

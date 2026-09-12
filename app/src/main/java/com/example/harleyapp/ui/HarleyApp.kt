@@ -75,6 +75,7 @@ import com.example.harleyapp.backup.AppBackupManager
 import com.example.harleyapp.data.ChineseGrowthRepository
 import com.example.harleyapp.data.BreathHoldRepository
 import com.example.harleyapp.data.CompanionRepository
+import com.example.harleyapp.data.CookRepository
 import com.example.harleyapp.data.DeveloperModeRepository
 import com.example.harleyapp.data.EnglishWordRepository
 import com.example.harleyapp.data.EbookRepository
@@ -96,6 +97,7 @@ import com.example.harleyapp.data.WechatReminderRepository
 import com.example.harleyapp.model.CompanionCategory
 import com.example.harleyapp.model.CompanionInteraction
 import com.example.harleyapp.model.CompanionTask
+import com.example.harleyapp.model.CookCatalog
 import com.example.harleyapp.model.AppVisualTheme
 import com.example.harleyapp.model.ENGLISH_WORD_MASTERY_COUNT
 import com.example.harleyapp.model.EbookImportResult
@@ -164,8 +166,9 @@ import com.example.harleyapp.ui.components.harleyCardBorder
 import com.example.harleyapp.weather.DeviceLocationProvider
 import com.example.harleyapp.weather.WeatherRepository
 import com.example.harleyapp.widget.TodayWeatherWidgetProvider
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -469,6 +472,9 @@ fun HarleyApp(
     val chineseGrowthRepository = remember {
         ChineseGrowthRepository(applicationContext)
     }
+    val cookRepository = remember {
+        CookRepository(applicationContext)
+    }
     val breathHoldRepository = remember {
         BreathHoldRepository(applicationContext)
     }
@@ -576,6 +582,9 @@ fun HarleyApp(
     var searchEbookTargetId by rememberSaveable {
         mutableStateOf("")
     }
+    var searchCookRecipeTargetId by rememberSaveable {
+        mutableStateOf("")
+    }
     var pendingGlobalSearchQuery by rememberSaveable {
         mutableStateOf("")
     }
@@ -596,6 +605,15 @@ fun HarleyApp(
     }
     var featureCenterOrder by remember {
         mutableStateOf(featureCenterOrderRepository.getOrder())
+    }
+    var cookCatalog by remember {
+        mutableStateOf<CookCatalog?>(null)
+    }
+    var cookLoadError by remember {
+        mutableStateOf("")
+    }
+    var cookLoadGeneration by remember {
+        mutableIntStateOf(0)
     }
     // 功能中心的网格状态由App根层长期持有。进入任意内部或全屏功能时即使概览离开组合，返回后仍能
     // 恢复离开前的卡片位置；rememberLazyGridState自身支持Activity重建时保存首项与像素偏移。
@@ -864,6 +882,7 @@ fun HarleyApp(
         if (openEbookRequestId.isNotBlank()) {
             searchEnglishWordTargetId = ""
             searchNotebookArticleTargetId = ""
+            searchCookRecipeTargetId = ""
             searchEbookTargetId = openEbookRequestId
             featureCenterPageName = FeatureCenterPage.EBOOKS.name
             currentSectionName = AppSection.FEATURES.name
@@ -976,6 +995,22 @@ fun HarleyApp(
     LaunchedEffect(installedAppsRepository) {
         launchableApps = installedAppsRepository.loadLaunchableApps()
         isLoadingApps = false
+    }
+
+    // HowToCook目录随APK发布，启动后只在后台解析一次并复用缓存。加载失败时保留其他模块可用，
+    // 用户进入Cook页后可以显式重试，不会因为单个静态资源异常阻断整个App启动。
+    LaunchedEffect(cookRepository, cookLoadGeneration) {
+        cookLoadError = ""
+        try {
+            val loadedCatalog = cookRepository.load()
+            cookCatalog = loadedCatalog
+        } catch (error: CancellationException) {
+            // 页面组合被销毁或任务键变化时必须继续传播协程取消，避免旧加载任务覆盖新一轮状态。
+            throw error
+        } catch (_: Exception) {
+            cookCatalog = null
+            cookLoadError = "离线菜谱读取失败，请点击重新读取"
+        }
     }
 
     // App保持前台跨过零点时同步领取新一天的打开经验与1金币，仓库保证同一天只发放一次。
@@ -1337,6 +1372,12 @@ fun HarleyApp(
                             featureCenterPageName = FeatureCenterPage.LIVE_TRANSLATION.name
                             currentSectionName = AppSection.FEATURES.name
                         }
+
+                        HomeFeatureId.COOK -> {
+                            searchCookRecipeTargetId = ""
+                            featureCenterPageName = FeatureCenterPage.COOK.name
+                            currentSectionName = AppSection.FEATURES.name
+                        }
                     }
                 },
                 englishWord = homeEnglishWord,
@@ -1499,6 +1540,7 @@ fun HarleyApp(
                 repository = globalSearchRepository,
                 englishWords = englishWords,
                 launchableApps = launchableApps,
+                cookRecipes = cookCatalog?.recipes.orEmpty(),
                 initialQuery = pendingGlobalSearchQuery,
                 onInitialQueryConsumed = {
                     pendingGlobalSearchQuery = ""
@@ -1534,6 +1576,7 @@ fun HarleyApp(
                             searchEnglishWordTargetId = result.targetValue
                             searchNotebookArticleTargetId = ""
                             searchEbookTargetId = ""
+                            searchCookRecipeTargetId = ""
                             featureCenterPageName = FeatureCenterPage.ENGLISH_WORDS.name
                             currentSectionName = AppSection.FEATURES.name
                         }
@@ -1542,6 +1585,7 @@ fun HarleyApp(
                             searchNotebookArticleTargetId = result.targetValue
                             searchEnglishWordTargetId = ""
                             searchEbookTargetId = ""
+                            searchCookRecipeTargetId = ""
                             featureCenterPageName = FeatureCenterPage.NOTEBOOK.name
                             currentSectionName = AppSection.FEATURES.name
                         }
@@ -1550,7 +1594,17 @@ fun HarleyApp(
                             searchEbookTargetId = result.targetValue
                             searchNotebookArticleTargetId = ""
                             searchEnglishWordTargetId = ""
+                            searchCookRecipeTargetId = ""
                             featureCenterPageName = FeatureCenterPage.EBOOKS.name
+                            currentSectionName = AppSection.FEATURES.name
+                        }
+
+                        LocalSearchType.COOK -> {
+                            searchCookRecipeTargetId = result.targetValue
+                            searchEnglishWordTargetId = ""
+                            searchNotebookArticleTargetId = ""
+                            searchEbookTargetId = ""
+                            featureCenterPageName = FeatureCenterPage.COOK.name
                             currentSectionName = AppSection.FEATURES.name
                         }
 
@@ -1574,6 +1628,7 @@ fun HarleyApp(
                                     searchEnglishWordTargetId = ""
                                     searchNotebookArticleTargetId = ""
                                     searchEbookTargetId = ""
+                                    searchCookRecipeTargetId = ""
                                     featureCenterPageName = featurePage.name
                                     currentSectionName = AppSection.FEATURES.name
                                 }
@@ -1721,6 +1776,9 @@ fun HarleyApp(
                     success
                 },
                 onPageChanged = { page ->
+                    if (page == FeatureCenterPage.COOK && featureCenterPage != FeatureCenterPage.COOK) {
+                        searchCookRecipeTargetId = ""
+                    }
                     featureCenterPageName = page.name
                 },
                 onOpenLedger = {
@@ -1769,6 +1827,12 @@ fun HarleyApp(
                 initialEnglishWordId = searchEnglishWordTargetId.ifBlank { null },
                 initialNotebookArticleId = searchNotebookArticleTargetId.ifBlank { null },
                 initialEbookId = searchEbookTargetId.ifBlank { null },
+                initialCookRecipeId = searchCookRecipeTargetId.ifBlank { null },
+                cookCatalog = cookCatalog,
+                cookLoadError = cookLoadError,
+                onReloadCookCatalog = {
+                    cookLoadGeneration += 1
+                },
                 ebookRepository = ebookRepository,
                 chineseGrowthRepository = chineseGrowthRepository,
                 onEbookImmersiveChanged = { immersive ->
@@ -1790,6 +1854,7 @@ fun HarleyApp(
                     searchEnglishWordTargetId = ""
                     searchNotebookArticleTargetId = ""
                     searchEbookTargetId = ""
+                    searchCookRecipeTargetId = ""
                 },
                 wechatReminderSettings = wechatReminderSettings,
                 wechatReminderStatus = wechatReminderStatus,
