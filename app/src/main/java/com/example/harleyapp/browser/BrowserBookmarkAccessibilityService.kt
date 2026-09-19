@@ -509,7 +509,7 @@ class BrowserBookmarkAccessibilityService : AccessibilityService() {
         )
         when (result) {
             WebsiteBookmarkSaveResult.SAVED ->
-                showSaveFeedback(true, "已收藏到HarleyApp网站收藏")
+                showSaveFeedback(true, "已收藏到HarleyApp今日日期文件夹")
             WebsiteBookmarkSaveResult.ALREADY_SAVED ->
                 showSaveFeedback(true, "当前网站已经收藏")
             WebsiteBookmarkSaveResult.INVALID_URL ->

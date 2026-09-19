@@ -382,7 +382,7 @@ private fun WebsiteCarouselCard(
                     overflow = TextOverflow.Ellipsis
                 )
                 Text(
-                    text = websiteHost(website.url),
+                    text = "${websiteHost(website.url)} · 打开 ${website.openCount} 次",
                     color = Color.White.copy(alpha = 0.90f),
                     style = MaterialTheme.typography.bodyMedium,
                     maxLines = 1,

@@ -64,7 +64,6 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LinearProgressIndicator
@@ -118,6 +117,7 @@ import com.example.harleyapp.model.WEBSITE_MEDIA_SEEK_STEP_SECONDS
 import com.example.harleyapp.model.WebsiteShortcut
 import com.example.harleyapp.model.WebsiteToolSettings
 import com.example.harleyapp.model.normalizeWebsiteBrowserUrl
+import com.example.harleyapp.model.websitesByOpenCount
 import com.example.harleyapp.web.WebsiteScriptController
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -137,17 +137,16 @@ import kotlin.math.roundToInt
  * 用户点击标签关闭按钮后，上层删除对应模型，相关WebView才会真正释放。
  *
  * @param session 当前完整标签会话，包含标签顺序和活动标签标识。
- * @param websites 新标签页中可供用户直接打开的全部网站收藏。
+ * @param websites 新标签页按累计打开次数展示的全部网站收藏。
  * @param isVisible 当前是否正在显示底部“网站”页面；false时暂停全部网页媒体与交互。
  * @param isFullscreen 活动网页是否处于HTML5自定义全屏，用于暂时隐藏标签栏。
  * @param onSelectTab 用户点击已有标签后的切换回调。
  * @param onCloseTab 用户明确点击关闭按钮后的回调。
  * @param onCreateBlankTab 用户点击固定“+”按钮后的新增空白标签回调。
- * @param onOpenWebsiteInTab 用户在空白标签页选择网站后，用该网站填充当前标签的回调。
+ * @param onOpenWebsiteInTab 用户在新标签页选择网站后，用该网站填充当前标签的回调。
  * @param onOpenChildTab 网页通过target=_blank或window.open请求新标签时的回调。
  * @param onTabPageChanged 网页标题或实际地址变化后更新标签快照的回调。
  * @param onExitWebsite 网页没有可后退历史时，把系统返回交回App一级导航的回调。
- * @param onManageWebsites 打开网站收藏管理页面的回调。
  * @param onFullscreenChanged 自定义视频全屏状态回调，用于让宿主隐藏底部导航。
  * @param onEbookDownloadRequested 网页触发下载时，把公开直链交给电子书仓库的回调。
  * @param onBookmarkCurrentPage 把WebView当前实际标题和地址收藏进网站库的回调。
@@ -168,7 +167,6 @@ fun WebsiteScreen(
     onOpenChildTab: (WebsiteBrowserTab, String) -> Unit,
     onTabPageChanged: (String, String, String) -> Unit,
     onExitWebsite: () -> Unit,
-    onManageWebsites: () -> Unit,
     onFullscreenChanged: (Boolean) -> Unit,
     onEbookDownloadRequested: (EbookWebDownloadRequest) -> Unit,
     onBookmarkCurrentPage: (String, String) -> WebsiteBookmarkSaveResult,
@@ -262,8 +260,7 @@ fun WebsiteScreen(
                         websites = websites,
                         onOpenWebsite = { website ->
                             onOpenWebsiteInTab(activeTab.id, website)
-                        },
-                        onManageWebsites = onManageWebsites
+                        }
                     )
                 }
 
@@ -313,6 +310,72 @@ fun WebsiteScreen(
                     onCloseTab(tabId)
                 }
             )
+        }
+    }
+}
+
+/**
+ * 显示按累计打开次数排列的新标签页网站列表。
+ *
+ * 使用方法：
+ * 当前标签没有加载网址时由[WebsiteScreen]调用。列表不显示额外标题、推荐或管理入口，只把全部
+ * 网站按打开次数从高到低排列；没有任何网站时仅绘制空白背景。点击卡片会填充当前空白标签，
+ * 不会额外创建第二个标签。
+ *
+ * @param websites 当前全部网站收藏。
+ * @param onOpenWebsite 点击网站后填充当前标签的回调。
+ * @param modifier 外部传入的页面尺寸。
+ * @return 无返回值，直接输出空白背景或紧凑网站列表。
+ */
+@Composable
+private fun WebsiteNewTabPage(
+    websites: List<WebsiteShortcut>,
+    onOpenWebsite: (WebsiteShortcut) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier.fillMaxSize(),
+        color = MaterialTheme.colorScheme.background
+    ) {
+        if (websites.isNotEmpty()) {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                items(
+                    items = websitesByOpenCount(websites),
+                    key = WebsiteShortcut::id
+                ) { website ->
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onOpenWebsite(website) },
+                        color = MaterialTheme.colorScheme.surfaceContainerLow,
+                        shape = RoundedCornerShape(14.dp),
+                        tonalElevation = 1.dp
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp)
+                        ) {
+                            Text(
+                                text = website.title,
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = "打开 ${website.openCount} 次 · ${website.url}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -1814,98 +1877,6 @@ internal fun shouldShowInlineWebsiteScriptTools(
 }
 
 /**
- * 显示一个可直接选择已收藏网站的新标签页。
- *
- * 使用方法：
- * 用户点击“+”或关闭最后一个标签后，由[WebsiteScreen]为当前空白标签调用。选择列表中的网站会
- * 填充当前空白标签，而不是额外再创建一个标签；没有收藏时提供直接进入管理页面的入口。
- *
- * @param websites 当前网站收藏快照，保持用户在收藏管理中的顺序。
- * @param onOpenWebsite 用户选择一个网站后填充当前空白标签的回调。
- * @param onManageWebsites 打开网站收藏管理页面的回调。
- * @param modifier 外部传入的内容尺寸。
- *
- * @return 无返回值，直接输出新标签页内容。
- */
-@Composable
-private fun WebsiteNewTabPage(
-    websites: List<WebsiteShortcut>,
-    onOpenWebsite: (WebsiteShortcut) -> Unit,
-    onManageWebsites: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    Surface(
-        modifier = modifier.fillMaxSize(),
-        color = MaterialTheme.colorScheme.background
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 20.dp, vertical = 24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Text(
-                text = "新标签页",
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Bold
-            )
-            Text(
-                text = if (websites.isEmpty()) {
-                    "还没有收藏网站，先添加一个常用入口吧。"
-                } else {
-                    "选择一个已收藏网站，在当前标签中打开"
-                },
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-
-            websites.forEach { website ->
-                Surface(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { onOpenWebsite(website) },
-                    color = MaterialTheme.colorScheme.surfaceContainerLow,
-                    shape = MaterialTheme.shapes.large,
-                    tonalElevation = 1.dp
-                ) {
-                    Column(
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 13.dp),
-                        verticalArrangement = Arrangement.spacedBy(3.dp)
-                    ) {
-                        Text(
-                            text = website.title,
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.SemiBold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Text(
-                            text = website.url,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                }
-            }
-
-            if (websites.isEmpty()) {
-                Button(onClick = onManageWebsites) {
-                    Text(text = "添加网站")
-                }
-            } else {
-                TextButton(onClick = onManageWebsites) {
-                    Text(text = "管理网站收藏")
-                }
-            }
-        }
-    }
-}
-
-/**
  * 暂停当前网页中可直接访问的标准HTML5音视频。
  *
  * 使用方法：
@@ -3070,7 +3041,7 @@ private fun mediaActionMessage(mediaCount: Int, successMessage: String): String 
  */
 internal fun websiteBookmarkSaveMessage(result: WebsiteBookmarkSaveResult): String {
     return when (result) {
-        WebsiteBookmarkSaveResult.SAVED -> "已收藏当前页，可在网站详情中管理"
+        WebsiteBookmarkSaveResult.SAVED -> "已收藏当前页，可在今日日期文件夹中管理"
         WebsiteBookmarkSaveResult.ALREADY_SAVED -> "当前页面已经收藏"
         WebsiteBookmarkSaveResult.INVALID_URL -> "当前页面不是可收藏的HTTP或HTTPS网址"
         WebsiteBookmarkSaveResult.SAVE_FAILED -> "收藏保存失败，请重试"

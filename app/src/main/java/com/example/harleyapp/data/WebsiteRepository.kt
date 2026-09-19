@@ -18,6 +18,7 @@ import com.example.harleyapp.model.resolveDefaultWebsiteId
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URI
+import java.time.LocalDate
 import java.util.UUID
 
 /**
@@ -219,8 +220,8 @@ class WebsiteRepository(context: Context) {
      *
      * 使用方法：
      * 调用方传入当前页面标题和地址即可。本函数统一完成HTTP/HTTPS校验、重复网址判断、标题
-     * 截断、根目录排序、默认不加入首页以及首次收藏的默认网站设置。无障碍悬浮球与App内
-     * “收藏当前页”必须共用本函数，避免两条入口产生不同的数据规则。
+     * 截断、按设备本地日期创建或复用根目录文件夹、默认不加入首页以及首次收藏的默认网站设置。
+     * 无障碍悬浮球与App内“收藏当前页”必须共用本函数，避免两条入口产生不同的数据规则。
      *
      * @param pageTitle 浏览器公开的页面标题；为空时自动使用网址域名。
      * @param pageUrl 浏览器公开的当前页地址，只接受HTTP或HTTPS。
@@ -231,7 +232,7 @@ class WebsiteRepository(context: Context) {
     fun saveBookmarkedPage(
         pageTitle: String,
         pageUrl: String
-    ): WebsiteBookmarkSaveResult = synchronized(BOOKMARK_WRITE_LOCK) {
+    ): WebsiteBookmarkSaveResult = synchronized(WEBSITE_LIBRARY_WRITE_LOCK) {
         val normalizedUrl = normalizeWebsiteUrl(pageUrl)
             ?: return@synchronized WebsiteBookmarkSaveResult.INVALID_URL
         val library = getLibrary()
@@ -251,32 +252,23 @@ class WebsiteRepository(context: Context) {
                     .removePrefix("www.")
                     .ifBlank { "未命名网站" }
             }
-        val nextRootOrder = (
-            library.folders
-                .filter { folder -> folder.parentId == null }
-                .map { folder -> folder.sortOrder } +
-                library.websites
-                    .filter { website -> website.folderId == null }
-                    .map { website -> website.sortOrder }
-            ).maxOrNull()?.plus(ROOT_BOOKMARK_ORDER_STEP) ?: 0
-        val bookmark = WebsiteShortcut(
-            id = UUID.randomUUID().toString(),
-            title = normalizedTitle,
-            url = normalizedUrl,
-            folderId = null,
-            showOnHome = false,
-            sortOrder = nextRootOrder
+        val bookmarkId = UUID.randomUUID().toString()
+        val updatedLibrary = addBookmarkedPageToDateFolder(
+            library = library,
+            dateFolderName = LocalDate.now().toString(),
+            newFolderId = UUID.randomUUID().toString(),
+            bookmarkId = bookmarkId,
+            pageTitle = normalizedTitle,
+            normalizedUrl = normalizedUrl
         )
-        val updatedLibrary = library.copy(
-            websites = library.websites + bookmark
-        )
+            ?: return@synchronized WebsiteBookmarkSaveResult.SAVE_FAILED
         if (!saveLibrary(updatedLibrary)) {
             return@synchronized WebsiteBookmarkSaveResult.SAVE_FAILED
         }
 
         if (getDefaultWebsiteId(library.websites) == null) {
             setDefaultWebsiteId(
-                websiteId = bookmark.id,
+                websiteId = bookmarkId,
                 websites = updatedLibrary.websites
             )
         }
@@ -284,6 +276,42 @@ class WebsiteRepository(context: Context) {
         WebsiteLibraryChangeNotifier.notifyChanged()
         WebsiteBookmarkSaveResult.SAVED
     }
+
+    /**
+     * 记录用户从HarleyApp入口成功打开一次网站。
+     *
+     * 使用方法：
+     * 首页卡片、收藏管理页和新标签页在成功创建或填充浏览器标签后传入网站id。函数重新读取最新
+     * 网站库并原子增加计数，避免使用界面旧快照覆盖浏览器悬浮球刚写入的收藏；网页刷新、内部链接
+     * 跳转、冷启动恢复标签以及创建失败的标签都不应调用本函数。
+     *
+     * @param websiteId 已成功打开的网站收藏稳定标识。
+     * @return 保存成功后的完整网站库；网站不存在或本地保存失败时返回null。
+     */
+    fun recordWebsiteOpened(websiteId: String): WebsiteLibrary? =
+        synchronized(WEBSITE_LIBRARY_WRITE_LOCK) {
+            val library = getLibrary()
+            val website = library.websites.firstOrNull { current -> current.id == websiteId }
+                ?: return@synchronized null
+            val nextOpenCount = if (website.openCount == Long.MAX_VALUE) {
+                Long.MAX_VALUE
+            } else {
+                website.openCount + 1L
+            }
+            val updatedLibrary = library.copy(
+                websites = library.websites.map { current ->
+                    if (current.id == websiteId) {
+                        current.copy(openCount = nextOpenCount)
+                    } else {
+                        current
+                    }
+                }
+            )
+            if (!saveLibrary(updatedLibrary)) {
+                return@synchronized null
+            }
+            updatedLibrary
+        }
 
     /**
      * 把持久化JSON转换为网站列表，并过滤单条异常数据。
@@ -350,7 +378,11 @@ class WebsiteRepository(context: Context) {
                                 jsonObject.optInt(JSON_SORT_ORDER, index).coerceAtLeast(0)
                             } else {
                                 index
-                            }
+                            },
+                            isPinned = jsonObject.optBoolean(JSON_IS_PINNED, false),
+                            openCount = jsonObject
+                                .optLong(JSON_OPEN_COUNT, 0L)
+                                .coerceAtLeast(0L)
                         )
                     )
                 }
@@ -406,7 +438,8 @@ class WebsiteRepository(context: Context) {
                                 ?.takeIf(String::isNotBlank),
                             sortOrder = jsonObject
                                 .optInt(JSON_SORT_ORDER, index)
-                                .coerceAtLeast(0)
+                                .coerceAtLeast(0),
+                            isPinned = jsonObject.optBoolean(JSON_IS_PINNED, false)
                         )
                     )
                 }
@@ -444,6 +477,8 @@ class WebsiteRepository(context: Context) {
                         put(JSON_FOLDER_ID, website.folderId ?: JSONObject.NULL)
                         put(JSON_SHOW_ON_HOME, website.showOnHome)
                         put(JSON_SORT_ORDER, website.sortOrder.coerceAtLeast(0))
+                        put(JSON_IS_PINNED, website.isPinned)
+                        put(JSON_OPEN_COUNT, website.openCount.coerceAtLeast(0L))
                     }
                 )
             }
@@ -466,6 +501,7 @@ class WebsiteRepository(context: Context) {
                         put(JSON_NAME, folder.name.trim())
                         put(JSON_PARENT_ID, folder.parentId ?: JSONObject.NULL)
                         put(JSON_SORT_ORDER, folder.sortOrder.coerceAtLeast(0))
+                        put(JSON_IS_PINNED, folder.isPinned)
                     }
                 )
             }
@@ -524,12 +560,13 @@ class WebsiteRepository(context: Context) {
             website.title.trim().isNotBlank() &&
             normalizeWebsiteUrl(website.url) != null &&
             normalizeWebsiteThemeColor(website.customColorArgb) == website.customColorArgb &&
-            isValidWebsiteBackgroundFileName(website.backgroundImageFileName)
+            isValidWebsiteBackgroundFileName(website.backgroundImageFileName) &&
+            website.openCount >= 0L
     }
 
     private companion object {
-        /** 同一进程内多个仓库实例追加收藏时共用的锁，避免同时点击造成后写覆盖先写。 */
-        val BOOKMARK_WRITE_LOCK = Any()
+        /** 同一进程内的收藏新增和打开计数共用锁，避免并发读改写造成后写覆盖先写。 */
+        val WEBSITE_LIBRARY_WRITE_LOCK = Any()
 
         const val TAG = "WebsiteRepository"
         const val PREFERENCE_NAME = "harley_websites"
@@ -545,11 +582,116 @@ class WebsiteRepository(context: Context) {
         const val JSON_FOLDER_ID = "folder_id"
         const val JSON_SHOW_ON_HOME = "show_on_home"
         const val JSON_SORT_ORDER = "sort_order"
+        const val JSON_IS_PINNED = "is_pinned"
+        const val JSON_OPEN_COUNT = "open_count"
         const val JSON_NAME = "name"
         const val JSON_PARENT_ID = "parent_id"
-        const val ROOT_BOOKMARK_ORDER_STEP = 10
     }
 }
+
+/**
+ * 把一个经过校验的网页收藏追加到设备当天的根目录日期文件夹。
+ *
+ * 使用方法：
+ * [WebsiteRepository.saveBookmarkedPage]完成网址和标题规范化后，传入`yyyy-MM-dd`日期名称以及
+ * 新生成的文件夹、网站标识。根目录已经存在同名日期文件夹时直接复用；其他层级的同名文件夹
+ * 不会被误用。新网站追加在日期文件夹现有内容末尾，并且默认不参与首页轮播。
+ *
+ * @param library 收藏前的完整网站库。
+ * @param dateFolderName 设备本地日期生成的`yyyy-MM-dd`文件夹名称。
+ * @param newFolderId 当根目录尚无当天文件夹时使用的新文件夹标识。
+ * @param bookmarkId 新网站的唯一标识。
+ * @param pageTitle 已清理并限制长度的网页标题。
+ * @param normalizedUrl 已通过HTTP或HTTPS规范化校验的完整网址。
+ *
+ * @return 已加入日期文件夹和新网站的数据副本；关键标识或文本无效、产生标识冲突时返回null。
+ */
+internal fun addBookmarkedPageToDateFolder(
+    library: WebsiteLibrary,
+    dateFolderName: String,
+    newFolderId: String,
+    bookmarkId: String,
+    pageTitle: String,
+    normalizedUrl: String
+): WebsiteLibrary? {
+    val normalizedFolderName = dateFolderName.trim()
+    val normalizedTitle = pageTitle.trim()
+    if (
+        normalizedFolderName.isBlank() ||
+        normalizedTitle.isBlank() ||
+        bookmarkId.isBlank() ||
+        normalizeWebsiteUrl(normalizedUrl) != normalizedUrl ||
+        library.websites.any { website -> website.id == bookmarkId } ||
+        library.folders.any { folder -> folder.id == bookmarkId }
+    ) {
+        return null
+    }
+
+    val existingDateFolder = library.folders
+        .filter { folder ->
+            folder.parentId == null && folder.name == normalizedFolderName
+        }
+        .minWithOrNull(compareBy<WebsiteFolder> { folder -> folder.sortOrder }.thenBy { folder -> folder.id })
+    val dateFolder = existingDateFolder ?: run {
+        if (
+            newFolderId.isBlank() ||
+            newFolderId == bookmarkId ||
+            library.folders.any { folder -> folder.id == newFolderId } ||
+            library.websites.any { website -> website.id == newFolderId }
+        ) {
+            return null
+        }
+        WebsiteFolder(
+            id = newFolderId,
+            name = normalizedFolderName,
+            parentId = null,
+            sortOrder = nextWebsiteBookmarkOrder(library, parentId = null)
+        )
+    }
+    val libraryWithDateFolder = if (existingDateFolder == null) {
+        library.copy(folders = library.folders + dateFolder)
+    } else {
+        library
+    }
+    val bookmark = WebsiteShortcut(
+        id = bookmarkId,
+        title = normalizedTitle,
+        url = normalizedUrl,
+        folderId = dateFolder.id,
+        showOnHome = false,
+        sortOrder = nextWebsiteBookmarkOrder(libraryWithDateFolder, dateFolder.id)
+    )
+    return libraryWithDateFolder.copy(
+        websites = libraryWithDateFolder.websites + bookmark
+    )
+}
+
+/**
+ * 计算指定文件夹末尾可用的网站收藏顺序值。
+ *
+ * @param library 当前完整网站库。
+ * @param parentId 目标文件夹标识；null表示根目录。
+ * @return 正常范围内比同层最大顺序大10；接近整数上限时饱和为Int.MAX_VALUE，空层级返回0。
+ */
+private fun nextWebsiteBookmarkOrder(
+    library: WebsiteLibrary,
+    parentId: String?
+): Int {
+    val maximumOrder = buildList {
+        library.folders
+            .filter { folder -> folder.parentId == parentId }
+            .mapTo(this) { folder -> folder.sortOrder }
+        library.websites
+            .filter { website -> website.folderId == parentId }
+            .mapTo(this) { website -> website.sortOrder }
+    }.maxOrNull() ?: return 0
+    return maximumOrder
+        .coerceAtMost(Int.MAX_VALUE - WEBSITE_BOOKMARK_ORDER_STEP)
+        .plus(WEBSITE_BOOKMARK_ORDER_STEP)
+}
+
+/** 同层收藏顺序之间的固定间隔，便于后续继续追加内容。 */
+private const val WEBSITE_BOOKMARK_ORDER_STEP = 10
 
 /**
  * 新安装且尚未创建网站收藏时使用的初始列表。

@@ -5,6 +5,7 @@ import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -63,6 +64,7 @@ import com.example.harleyapp.model.websiteFolderDepth
 import com.example.harleyapp.model.websiteFolderDescendantIds
 import com.example.harleyapp.model.websiteFolderPath
 import com.example.harleyapp.model.websiteMatchesQuery
+import com.example.harleyapp.model.websitesByOpenCount
 import java.util.Locale
 import java.util.UUID
 import kotlin.math.roundToInt
@@ -73,7 +75,8 @@ import kotlin.math.roundToInt
  * 使用方法：
  * HarleyApp从首页“详情”或网页页“管理网站”进入本页面，传入完整WebsiteLibrary和同步保存
  * 回调。用户可以建立最多五层文件夹、增删改网站、选择首页轮播项目、设置默认网站、模糊
- * 搜索，并长按同层条目上下拖动排序。所有编辑仅在保存回调返回true后反映到父级状态。
+ * 搜索、文件夹与网站多项置顶，并在置顶组或普通组内长按上下拖动排序。所有编辑仅在保存回调
+ * 返回true后反映到父级状态。
  *
  * @param modifier 外部传入的系统安全边距。
  * @param library 当前完整网站与收藏夹数据。
@@ -104,6 +107,9 @@ fun WebsiteBookmarkManagerScreen(
     }
     var query by rememberSaveable {
         mutableStateOf("")
+    }
+    var sortByOpenCount by rememberSaveable {
+        mutableStateOf(false)
     }
     var editingFolder by remember {
         mutableStateOf<WebsiteFolder?>(null)
@@ -330,7 +336,22 @@ fun WebsiteBookmarkManagerScreen(
             shape = RoundedCornerShape(18.dp)
         )
 
-        if (query.isBlank()) {
+        OutlinedButton(
+            onClick = { sortByOpenCount = !sortByOpenCount },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 2.dp)
+        ) {
+            Text(
+                text = if (sortByOpenCount) {
+                    "返回文件夹与置顶排序"
+                } else {
+                    "按打开次数查看所有网站"
+                }
+            )
+        }
+
+        if (query.isBlank() && !sortByOpenCount) {
             LazyRow(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -413,7 +434,7 @@ fun WebsiteBookmarkManagerScreen(
             )
         }
 
-        if (query.isBlank()) {
+        if (query.isBlank() && !sortByOpenCount) {
             WebsiteFolderContents(
                 modifier = Modifier.weight(1f),
                 library = library,
@@ -449,6 +470,18 @@ fun WebsiteBookmarkManagerScreen(
                         saveError = ""
                     }
                 },
+                onTogglePinned = { nodeKey, pinned ->
+                    val updatedLibrary = updateWebsiteNodePinned(
+                        library = library,
+                        nodeKey = nodeKey,
+                        pinned = pinned
+                    )
+                    if (updatedLibrary == library || !onSaveLibrary(updatedLibrary)) {
+                        saveError = "置顶设置保存失败，请重试"
+                    } else {
+                        saveError = ""
+                    }
+                },
                 onReorder = { draggedKey, targetIndex ->
                     val updatedLibrary = reorderWebsiteNodes(
                         library = library,
@@ -462,6 +495,47 @@ fun WebsiteBookmarkManagerScreen(
                         saveError = ""
                     }
                 }
+            )
+        } else if (query.isBlank()) {
+            WebsiteOpenCountList(
+                modifier = Modifier.weight(1f),
+                library = library,
+                defaultWebsiteId = defaultWebsiteId,
+                onOpenWebsite = onOpenWebsite,
+                onEditWebsite = { website ->
+                    editingWebsite = website
+                    websiteEditorVisible = true
+                },
+                onDeleteWebsite = { website -> deletingWebsite = website },
+                onToggleHome = { website, showOnHome ->
+                    val updatedLibrary = library.copy(
+                        websites = library.websites.map { current ->
+                            if (current.id == website.id) {
+                                current.copy(showOnHome = showOnHome)
+                            } else {
+                                current
+                            }
+                        }
+                    )
+                    if (!onSaveLibrary(updatedLibrary)) {
+                        saveError = "首页轮播设置保存失败，请重试"
+                    } else {
+                        saveError = ""
+                    }
+                },
+                onTogglePinned = { website, pinned ->
+                    val updatedLibrary = updateWebsiteNodePinned(
+                        library = library,
+                        nodeKey = "website:${website.id}",
+                        pinned = pinned
+                    )
+                    if (updatedLibrary == library || !onSaveLibrary(updatedLibrary)) {
+                        saveError = "置顶设置保存失败，请重试"
+                    } else {
+                        saveError = ""
+                    }
+                },
+                onSetDefaultWebsite = onSetDefaultWebsite
             )
         } else {
             WebsiteSearchResultList(
@@ -493,6 +567,18 @@ fun WebsiteBookmarkManagerScreen(
                         saveError = ""
                     }
                 },
+                onTogglePinned = { nodeKey, pinned ->
+                    val updatedLibrary = updateWebsiteNodePinned(
+                        library = library,
+                        nodeKey = nodeKey,
+                        pinned = pinned
+                    )
+                    if (updatedLibrary == library || !onSaveLibrary(updatedLibrary)) {
+                        saveError = "置顶设置保存失败，请重试"
+                    } else {
+                        saveError = ""
+                    }
+                },
                 onSetDefaultWebsite = onSetDefaultWebsite
             )
         }
@@ -519,7 +605,8 @@ fun WebsiteBookmarkManagerScreen(
  * @param onDeleteWebsite 删除网站的回调。
  * @param onSetDefaultWebsite 设置默认网站的回调。
  * @param onToggleHome 切换首页轮播开关的回调。
- * @param onReorder 拖动结束后的排序回调，参数为节点key和目标位置。
+ * @param onTogglePinned 切换文件夹或网站置顶状态的回调。
+ * @param onReorder 拖动结束后的排序回调，参数为节点key和目标位置；目标位置会限制在同一置顶组。
  *
  * @return 无返回值。
  */
@@ -538,6 +625,7 @@ private fun WebsiteFolderContents(
     onDeleteWebsite: (WebsiteShortcut) -> Unit,
     onSetDefaultWebsite: (String) -> Boolean,
     onToggleHome: (WebsiteShortcut, Boolean) -> Unit,
+    onTogglePinned: (String, Boolean) -> Unit,
     onReorder: (String, Int) -> Unit
 ) {
     var draggingKey by remember(currentFolderId) {
@@ -580,11 +668,11 @@ private fun WebsiteFolderContents(
             end = 20.dp,
             bottom = 28.dp
         ),
-        verticalArrangement = Arrangement.spacedBy(10.dp)
+        verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         item {
             Text(
-                text = "长按卡片上下拖动可调整同层顺序",
+                text = "置顶项和普通项分别排序，长按卡片可在当前分组内上下拖动",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -645,7 +733,10 @@ private fun WebsiteFolderContents(
                             library.websites.count { website -> website.folderId == folder.id },
                         onOpen = { onOpenFolder(folder.id) },
                         onEdit = { onEditFolder(folder) },
-                        onDelete = { onDeleteFolder(folder) }
+                        onDelete = { onDeleteFolder(folder) },
+                        onTogglePinned = { pinned ->
+                            onTogglePinned(node.key, pinned)
+                        }
                     )
                 }
                 node.website?.let { website ->
@@ -657,10 +748,91 @@ private fun WebsiteFolderContents(
                         onEdit = { onEditWebsite(website) },
                         onDelete = { onDeleteWebsite(website) },
                         onSetDefault = { onSetDefaultWebsite(website.id) },
-                        onToggleHome = { checked -> onToggleHome(website, checked) }
+                        onToggleHome = { checked -> onToggleHome(website, checked) },
+                        onTogglePinned = { pinned ->
+                            onTogglePinned(node.key, pinned)
+                        }
                     )
                 }
             }
+        }
+    }
+}
+
+/**
+ * 把全部网站展平成按累计打开次数降序排列的列表。
+ *
+ * 使用方法：
+ * 用户点击“按打开次数查看所有网站”后调用。本视图跨文件夹汇总网站并显示原文件夹路径，避免
+ * 文件夹层级掩盖真正的高频网站；排序由统计值实时计算，不改写手动sortOrder，也不提供拖动。
+ *
+ * @param modifier 列表布局修饰器。
+ * @param library 当前完整网站库。
+ * @param defaultWebsiteId 当前默认网站id。
+ * @param onOpenWebsite 打开指定网站的回调。
+ * @param onEditWebsite 编辑指定网站的回调。
+ * @param onDeleteWebsite 删除指定网站的回调。
+ * @param onToggleHome 切换首页显示状态的回调。
+ * @param onTogglePinned 切换网站置顶状态的回调。
+ * @param onSetDefaultWebsite 设置默认网站的回调。
+ * @return 无返回值，直接输出高频网站列表或空状态。
+ */
+@Composable
+private fun WebsiteOpenCountList(
+    modifier: Modifier,
+    library: WebsiteLibrary,
+    defaultWebsiteId: String?,
+    onOpenWebsite: (WebsiteShortcut) -> Unit,
+    onEditWebsite: (WebsiteShortcut) -> Unit,
+    onDeleteWebsite: (WebsiteShortcut) -> Unit,
+    onToggleHome: (WebsiteShortcut, Boolean) -> Unit,
+    onTogglePinned: (WebsiteShortcut, Boolean) -> Unit,
+    onSetDefaultWebsite: (String) -> Boolean
+) {
+    val websites = remember(library.websites) {
+        websitesByOpenCount(library.websites)
+    }
+    if (websites.isEmpty()) {
+        Column(
+            modifier = modifier
+                .fillMaxWidth()
+                .padding(32.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                text = "还没有网站打开记录",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold
+            )
+        }
+        return
+    }
+
+    LazyColumn(
+        modifier = modifier.fillMaxSize(),
+        contentPadding = PaddingValues(
+            start = 20.dp,
+            top = 6.dp,
+            end = 20.dp,
+            bottom = 28.dp
+        ),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        items(
+            items = websites,
+            key = WebsiteShortcut::id
+        ) { website ->
+            WebsiteBookmarkRow(
+                website = website,
+                location = websiteFolderPath(library.folders, website.folderId),
+                isDefault = website.id == defaultWebsiteId,
+                onOpen = { onOpenWebsite(website) },
+                onEdit = { onEditWebsite(website) },
+                onDelete = { onDeleteWebsite(website) },
+                onSetDefault = { onSetDefaultWebsite(website.id) },
+                onToggleHome = { checked -> onToggleHome(website, checked) },
+                onTogglePinned = { pinned -> onTogglePinned(website, pinned) }
+            )
         }
     }
 }
@@ -675,6 +847,7 @@ private fun WebsiteFolderContents(
  * @param onOpenWebsite 点击网站结果时打开网站的回调。
  * @param onEditWebsite 编辑网站的回调。
  * @param onToggleHome 切换首页显示的回调。
+ * @param onTogglePinned 切换文件夹或网站置顶状态的回调。
  * @param onSetDefaultWebsite 设置默认网站的回调。
  *
  * @return 无返回值。
@@ -688,6 +861,7 @@ private fun WebsiteSearchResultList(
     onOpenWebsite: (WebsiteShortcut) -> Unit,
     onEditWebsite: (WebsiteShortcut) -> Unit,
     onToggleHome: (WebsiteShortcut, Boolean) -> Unit,
+    onTogglePinned: (String, Boolean) -> Unit,
     onSetDefaultWebsite: (String) -> Boolean
 ) {
     if (results.isEmpty()) {
@@ -720,7 +894,7 @@ private fun WebsiteSearchResultList(
             end = 20.dp,
             bottom = 28.dp
         ),
-        verticalArrangement = Arrangement.spacedBy(10.dp)
+        verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         item {
             Text(
@@ -737,7 +911,10 @@ private fun WebsiteSearchResultList(
                 WebsiteFolderSearchRow(
                     folder = folder,
                     path = result.path,
-                    onOpen = { onOpenFolder(folder.id) }
+                    onOpen = { onOpenFolder(folder.id) },
+                    onTogglePinned = { pinned ->
+                        onTogglePinned(result.key, pinned)
+                    }
                 )
             }
             result.website?.let { website ->
@@ -749,7 +926,10 @@ private fun WebsiteSearchResultList(
                     onEdit = { onEditWebsite(website) },
                     onDelete = null,
                     onSetDefault = { onSetDefaultWebsite(website.id) },
-                    onToggleHome = { checked -> onToggleHome(website, checked) }
+                    onToggleHome = { checked -> onToggleHome(website, checked) },
+                    onTogglePinned = { pinned ->
+                        onTogglePinned(result.key, pinned)
+                    }
                 )
             }
         }
@@ -764,6 +944,7 @@ private fun WebsiteSearchResultList(
  * @param onOpen 进入文件夹回调。
  * @param onEdit 编辑文件夹回调。
  * @param onDelete 删除文件夹回调。
+ * @param onTogglePinned 切换当前文件夹置顶状态的回调。
  *
  * @return 无返回值。
  */
@@ -773,23 +954,28 @@ private fun WebsiteFolderRow(
     childCount: Int,
     onOpen: () -> Unit,
     onEdit: () -> Unit,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    onTogglePinned: (Boolean) -> Unit
 ) {
+    var moreMenuExpanded by remember(folder.id) {
+        mutableStateOf(false)
+    }
+
     Card(
         onClick = onOpen,
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(20.dp),
+        shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.74f)
         )
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Surface(
-                modifier = Modifier.size(44.dp),
-                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier.size(36.dp),
+                shape = RoundedCornerShape(12.dp),
                 color = MaterialTheme.colorScheme.secondary
             ) {
                 Box(contentAlignment = Alignment.Center) {
@@ -800,28 +986,62 @@ private fun WebsiteFolderRow(
                     )
                 }
             }
-            Spacer(modifier = Modifier.width(12.dp))
+            Spacer(modifier = Modifier.width(8.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = folder.name,
-                    style = MaterialTheme.typography.titleMedium,
+                    style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.SemiBold,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
                 Text(
                     text = "$childCount 项 · 长按可拖动",
-                    style = MaterialTheme.typography.bodySmall,
+                    style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-            TextButton(onClick = onEdit) {
-                Text(text = "编辑")
+            TextButton(
+                onClick = { onTogglePinned(!folder.isPinned) },
+                contentPadding = PaddingValues(horizontal = 7.dp)
+            ) {
+                Text(
+                    text = if (folder.isPinned) "取消置顶" else "置顶",
+                    style = MaterialTheme.typography.labelMedium
+                )
             }
-            TextButton(onClick = onDelete) {
-                Text(text = "删除", color = MaterialTheme.colorScheme.error)
+            Box {
+                TextButton(
+                    onClick = { moreMenuExpanded = true },
+                    contentPadding = PaddingValues(horizontal = 7.dp)
+                ) {
+                    Text(text = "更多", style = MaterialTheme.typography.labelMedium)
+                }
+                DropdownMenu(
+                    expanded = moreMenuExpanded,
+                    onDismissRequest = { moreMenuExpanded = false }
+                ) {
+                    DropdownMenuItem(
+                        text = { Text(text = "编辑文件夹") },
+                        onClick = {
+                            moreMenuExpanded = false
+                            onEdit()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                text = "删除文件夹",
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        },
+                        onClick = {
+                            moreMenuExpanded = false
+                            onDelete()
+                        }
+                    )
+                }
             }
-            Text(text = "›", style = MaterialTheme.typography.titleLarge)
         }
     }
 }
@@ -837,6 +1057,7 @@ private fun WebsiteFolderRow(
  * @param onDelete 删除网站回调；搜索结果不显示删除时传null。
  * @param onSetDefault 设为默认网站回调。
  * @param onToggleHome 切换首页轮播开关回调。
+ * @param onTogglePinned 切换当前网站置顶状态的回调。
  *
  * @return 无返回值。
  */
@@ -849,114 +1070,142 @@ private fun WebsiteBookmarkRow(
     onEdit: () -> Unit,
     onDelete: (() -> Unit)?,
     onSetDefault: () -> Unit,
-    onToggleHome: (Boolean) -> Unit
+    onToggleHome: (Boolean) -> Unit,
+    onTogglePinned: (Boolean) -> Unit
 ) {
+    var moreMenuExpanded by remember(website.id) {
+        mutableStateOf(false)
+    }
+    val secondaryText = buildString {
+        append("打开 ")
+        append(website.openCount)
+        append(" 次 · ")
+        if (website.isPinned) {
+            append("已置顶 · ")
+        }
+        append(website.url)
+        location?.let { path ->
+            append(" · ")
+            append(path)
+        }
+        if (website.showOnHome) {
+            append(" · 首页")
+        }
+        if (isDefault) {
+            append(" · 默认")
+        }
+    }
+
     Card(
+        onClick = onOpen,
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(20.dp),
+        shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.94f)
         )
     ) {
-        Column(
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 13.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp)
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Surface(
-                    modifier = Modifier.size(40.dp),
-                    shape = RoundedCornerShape(13.dp),
-                    color = websitePaletteColor(
-                        palette = website.palette,
-                        customColorArgb = website.customColorArgb
+            Surface(
+                modifier = Modifier.size(36.dp),
+                shape = RoundedCornerShape(12.dp),
+                color = websitePaletteColor(
+                    palette = website.palette,
+                    customColorArgb = website.customColorArgb
+                )
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Text(
+                        text = website.title.firstOrNull()?.uppercaseChar()?.toString() ?: "网",
+                        color = androidx.compose.ui.graphics.Color.White,
+                        fontWeight = FontWeight.Bold
                     )
+                }
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = website.title,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = secondaryText,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            Box {
+                TextButton(
+                    onClick = { moreMenuExpanded = true },
+                    contentPadding = PaddingValues(horizontal = 7.dp)
                 ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Text(
-                            text = website.title.firstOrNull()?.uppercaseChar()?.toString() ?: "网",
-                            color = androidx.compose.ui.graphics.Color.White,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
+                    Text(text = "更多", style = MaterialTheme.typography.labelMedium)
                 }
-                Spacer(modifier = Modifier.width(12.dp))
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = website.title,
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                DropdownMenu(
+                    expanded = moreMenuExpanded,
+                    onDismissRequest = { moreMenuExpanded = false }
+                ) {
+                    DropdownMenuItem(
+                        text = {
+                            Text(text = if (website.isPinned) "取消置顶" else "置顶")
+                        },
+                        onClick = {
+                            moreMenuExpanded = false
+                            onTogglePinned(!website.isPinned)
+                        }
                     )
-                    Text(
-                        text = website.url,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                text = if (website.showOnHome) {
+                                    "从首页移除"
+                                } else {
+                                    "在首页显示"
+                                }
+                            )
+                        },
+                        onClick = {
+                            moreMenuExpanded = false
+                            onToggleHome(!website.showOnHome)
+                        }
                     )
-                    location?.let { path ->
-                        Text(
-                            text = path,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.primary,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
+                    DropdownMenuItem(
+                        text = {
+                            Text(text = if (isDefault) "当前默认网站" else "设为默认网站")
+                        },
+                        enabled = !isDefault,
+                        onClick = {
+                            moreMenuExpanded = false
+                            onSetDefault()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text(text = "编辑网站") },
+                        onClick = {
+                            moreMenuExpanded = false
+                            onEdit()
+                        }
+                    )
+                    onDelete?.let { delete ->
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    text = "删除网站",
+                                    color = MaterialTheme.colorScheme.error
+                                )
+                            },
+                            onClick = {
+                                moreMenuExpanded = false
+                                delete()
+                            }
                         )
-                    }
-                }
-                Text(
-                    text = "≡",
-                    style = MaterialTheme.typography.titleLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Checkbox(
-                    checked = website.showOnHome,
-                    onCheckedChange = onToggleHome
-                )
-                Text(
-                    text = "首页轮播",
-                    style = MaterialTheme.typography.bodySmall
-                )
-                Spacer(modifier = Modifier.weight(1f))
-                if (isDefault) {
-                    Surface(
-                        shape = RoundedCornerShape(50),
-                        color = MaterialTheme.colorScheme.primaryContainer
-                    ) {
-                        Text(
-                            text = "默认网站",
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer
-                        )
-                    }
-                }
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                TextButton(onClick = onOpen) {
-                    Text(text = "打开")
-                }
-                TextButton(onClick = onSetDefault, enabled = !isDefault) {
-                    Text(text = "设为默认")
-                }
-                TextButton(onClick = onEdit) {
-                    Text(text = "编辑")
-                }
-                onDelete?.let { delete ->
-                    TextButton(onClick = delete) {
-                        Text(text = "删除", color = MaterialTheme.colorScheme.error)
                     }
                 }
             }
@@ -970,6 +1219,7 @@ private fun WebsiteBookmarkRow(
  * @param folder 文件夹数据。
  * @param path 完整文件夹路径。
  * @param onOpen 进入文件夹的回调。
+ * @param onTogglePinned 切换搜索结果中文件夹置顶状态的回调。
  *
  * @return 无返回值。
  */
@@ -977,7 +1227,8 @@ private fun WebsiteBookmarkRow(
 private fun WebsiteFolderSearchRow(
     folder: WebsiteFolder,
     path: String,
-    onOpen: () -> Unit
+    onOpen: () -> Unit,
+    onTogglePinned: (Boolean) -> Unit
 ) {
     Card(
         onClick = onOpen,
@@ -988,7 +1239,7 @@ private fun WebsiteFolderSearchRow(
         )
     ) {
         Row(
-            modifier = Modifier.padding(16.dp),
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(text = "夹", fontWeight = FontWeight.Bold)
@@ -1005,7 +1256,16 @@ private fun WebsiteFolderSearchRow(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-            Text(text = "进入 ›")
+            TextButton(
+                onClick = { onTogglePinned(!folder.isPinned) },
+                contentPadding = PaddingValues(horizontal = 7.dp)
+            ) {
+                Text(
+                    text = if (folder.isPinned) "取消置顶" else "置顶",
+                    style = MaterialTheme.typography.labelMedium
+                )
+            }
+            Text(text = "进入 ›", style = MaterialTheme.typography.labelMedium)
         }
     }
 }
@@ -1443,7 +1703,8 @@ private fun WebsiteFolderEditorDialog(
                         id = folderId,
                         name = trimmedName,
                         parentId = parentId,
-                        sortOrder = newOrder
+                        sortOrder = newOrder,
+                        isPinned = folder?.isPinned ?: false
                     )
                     val updatedFolders = if (folder == null) {
                         library.folders + updatedFolder
@@ -1679,7 +1940,9 @@ private fun WebsiteBookmarkEditorDialog(
                         backgroundImageFileName = backgroundImageFileName,
                         folderId = folderId,
                         showOnHome = showOnHome,
-                        sortOrder = newOrder
+                        sortOrder = newOrder,
+                        isPinned = website?.isPinned ?: false,
+                        openCount = website?.openCount ?: 0L
                     )
                     val updatedWebsites = if (website == null) {
                         library.websites + updatedWebsite
@@ -1791,7 +2054,7 @@ private fun WebsiteFolderDeleteDialog(
  *
  * @return 同层文件夹和网站组成的有序列表。
  */
-private fun websiteNodesAt(
+internal fun websiteNodesAt(
     library: WebsiteLibrary,
     parentId: String?
 ): List<WebsiteManagerNode> {
@@ -1801,6 +2064,7 @@ private fun websiteNodesAt(
                 WebsiteManagerNode(
                     key = "folder:${folder.id}",
                     order = folder.sortOrder,
+                    isPinned = folder.isPinned,
                     folder = folder
                 )
             )
@@ -1810,28 +2074,34 @@ private fun websiteNodesAt(
                 WebsiteManagerNode(
                     key = "website:${website.id}",
                     order = website.sortOrder,
+                    isPinned = website.isPinned,
                     website = website
                 )
             )
         }
     }.sortedWith(
-        compareBy<WebsiteManagerNode> { node -> node.order }
+        compareBy<WebsiteManagerNode> { node -> if (node.isPinned) 0 else 1 }
+            .thenBy { node -> node.order }
             .thenBy { node -> if (node.folder != null) 0 else 1 }
             .thenBy { node -> node.key }
     )
 }
 
 /**
- * 按目标位置重新编号一个层级中的文件夹和网站。
+ * 在相同置顶状态的分组内重新编号一个层级中的文件夹和网站。
+ *
+ * 使用方法：
+ * 拖动结束后传入被拖动节点和界面计算出的整层目标位置。函数会把目标位置限制在节点当前的
+ * 置顶组或普通组内，只重新编号该组，不改变另一组、其他文件夹层级或节点的置顶状态。
  *
  * @param library 当前完整网站库。
  * @param parentId 当前层级父目录id。
  * @param draggedKey 被拖动节点的带类型key。
- * @param targetIndex 松手时目标索引。
+ * @param targetIndex 松手时相对于当前层完整列表的目标索引。
  *
  * @return 仅改变当前层sortOrder的新WebsiteLibrary；参数无效时原样返回。
  */
-private fun reorderWebsiteNodes(
+internal fun reorderWebsiteNodes(
     library: WebsiteLibrary,
     parentId: String?,
     draggedKey: String,
@@ -1839,13 +2109,31 @@ private fun reorderWebsiteNodes(
 ): WebsiteLibrary {
     val nodes = websiteNodesAt(library, parentId).toMutableList()
     val sourceIndex = nodes.indexOfFirst { node -> node.key == draggedKey }
-    if (sourceIndex < 0 || targetIndex !in nodes.indices || sourceIndex == targetIndex) {
+    if (sourceIndex < 0 || targetIndex !in nodes.indices) {
         return library
     }
 
-    val moved = nodes.removeAt(sourceIndex)
-    nodes.add(targetIndex, moved)
-    val orderByKey = nodes.mapIndexed { index, node -> node.key to index * WEBSITE_ORDER_STEP }.toMap()
+    val sourceNode = nodes[sourceIndex]
+    val firstGroupIndex = nodes.indexOfFirst { node -> node.isPinned == sourceNode.isPinned }
+    val lastGroupIndex = nodes.indexOfLast { node -> node.isPinned == sourceNode.isPinned }
+    val clampedTargetIndex = targetIndex.coerceIn(firstGroupIndex, lastGroupIndex)
+    val groupNodes = nodes.filter { node -> node.isPinned == sourceNode.isPinned }.toMutableList()
+    val sourceGroupIndex = groupNodes.indexOfFirst { node -> node.key == draggedKey }
+    val targetKey = nodes[clampedTargetIndex].key
+    val targetGroupIndex = groupNodes.indexOfFirst { node -> node.key == targetKey }
+    if (
+        sourceGroupIndex < 0 ||
+        targetGroupIndex < 0 ||
+        sourceGroupIndex == targetGroupIndex
+    ) {
+        return library
+    }
+
+    val moved = groupNodes.removeAt(sourceGroupIndex)
+    groupNodes.add(targetGroupIndex, moved)
+    val orderByKey = groupNodes
+        .mapIndexed { index, node -> node.key to index * WEBSITE_ORDER_STEP }
+        .toMap()
     return library.copy(
         folders = library.folders.map { folder ->
             orderByKey["folder:${folder.id}"]?.let { order -> folder.copy(sortOrder = order) } ?: folder
@@ -1858,20 +2146,73 @@ private fun reorderWebsiteNodes(
 }
 
 /**
+ * 更新一个文件夹或网站的置顶状态。
+ *
+ * 使用方法：
+ * 管理页的“置顶/取消置顶”按钮传入[WebsiteManagerNode.key]和目标状态。函数仅修改匹配节点的
+ * `isPinned`字段，保留所属文件夹、手动顺序和其他属性；列表随后由[websiteNodesAt]自动分成置顶
+ * 与普通两组，因此多个置顶节点仍可继续按原顺序显示和拖动。
+ *
+ * @param library 当前完整网站库。
+ * @param nodeKey 带`folder:`或`website:`前缀的稳定节点标识。
+ * @param pinned 目标置顶状态；true表示置顶，false表示取消置顶。
+ *
+ * @return 仅目标节点状态变化的新网站库；节点不存在或状态没有变化时返回原对象。
+ */
+internal fun updateWebsiteNodePinned(
+    library: WebsiteLibrary,
+    nodeKey: String,
+    pinned: Boolean
+): WebsiteLibrary {
+    val folderPrefix = "folder:"
+    val websitePrefix = "website:"
+    return when {
+        nodeKey.startsWith(folderPrefix) -> {
+            val folderId = nodeKey.removePrefix(folderPrefix)
+            val target = library.folders.firstOrNull { folder -> folder.id == folderId }
+                ?: return library
+            if (target.isPinned == pinned) return library
+            library.copy(
+                folders = library.folders.map { folder ->
+                    if (folder.id == folderId) folder.copy(isPinned = pinned) else folder
+                }
+            )
+        }
+
+        nodeKey.startsWith(websitePrefix) -> {
+            val websiteId = nodeKey.removePrefix(websitePrefix)
+            val target = library.websites.firstOrNull { website -> website.id == websiteId }
+                ?: return library
+            if (target.isPinned == pinned) return library
+            library.copy(
+                websites = library.websites.map { website ->
+                    if (website.id == websiteId) website.copy(isPinned = pinned) else website
+                }
+            )
+        }
+
+        else -> library
+    }
+}
+
+/**
  * 计算在指定父目录末尾新增节点时使用的顺序值。
  *
  * @param library 当前完整网站库。
  * @param parentId 目标父目录id；null表示根目录。
  *
- * @return 大于当前同层最大顺序的数值；空目录返回0。
+ * @return 正常范围内大于当前同层最大顺序的数值；接近整数上限时饱和，空目录返回0。
  */
 private fun nextWebsiteNodeOrder(
     library: WebsiteLibrary,
     parentId: String?
 ): Int {
-    return websiteNodesAt(library, parentId)
-        .maxOfOrNull { node -> node.order + WEBSITE_ORDER_STEP }
-        ?: 0
+    val maximumOrder = websiteNodesAt(library, parentId)
+        .maxOfOrNull(WebsiteManagerNode::order)
+        ?: return 0
+    return maximumOrder
+        .coerceAtMost(Int.MAX_VALUE - WEBSITE_ORDER_STEP)
+        .plus(WEBSITE_ORDER_STEP)
 }
 
 /**
@@ -2017,10 +2358,19 @@ private fun websitePaletteColor(
     return websiteCardVisualStyle(palette, customColorArgb).actionColor
 }
 
-/** 当前文件夹混合列表中的内部节点。 */
-private data class WebsiteManagerNode(
+/**
+ * 当前文件夹混合列表中的内部节点。
+ *
+ * @param key 带类型前缀的稳定节点标识，用于拖动和置顶操作。
+ * @param order 当前置顶分组内的手动顺序。
+ * @param isPinned true表示属于置顶组，false表示属于普通组。
+ * @param folder 文件夹数据；网站节点为null。
+ * @param website 网站数据；文件夹节点为null。
+ */
+internal data class WebsiteManagerNode(
     val key: String,
     val order: Int,
+    val isPinned: Boolean,
     val folder: WebsiteFolder? = null,
     val website: WebsiteShortcut? = null
 )

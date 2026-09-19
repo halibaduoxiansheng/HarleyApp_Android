@@ -698,6 +698,15 @@ fun HarleyApp(
         }
     }
 
+    // 只有用户主动从App入口成功打开收藏网站时才增加次数。网页刷新、页面内部跳转和恢复历史
+    // 标签不经过这里，因此不会把被动加载误计为一次新的访问。
+    val recordWebsiteOpen: (String) -> Unit = { websiteId ->
+        websiteRepository.recordWebsiteOpened(websiteId)?.let { updatedLibrary ->
+            websiteLibrary = updatedLibrary
+            defaultWebsiteId = websiteRepository.getDefaultWebsiteId(updatedLibrary.websites)
+        }
+    }
+
     // 所有应用内网站入口统一通过这里追加标签。同一收藏重复点击也会得到独立标签；达到上限时
     // 保留当前会话并提示用户手动关闭，不会静默回收任何仍在使用的网页。
     val openWebsiteInNewTab: (WebsiteShortcut) -> Boolean = { website ->
@@ -709,6 +718,7 @@ fun HarleyApp(
         val opened = updatedSession != websiteBrowserSession
         if (opened) {
             websiteBrowserSession = updatedSession
+            recordWebsiteOpen(website.id)
         } else {
             coroutineScope.launch {
                 snackbarHostState.showSnackbar(WEBSITE_BROWSER_TAB_LIMIT_MESSAGE)
@@ -2241,6 +2251,7 @@ fun HarleyApp(
                     )
                     if (updatedSession != websiteBrowserSession) {
                         websiteBrowserSession = updatedSession
+                        recordWebsiteOpen(website.id)
                         companionProgress = companionRepository.claimTask(
                             task = CompanionTask.WEBSITE_VISIT,
                             currentEpochDay = LocalDate.now().toEpochDay()
@@ -2290,10 +2301,6 @@ fun HarleyApp(
                         )
                     }
                     result
-                },
-                onManageWebsites = {
-                    detailReturnSectionName = AppSection.WEBSITE.name
-                    currentSectionName = AppSection.BOOKMARKS.name
                 }
             )
         }

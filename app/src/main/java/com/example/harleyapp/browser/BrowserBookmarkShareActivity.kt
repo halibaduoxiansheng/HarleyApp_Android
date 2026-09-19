@@ -70,7 +70,7 @@ class BrowserBookmarkShareActivity : Activity() {
         )
         when (result) {
             WebsiteBookmarkSaveResult.SAVED ->
-                showResultMessage("已收藏到HarleyApp网站收藏")
+                showResultMessage("已收藏到HarleyApp今日日期文件夹")
             WebsiteBookmarkSaveResult.ALREADY_SAVED ->
                 showResultMessage("当前网页已经收藏")
             WebsiteBookmarkSaveResult.INVALID_URL ->

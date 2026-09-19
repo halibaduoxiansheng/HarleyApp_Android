@@ -35,6 +35,8 @@ enum class WebsitePalette {
  * @param folderId 所属收藏夹标识；null表示放在根目录的“未分类”区域。
  * @param showOnHome true表示参与首页网站卡片轮播，false表示只在收藏详情中显示。
  * @param sortOrder 同一层级中的显示顺序，数值越小越靠前。
+ * @param isPinned true表示在当前文件夹内固定显示于普通条目前方；多个置顶条目仍按sortOrder排列。
+ * @param openCount 用户从App入口成功打开该网站的累计次数，不统计网页刷新、内部跳转或会话恢复。
  */
 data class WebsiteShortcut(
     val id: String,
@@ -45,7 +47,9 @@ data class WebsiteShortcut(
     val backgroundImageFileName: String? = null,
     val folderId: String? = null,
     val showOnHome: Boolean = true,
-    val sortOrder: Int = 0
+    val sortOrder: Int = 0,
+    val isPinned: Boolean = false,
+    val openCount: Long = 0L
 )
 
 /**
@@ -116,12 +120,14 @@ private val WEBSITE_BACKGROUND_FILE_PATTERN = Regex(
  * @param name 用户自定义的文件夹名称。
  * @param parentId 父文件夹标识；null表示根目录。
  * @param sortOrder 文件夹与同层网站共同使用的显示顺序，数值越小越靠前。
+ * @param isPinned true表示在父目录内固定显示于普通条目前方；多个置顶条目仍按sortOrder排列。
  */
 data class WebsiteFolder(
     val id: String,
     val name: String,
     val parentId: String? = null,
-    val sortOrder: Int = 0
+    val sortOrder: Int = 0,
+    val isPinned: Boolean = false
 )
 
 /**
@@ -177,6 +183,7 @@ fun homeCarouselWebsites(library: WebsiteLibrary): List<WebsiteShortcut> {
                     WebsiteTreeOrderNode(
                         id = folder.id,
                         order = folder.sortOrder,
+                        isPinned = folder.isPinned,
                         folder = folder
                     )
                 )
@@ -186,11 +193,16 @@ fun homeCarouselWebsites(library: WebsiteLibrary): List<WebsiteShortcut> {
                     WebsiteTreeOrderNode(
                         id = website.id,
                         order = website.sortOrder,
+                        isPinned = website.isPinned,
                         website = website
                     )
                 )
             }
-        }.sortedWith(compareBy<WebsiteTreeOrderNode> { node -> node.order }.thenBy { node -> node.id })
+        }.sortedWith(
+            compareBy<WebsiteTreeOrderNode> { node -> if (node.isPinned) 0 else 1 }
+                .thenBy { node -> node.order }
+                .thenBy { node -> node.id }
+        )
 
         nodes.forEach { node ->
             node.website?.takeIf { website -> website.showOnHome }?.let(output::add)
@@ -205,10 +217,32 @@ fun homeCarouselWebsites(library: WebsiteLibrary): List<WebsiteShortcut> {
     // 损坏数据中的孤立网站也应可恢复显示；正常保存的数据不会进入此分支。
     library.websites
         .filter { website -> website.showOnHome && output.none { current -> current.id == website.id } }
-        .sortedWith(compareBy<WebsiteShortcut> { website -> website.sortOrder }.thenBy { website -> website.id })
+        .sortedWith(
+            compareBy<WebsiteShortcut> { website -> if (website.isPinned) 0 else 1 }
+                .thenBy { website -> website.sortOrder }
+                .thenBy { website -> website.id }
+        )
         .forEach(output::add)
 
     return output
+}
+
+/**
+ * 按累计打开次数从高到低排列网站。
+ *
+ * 使用方法：
+ * 新标签页和收藏管理页的“打开次数排序”视图传入当前完整网站列表。打开次数相同时按网站名称和
+ * 稳定标识排序，确保重组或重新进入页面时不会出现同次数项目随机换位。
+ *
+ * @param websites 待排序的网站列表。
+ * @return 打开次数降序的网站副本；原列表不发生修改。
+ */
+fun websitesByOpenCount(websites: List<WebsiteShortcut>): List<WebsiteShortcut> {
+    return websites.sortedWith(
+        compareByDescending<WebsiteShortcut> { website -> website.openCount }
+            .thenBy { website -> website.title.lowercase(Locale.ROOT) }
+            .thenBy { website -> website.id }
+    )
 }
 
 /**
@@ -515,6 +549,7 @@ const val MAX_WEBSITE_FOLDER_DEPTH = 5
 private data class WebsiteTreeOrderNode(
     val id: String,
     val order: Int,
+    val isPinned: Boolean,
     val folder: WebsiteFolder? = null,
     val website: WebsiteShortcut? = null
 )

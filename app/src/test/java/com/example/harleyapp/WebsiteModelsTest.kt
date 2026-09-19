@@ -21,6 +21,7 @@ import com.example.harleyapp.model.resolveBrowserBookmarkPage
 import com.example.harleyapp.model.resolveSharedBrowserPage
 import com.example.harleyapp.model.websiteFolderPath
 import com.example.harleyapp.model.websiteMatchesQuery
+import com.example.harleyapp.model.websitesByOpenCount
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -523,5 +524,98 @@ class WebsiteModelsTest {
         )
         assertFalse(isValidWebsiteBackgroundFileName("../background.jpg"))
         assertFalse(isValidWebsiteBackgroundFileName("background.png"))
+    }
+
+    /**
+     * 验证旧代码未传新字段时，网站和文件夹默认保持未置顶且打开次数为零。
+     *
+     * @return 无返回值；默认值破坏旧数据兼容时由JUnit报告失败。
+     */
+    @Test
+    fun websiteAndFolderUseBackwardCompatibleStatisticsDefaults() {
+        val website = WebsiteShortcut("site", "网站", "https://example.com")
+        val folder = WebsiteFolder("folder", "文件夹")
+
+        assertFalse(website.isPinned)
+        assertEquals(0L, website.openCount)
+        assertFalse(folder.isPinned)
+    }
+
+    /**
+     * 验证根目录中的置顶文件夹和置顶网站共同排在普通节点之前，且置顶组继续服从手动顺序。
+     *
+     * @return 无返回值；文件夹子树、多个置顶节点或普通网站顺序错误时由JUnit报告失败。
+     */
+    @Test
+    fun homeCarouselPlacesPinnedFoldersAndWebsitesBeforeRegularNodes() {
+        val pinnedFolder = WebsiteFolder(
+            id = "pinned-folder",
+            name = "置顶文件夹",
+            sortOrder = 10,
+            isPinned = true
+        )
+        val library = WebsiteLibrary(
+            folders = listOf(pinnedFolder),
+            websites = listOf(
+                WebsiteShortcut(
+                    id = "regular",
+                    title = "普通网站",
+                    url = "https://regular.example.com",
+                    sortOrder = 0
+                ),
+                WebsiteShortcut(
+                    id = "pinned-site",
+                    title = "置顶网站",
+                    url = "https://pinned.example.com",
+                    sortOrder = 20,
+                    isPinned = true
+                ),
+                WebsiteShortcut(
+                    id = "folder-child",
+                    title = "文件夹网站",
+                    url = "https://child.example.com",
+                    folderId = pinnedFolder.id
+                )
+            )
+        )
+
+        assertEquals(
+            listOf("folder-child", "pinned-site", "regular"),
+            homeCarouselWebsites(library).map(WebsiteShortcut::id)
+        )
+    }
+
+    /**
+     * 验证高频网站按累计打开次数降序排列，相同次数使用名称和稳定id确定顺序。
+     *
+     * @return 无返回值；次数降序或同次数稳定排序失效时由JUnit报告失败。
+     */
+    @Test
+    fun websitesSortByOpenCountDescending() {
+        val websites = listOf(
+            WebsiteShortcut(
+                id = "low",
+                title = "低频",
+                url = "https://low.example.com",
+                openCount = 2L
+            ),
+            WebsiteShortcut(
+                id = "high-b",
+                title = "B网站",
+                url = "https://b.example.com",
+                openCount = 8L
+            ),
+            WebsiteShortcut(
+                id = "high-a",
+                title = "A网站",
+                url = "https://a.example.com",
+                openCount = 8L
+            )
+        )
+
+        assertEquals(
+            listOf("high-a", "high-b", "low"),
+            websitesByOpenCount(websites).map(WebsiteShortcut::id)
+        )
     }
 }
