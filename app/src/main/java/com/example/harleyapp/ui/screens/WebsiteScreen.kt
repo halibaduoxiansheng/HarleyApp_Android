@@ -84,8 +84,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
@@ -180,7 +182,8 @@ fun WebsiteScreen(
     val activeTabId = session.activeTabId
         ?.takeIf { selectedId -> session.tabs.any { tab -> tab.id == selectedId } }
         ?: session.tabs.firstOrNull()?.id
-    val loadedTabIds = remember { mutableStateListOf<String>() }
+    val activeTab = session.tabs.firstOrNull { tab -> tab.id == activeTabId }
+    val createdWebViewTabIds = remember { mutableStateListOf<String>() }
     var showTabOverview by remember { mutableStateOf(false) }
 
     // 一级页面仍可能在Activity退到后台时留在组合中，因此额外跟踪宿主生命周期。只有“网站”栏目
@@ -208,17 +211,21 @@ fun WebsiteScreen(
         }
     }
 
-    // 只为本次会话中真正显示过的标签创建WebView。冷启动恢复多个标签时不会一次创建全部渲染器，
-    // 但用户切换离开的标签仍留在列表中，因此返回时可以继续原页面、历史、滚动和表单状态。
+    // 标签被关闭时立即清理创建记录；对应WebsiteTabSession离开组合后会销毁自己的WebView。
     SideEffect {
-        if (isBrowserActive) {
-            activeTabId?.let { selectedId ->
-                if (selectedId !in loadedTabIds) {
-                    loadedTabIds += selectedId
-                }
-            }
-        }
-        loadedTabIds.retainAll(session.tabs.map(WebsiteBrowserTab::id).toSet())
+        createdWebViewTabIds.retainAll(session.tabs.map(WebsiteBrowserTab::id).toSet())
+    }
+
+    // 首次打开有网址的标签时，先让Compose绘制顶部标签栏和内容区占位，再在下一帧创建WebView。
+    // WebView初始化或Chromium首屏较慢时，用户仍能先看到并操作标签栏，不会被整屏白色画面遮住。
+    // 已创建过的标签继续保留同一个WebView，切回时不会重复加载页面、历史、滚动和表单状态。
+    LaunchedEffect(isBrowserActive, activeTab?.id, activeTab?.url) {
+        val tabToLoad = activeTab?.takeIf { tab ->
+            isBrowserActive && tab.url != null && tab.id !in createdWebViewTabIds
+        } ?: return@LaunchedEffect
+
+        withFrameNanos { }
+        createdWebViewTabIds += tabToLoad.id
     }
 
     Box(modifier = modifier.fillMaxSize()) {
@@ -252,7 +259,6 @@ fun WebsiteScreen(
                     .fillMaxWidth()
                     .weight(1f)
             ) {
-                val activeTab = session.tabs.firstOrNull { tab -> tab.id == activeTabId }
                 if (isBrowserActive && activeTab != null && activeTab.url == null) {
                     WebsiteNewTabPage(
                         modifier = Modifier.fillMaxSize(),
@@ -261,13 +267,20 @@ fun WebsiteScreen(
                             onOpenWebsiteInTab(activeTab.id, website)
                         }
                     )
+                } else if (
+                    isBrowserActive &&
+                    activeTab != null &&
+                    activeTab.url != null &&
+                    activeTab.id !in createdWebViewTabIds
+                ) {
+                    WebsiteWebViewLoadingPlaceholder(
+                        modifier = Modifier.fillMaxSize()
+                    )
                 }
 
                 session.tabs
                     .filter { tab ->
-                        tab.url != null && (
-                            tab.id in loadedTabIds || (isBrowserActive && tab.id == activeTabId)
-                            )
+                        tab.url != null && tab.id in createdWebViewTabIds
                     }
                     .forEach { tab ->
                         key(tab.id) {
@@ -308,6 +321,38 @@ fun WebsiteScreen(
                     }
                     onCloseTab(tabId)
                 }
+            )
+        }
+    }
+}
+
+/**
+ * 在首次创建WebView前显示不会遮挡浏览器标签栏的加载占位。
+ *
+ * 使用方法：
+ * [WebsiteScreen]检测到活动标签已有网址、但对应WebView尚未创建时，把本组件放在标签栏下方的
+ * 内容区域。占位只使用Compose绘制，不初始化Chromium，因此浏览器外壳可以先完成首帧显示。
+ *
+ * @param modifier 外部传入的内容区尺寸修饰器。
+ * @return 无返回值，直接输出主题背景、加载指示器和状态文字。
+ */
+@Composable
+private fun WebsiteWebViewLoadingPlaceholder(modifier: Modifier = Modifier) {
+    Surface(
+        modifier = modifier,
+        color = MaterialTheme.colorScheme.background
+    ) {
+        Column(
+            modifier = Modifier.fillMaxSize(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            CircularProgressIndicator()
+            Text(
+                modifier = Modifier.padding(top = 14.dp),
+                text = "正在准备网页…",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodyMedium
             )
         }
     }
@@ -1260,7 +1305,9 @@ private fun WebsiteTabSession(
                 .weight(1f)
         ) {
             AndroidView(
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clipToBounds(),
                 factory = {
                     (webView.parent as? ViewGroup)?.removeView(webView)
                     webView

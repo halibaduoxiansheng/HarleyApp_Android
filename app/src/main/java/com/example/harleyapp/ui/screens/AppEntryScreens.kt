@@ -1,11 +1,11 @@
 package com.example.harleyapp.ui.screens
 
+import android.widget.ImageView
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -41,14 +41,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.harleyapp.R
+import androidx.compose.ui.viewinterop.AndroidView
 import com.example.harleyapp.data.AppLockRepository
 import com.example.harleyapp.model.CompanionCategory
 import kotlinx.coroutines.delay
@@ -274,10 +273,16 @@ fun AppUnlockScreen(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
-                Image(
+                // 直接读取Manifest当前声明的应用图标，确保密码锁画面与桌面App图标始终一致。
+                AndroidView(
                     modifier = Modifier.size(92.dp),
-                    painter = painterResource(R.drawable.ic_family_launcher_art),
-                    contentDescription = "App宠物密码锁"
+                    factory = { context ->
+                        ImageView(context).apply {
+                            scaleType = ImageView.ScaleType.FIT_CENTER
+                            setImageResource(context.applicationInfo.icon)
+                            contentDescription = "halibaduo 应用图标"
+                        }
+                    }
                 )
                 Text(
                     text = "halibaduo 已锁定",

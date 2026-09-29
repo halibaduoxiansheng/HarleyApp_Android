@@ -31,8 +31,8 @@ android {
         applicationId = "com.example.harleyapp"
         minSdk = 26
         targetSdk = 37
-        versionCode = 5
-        versionName = "1.0.5"
+        versionCode = 6
+        versionName = "1.0.6"
 
         ndk {
             // 静态sherpa AAR仅在过时32位x86目录残留共享ORT；排除该ABI可让其与M2M的ORT 1.28.0完全隔离。
