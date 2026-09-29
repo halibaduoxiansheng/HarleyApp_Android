@@ -2,7 +2,6 @@ package com.example.harleyapp
 
 import com.example.harleyapp.data.decodeWebsiteBrowserSession
 import com.example.harleyapp.data.encodeWebsiteBrowserSession
-import com.example.harleyapp.model.MAX_WEBSITE_BROWSER_TAB_COUNT
 import com.example.harleyapp.model.WEBSITE_BROWSER_NEW_TAB_TITLE
 import com.example.harleyapp.model.WebsiteBrowserSession
 import com.example.harleyapp.model.WebsiteBrowserTab
@@ -58,13 +57,13 @@ class WebsiteBrowserSessionRepositoryTest {
     }
 
     /**
-     * 验证读取时会丢弃空标识、非HTTP网址和重复项，并只保留前八个有效标签。
+     * 验证读取时会丢弃空标识、非HTTP网址和重复项，同时完整保留超过八个的有效标签。
      *
-     * @return 无返回值；非法数据进入模型、重复标签覆盖首项或数量超过上限时由JUnit报告失败。
+     * @return 无返回值；非法数据进入模型、重复标签覆盖首项或有效标签被按数量截断时由JUnit报告失败。
      */
     @Test
     fun decodeFiltersInvalidDuplicateAndExcessTabs() {
-        val validTabs = (1..9).joinToString(separator = ",") { index ->
+        val validTabs = (1..12).joinToString(separator = ",") { index ->
             """{"id":"tab-$index","website_id":"website-$index","title":"页面$index","url":"https://example.com/$index"}"""
         }
         val encoded = """
@@ -86,10 +85,10 @@ class WebsiteBrowserSessionRepositoryTest {
             fallbackTabId = "unused-fallback"
         )
 
-        assertEquals(MAX_WEBSITE_BROWSER_TAB_COUNT, restored.tabs.size)
-        assertEquals((1..8).map { index -> "tab-$index" }, restored.tabs.map { tab -> tab.id })
+        assertEquals(12, restored.tabs.size)
+        assertEquals((1..12).map { index -> "tab-$index" }, restored.tabs.map { tab -> tab.id })
         assertEquals("重复项", restored.tabs.first().title)
-        assertEquals("tab-1", restored.activeTabId)
+        assertEquals("tab-9", restored.activeTabId)
         assertTrue(restored.tabs.none { tab -> tab.id == "bad-url" })
     }
 

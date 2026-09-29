@@ -83,6 +83,10 @@ class WebsiteToolRepository(context: Context) {
             playbackRate = json.optDouble(JSON_PLAYBACK_RATE, defaults.playbackRate.toDouble())
                 .toFloat(),
             blockAutoplay = json.optBoolean(JSON_BLOCK_AUTOPLAY, defaults.blockAutoplay),
+            mediaPreloadEnabled = json.optBoolean(
+                JSON_MEDIA_PRELOAD,
+                defaults.mediaPreloadEnabled
+            ),
             videoMuted = json.optBoolean(JSON_VIDEO_MUTED, defaults.videoMuted),
             videoLoopEnabled = json.optBoolean(JSON_VIDEO_LOOP, defaults.videoLoopEnabled),
             textSelectionEnabled = json.optBoolean(
@@ -110,6 +114,7 @@ class WebsiteToolRepository(context: Context) {
         return JSONObject()
             .put(JSON_PLAYBACK_RATE, settings.playbackRate.toDouble())
             .put(JSON_BLOCK_AUTOPLAY, settings.blockAutoplay)
+            .put(JSON_MEDIA_PRELOAD, settings.mediaPreloadEnabled)
             .put(JSON_VIDEO_MUTED, settings.videoMuted)
             .put(JSON_VIDEO_LOOP, settings.videoLoopEnabled)
             .put(JSON_TEXT_SELECTION, settings.textSelectionEnabled)
@@ -130,6 +135,7 @@ class WebsiteToolRepository(context: Context) {
 
         private const val JSON_PLAYBACK_RATE = "playback_rate"
         private const val JSON_BLOCK_AUTOPLAY = "block_autoplay"
+        private const val JSON_MEDIA_PRELOAD = "media_preload"
         private const val JSON_VIDEO_MUTED = "video_muted"
         private const val JSON_VIDEO_LOOP = "video_loop"
         private const val JSON_TEXT_SELECTION = "text_selection"

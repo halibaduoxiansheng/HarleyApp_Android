@@ -698,17 +698,24 @@ fun HarleyApp(
         }
     }
 
-    // 只有用户主动从App入口成功打开收藏网站时才增加次数。网页刷新、页面内部跳转和恢复历史
-    // 标签不经过这里，因此不会把被动加载误计为一次新的访问。
-    val recordWebsiteOpen: (String) -> Unit = { websiteId ->
-        websiteRepository.recordWebsiteOpened(websiteId)?.let { updatedLibrary ->
+    // 网站打开次数以“用户实际查看收藏来源标签”为准。记录函数统一刷新内存网站库；写盘失败时
+    // 明确提示，避免网页已经显示但计数静默丢失。
+    val recordWebsiteOpen: (String) -> Boolean = { websiteId ->
+        val updatedLibrary = websiteRepository.recordWebsiteOpened(websiteId)
+        if (updatedLibrary != null) {
             websiteLibrary = updatedLibrary
             defaultWebsiteId = websiteRepository.getDefaultWebsiteId(updatedLibrary.websites)
+            true
+        } else {
+            coroutineScope.launch {
+                snackbarHostState.showSnackbar("网站已打开，但打开次数保存失败")
+            }
+            false
         }
     }
 
-    // 所有应用内网站入口统一通过这里追加标签。同一收藏重复点击也会得到独立标签；达到上限时
-    // 保留当前会话并提示用户手动关闭，不会静默回收任何仍在使用的网页。
+    // 所有应用内网站入口统一通过这里追加标签。同一收藏重复点击也会得到独立标签；标签数量不设
+    // 固定上限，设备内存不足时由Android按正常进程生命周期回收，而不是由App静默关闭页面。
     val openWebsiteInNewTab: (WebsiteShortcut) -> Boolean = { website ->
         val updatedSession = createWebsiteBrowserTab(
             session = websiteBrowserSession,
@@ -718,10 +725,9 @@ fun HarleyApp(
         val opened = updatedSession != websiteBrowserSession
         if (opened) {
             websiteBrowserSession = updatedSession
-            recordWebsiteOpen(website.id)
         } else {
             coroutineScope.launch {
-                snackbarHostState.showSnackbar(WEBSITE_BROWSER_TAB_LIMIT_MESSAGE)
+                snackbarHostState.showSnackbar(WEBSITE_BROWSER_TAB_CREATE_FAILED_MESSAGE)
             }
         }
         opened
@@ -742,7 +748,7 @@ fun HarleyApp(
             websiteBrowserSession = updatedSession
         } else {
             coroutineScope.launch {
-                snackbarHostState.showSnackbar(WEBSITE_BROWSER_TAB_LIMIT_MESSAGE)
+                snackbarHostState.showSnackbar(WEBSITE_BROWSER_TAB_CREATE_FAILED_MESSAGE)
             }
         }
         opened
@@ -800,6 +806,32 @@ fun HarleyApp(
     val currentSection = AppSection.entries.firstOrNull {
         it.name == currentSectionName
     } ?: AppSection.HOME
+    var lastCountedWebsiteViewToken by rememberSaveable {
+        mutableStateOf("")
+    }
+    val activeWebsiteTab = websiteBrowserSession.tabs.firstOrNull { tab ->
+        tab.id == websiteBrowserSession.activeTabId
+    }
+
+    // 进入网站页、切换标签或把空白标签填成收藏网站时各记录一次实际查看。令牌使用rememberSaveable
+    // 跨Activity重建保留，旋转屏幕不会重复计数；离开网站页后清空，下一次重新进入会计为新打开。
+    LaunchedEffect(
+        currentSection,
+        activeWebsiteTab?.id,
+        activeWebsiteTab?.websiteId
+    ) {
+        if (currentSection != AppSection.WEBSITE) {
+            lastCountedWebsiteViewToken = ""
+            return@LaunchedEffect
+        }
+
+        val websiteId = activeWebsiteTab?.websiteId ?: return@LaunchedEffect
+        val viewToken = "${activeWebsiteTab.id}|$websiteId"
+        if (lastCountedWebsiteViewToken != viewToken) {
+            lastCountedWebsiteViewToken = viewToken
+            recordWebsiteOpen(websiteId)
+        }
+    }
     val featureCenterPage = FeatureCenterPage.entries.firstOrNull { page ->
         page.name == featureCenterPageName
     } ?: FeatureCenterPage.OVERVIEW
@@ -2239,7 +2271,7 @@ fun HarleyApp(
                         websiteBrowserSession = updatedSession
                     } else {
                         coroutineScope.launch {
-                            snackbarHostState.showSnackbar(WEBSITE_BROWSER_TAB_LIMIT_MESSAGE)
+                            snackbarHostState.showSnackbar(WEBSITE_BROWSER_TAB_CREATE_FAILED_MESSAGE)
                         }
                     }
                 },
@@ -2251,7 +2283,6 @@ fun HarleyApp(
                     )
                     if (updatedSession != websiteBrowserSession) {
                         websiteBrowserSession = updatedSession
-                        recordWebsiteOpen(website.id)
                         companionProgress = companionRepository.claimTask(
                             task = CompanionTask.WEBSITE_VISIT,
                             currentEpochDay = LocalDate.now().toEpochDay()
@@ -2410,8 +2441,8 @@ private const val COMPANION_DATE_REFRESH_INTERVAL_MILLIS = 60_000L
 /** 标签标题或地址连续变化后合并保存的等待时间，减少主线程附近的小型磁盘写入。 */
 private const val WEBSITE_BROWSER_SESSION_SAVE_DELAY_MILLIS = 250L
 
-/** 达到WebView内存保护上限时显示的统一提示，不会自动关闭或替换现有标签。 */
-private const val WEBSITE_BROWSER_TAB_LIMIT_MESSAGE = "最多保留8个标签页，请先手动关闭一个"
+/** UUID碰撞或模型校验失败导致新标签无法创建时显示的兜底提示。 */
+private const val WEBSITE_BROWSER_TAB_CREATE_FAILED_MESSAGE = "新建标签失败，请重试"
 
 /** 覆盖安装后通知监听服务自动重绑的最大尝试次数。 */
 private const val NOTIFICATION_REBIND_RETRY_COUNT = 3

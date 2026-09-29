@@ -13,6 +13,7 @@ import com.example.harleyapp.ui.screens.calculateFullscreenBallOffset
 import com.example.harleyapp.ui.screens.fullscreenHoldDirectionForPosition
 import com.example.harleyapp.ui.screens.shouldShowInlineWebsiteScriptTools
 import com.example.harleyapp.ui.screens.websiteBookmarkSaveMessage
+import com.example.harleyapp.web.WebsiteScriptController
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -39,6 +40,7 @@ class WebsiteToolModelsTest {
         assertEquals(1f, settings.playbackRate)
         assertEquals(100, settings.textZoomPercent)
         assertFalse(settings.blockAutoplay)
+        assertFalse(settings.mediaPreloadEnabled)
         assertFalse(settings.videoMuted)
         assertFalse(settings.videoLoopEnabled)
         assertFalse(settings.textSelectionEnabled)
@@ -77,6 +79,7 @@ class WebsiteToolModelsTest {
             nightOverlayAlpha = -2f,
             textZoomPercent = 10,
             blockAutoplay = true,
+            mediaPreloadEnabled = true,
             keepScreenOn = true
         ).normalized()
 
@@ -84,7 +87,29 @@ class WebsiteToolModelsTest {
         assertEquals(MIN_NIGHT_OVERLAY_ALPHA, normalized.nightOverlayAlpha)
         assertEquals(MIN_TEXT_ZOOM_PERCENT, normalized.textZoomPercent)
         assertTrue(normalized.blockAutoplay)
+        assertTrue(normalized.mediaPreloadEnabled)
         assertTrue(normalized.keepScreenOn)
+    }
+
+    /**
+     * 验证弱网预加载开关会被完整写入网页脚本，并且不会残留String.format占位符。
+     *
+     * @return 无返回值；脚本字段、开关值或格式化结果错误时由JUnit报告失败。
+     */
+    @Test
+    fun weakNetworkPreloadSettingIsFormattedIntoWebsiteScript() {
+        val controller = WebsiteScriptController()
+        val enabledScript = controller.buildSettingsScript(
+            WebsiteToolSettings(mediaPreloadEnabled = true)
+        )
+        val disabledScript = controller.buildSettingsScript(
+            WebsiteToolSettings(mediaPreloadEnabled = false)
+        )
+
+        assertTrue(enabledScript.contains("preloadMedia: true"))
+        assertTrue(disabledScript.contains("preloadMedia: false"))
+        assertFalse(enabledScript.contains("%b"))
+        assertFalse(enabledScript.contains("%.2f"))
     }
 
     /**

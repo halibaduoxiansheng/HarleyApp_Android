@@ -15,7 +15,7 @@ import java.util.Locale
 class WebsiteScriptController {
 
     /**
-     * 应用倍速、自动播放、静音、循环、文字选择和夜间遮罩设置。
+     * 应用倍速、自动播放、媒体预加载、静音、循环、文字选择和夜间遮罩设置。
      *
      * 脚本会安装MutationObserver和低频检查器，让单页应用后续创建的视频继续使用用户设置。
      * 跨域iframe受浏览器同源策略限制，无法访问时会安全跳过。
@@ -30,18 +30,32 @@ class WebsiteScriptController {
         settings: WebsiteToolSettings,
         onMediaCountApplied: (Int) -> Unit = {}
     ) {
+        val script = buildSettingsScript(settings)
+        evaluateMediaScript(webView, script, onMediaCountApplied)
+    }
+
+    /**
+     * 把网页工具设置格式化为可直接注入的JavaScript。
+     *
+     * 使用方法：生产代码由[applySettings]调用；JVM单元测试可直接检查布尔值、数值和新增脚本字段
+     * 是否已完成格式化，不需要创建Android WebView或访问真实视频网站。
+     *
+     * @param settings 当前网站的网页工具设置；函数内部会先执行范围规范化。
+     * @return 已替换全部格式占位符的完整自执行JavaScript。
+     */
+    internal fun buildSettingsScript(settings: WebsiteToolSettings): String {
         val safeSettings = settings.normalized()
-        val script = APPLY_SETTINGS_SCRIPT.format(
+        return APPLY_SETTINGS_SCRIPT.format(
             Locale.US,
             safeSettings.playbackRate,
             safeSettings.blockAutoplay,
+            safeSettings.mediaPreloadEnabled,
             safeSettings.videoMuted,
             safeSettings.videoLoopEnabled,
             safeSettings.textSelectionEnabled,
             safeSettings.nightModeEnabled,
             safeSettings.nightOverlayAlpha
         )
-        evaluateMediaScript(webView, script, onMediaCountApplied)
     }
 
     /**
@@ -541,6 +555,7 @@ class WebsiteScriptController {
                 var nextConfig = {
                     playbackRate: %.2f,
                     blockAutoplay: %b,
+                    preloadMedia: %b,
                     muted: %b,
                     loop: %b,
                     textSelection: %b,
@@ -626,6 +641,21 @@ class WebsiteScriptController {
                                 }
                                 media.muted = self.config.muted;
                                 media.loop = self.config.loop;
+                                if (self.config.preloadMedia) {
+                                    if (!media.__harleyPreloadCaptured) {
+                                        media.__harleyPreloadCaptured = true;
+                                        media.__harleyOriginalPreload = media.getAttribute('preload');
+                                    }
+                                    if (media.preload !== 'auto') media.preload = 'auto';
+                                } else if (media.__harleyPreloadCaptured) {
+                                    if (media.__harleyOriginalPreload === null) {
+                                        media.removeAttribute('preload');
+                                    } else {
+                                        media.setAttribute('preload', media.__harleyOriginalPreload);
+                                    }
+                                    delete media.__harleyPreloadCaptured;
+                                    delete media.__harleyOriginalPreload;
+                                }
                                 if (self.config.blockAutoplay && media.hasAttribute('autoplay')) {
                                     media.autoplay = false;
                                     media.removeAttribute('autoplay');
@@ -658,7 +688,7 @@ class WebsiteScriptController {
                         childList: true,
                         subtree: true,
                         attributes: true,
-                        attributeFilter: ['autoplay']
+                        attributeFilter: ['autoplay', 'preload']
                     });
                     tools.observer = observer;
                     tools.intervalId = window.setInterval(function() { tools.apply(); }, 1000);

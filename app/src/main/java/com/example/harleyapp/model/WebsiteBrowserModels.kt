@@ -3,9 +3,6 @@ package com.example.harleyapp.model
 import java.net.URI
 import java.util.Locale
 
-/** 网站浏览器同时保留的最大标签数量，避免多个WebView长期占用过多内存。 */
-const val MAX_WEBSITE_BROWSER_TAB_COUNT = 8
-
 /** 空白标签在标签栏中显示的固定标题。 */
 const val WEBSITE_BROWSER_NEW_TAB_TITLE = "新标签页"
 
@@ -44,7 +41,7 @@ data class WebsiteBrowserTab(
  * 页面首次进入时调用[createWebsiteBrowserSession]获得带一个空白标签的会话；后续只使用本文件的
  * 纯函数生成新会话并替换旧状态。持久化恢复时允许先构造空会话，再逐项校验并恢复标签。
  *
- * @param tabs 按标签栏从左到右排列的标签，正常操作后数量不会超过[MAX_WEBSITE_BROWSER_TAB_COUNT]。
+ * @param tabs 按标签栏从左到右排列的标签；数量不设固定上限，由设备可用内存决定实际承载能力。
  * @param activeTabId 当前显示的标签标识；空会话或外部数据尚未完成修复时允许为null。
  */
 data class WebsiteBrowserSession(
@@ -77,12 +74,12 @@ fun createWebsiteBrowserSession(initialTabId: String): WebsiteBrowserSession {
  *
  * 使用方法：
  * 用户从首页卡片、网站收藏或搜索结果明确打开网站时，传入调用方生成的唯一[tabId]和网站模型。
- * 如果当前标签已经达到上限，应由界面根据返回值未变化的结果提示用户先关闭标签。
+ * 标签数量不设固定上限；Android可能在内存紧张时回收整个应用进程，冷启动时再恢复轻量标签快照。
  *
  * @param session 当前网站浏览会话。
  * @param tabId 新标签的唯一标识，必须非空且不能与现有标签重复。
  * @param website 需要在新标签中打开的网站入口。
- * @return 新标签已追加并选中的会话；参数无效或达到八个标签上限时返回原会话。
+ * @return 新标签已追加并选中的会话；参数无效或标识重复时返回原会话。
  */
 fun createWebsiteBrowserTab(
     session: WebsiteBrowserSession,
@@ -112,7 +109,7 @@ fun createWebsiteBrowserTab(
  * @param tabId 新标签的唯一标识，必须非空且不能与现有标签重复。
  * @param title 目标页面标题；空白时显示“新标签页”，页面加载完成后可继续更新。
  * @param url 临时窗口捕获到的第一个完整HTTP或HTTPS目标网址；尚未得到真实网址时调用方继续等待。
- * @return 已继承来源网站归属、追加并选中的新会话；来源不存在、标识无效或达到上限时返回原会话。
+ * @return 已继承来源网站归属、追加并选中的新会话；来源不存在、标识无效或重复时返回原会话。
  */
 fun createWebsiteBrowserChildTab(
     session: WebsiteBrowserSession,
@@ -149,7 +146,7 @@ fun createWebsiteBrowserChildTab(
  *
  * @param session 当前网站浏览会话。
  * @param tabId 新空白标签的唯一标识，必须非空且不能与现有标签重复。
- * @return 新空白标签已追加并选中的会话；参数无效或达到八个标签上限时返回原会话。
+ * @return 新空白标签已追加并选中的会话；参数无效或标识重复时返回原会话。
  */
 fun createBlankWebsiteBrowserTab(
     session: WebsiteBrowserSession,
@@ -303,20 +300,19 @@ fun closeWebsiteBrowserTab(
  * 判断是否允许向当前会话追加指定标签。
  *
  * 使用方法：
- * 两种新建标签函数在修改列表前统一调用，确保数量上限、非空标识和标识唯一性规则完全一致。
+ * 三种新建标签函数在修改列表前统一调用，确保非空标识和标识唯一性规则完全一致。
  *
  * @param session 当前网站浏览会话。
  * @param tabId 准备追加的新标签标识。
- * @return 标签数量未满、标识非空且未重复时返回true，否则返回false。
+ * @return 标识非空且未重复时返回true，否则返回false。
  */
 private fun canAppendWebsiteBrowserTab(
     session: WebsiteBrowserSession,
     tabId: String
 ): Boolean {
-    return session.tabs.size < MAX_WEBSITE_BROWSER_TAB_COUNT &&
-        session.tabs.none { tab ->
-            normalizeWebsiteBrowserIdentifier(tab.id) == tabId
-        }
+    return session.tabs.none { tab ->
+        normalizeWebsiteBrowserIdentifier(tab.id) == tabId
+    }
 }
 
 /**

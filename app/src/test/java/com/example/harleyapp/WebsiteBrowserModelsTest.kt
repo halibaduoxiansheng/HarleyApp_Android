@@ -1,6 +1,5 @@
 package com.example.harleyapp
 
-import com.example.harleyapp.model.MAX_WEBSITE_BROWSER_TAB_COUNT
 import com.example.harleyapp.model.WEBSITE_BROWSER_NEW_TAB_TITLE
 import com.example.harleyapp.model.WebsiteBrowserSession
 import com.example.harleyapp.model.WebsiteBrowserTab
@@ -171,40 +170,40 @@ class WebsiteBrowserModelsTest {
     }
 
     /**
-     * 验证创建函数共同遵守八个标签上限并拒绝重复标识。
+     * 验证创建函数不再限制八个标签，同时仍拒绝重复标识。
      *
-     * @return 无返回值；标签超过上限或重复标识被加入时由JUnit报告失败。
+     * @return 无返回值；第九个及后续标签无法创建，或者重复标识被加入时由JUnit报告失败。
      */
     @Test
-    fun tabCreationStopsAtMaximumCountAndRejectsDuplicateId() {
-        val fullSession = (2..MAX_WEBSITE_BROWSER_TAB_COUNT).fold(
+    fun tabCreationHasNoFixedCountLimitAndRejectsDuplicateId() {
+        val manyTabsSession = (2..32).fold(
             createWebsiteBrowserSession("tab-1")
         ) { session, index ->
             createBlankWebsiteBrowserTab(session, "tab-$index")
         }
 
-        val overLimitSession = createWebsiteBrowserTab(
-            session = fullSession,
-            tabId = "tab-over-limit",
-            website = website(id = "over-limit")
+        val websiteSession = createWebsiteBrowserTab(
+            session = manyTabsSession,
+            tabId = "tab-33",
+            website = website(id = "website-33")
         )
-        val childOverLimitSession = createWebsiteBrowserChildTab(
-            session = fullSession,
+        val childSession = createWebsiteBrowserChildTab(
+            session = websiteSession,
             sourceTabId = "tab-1",
-            tabId = "child-over-limit",
+            tabId = "tab-34",
             title = "新窗口",
             url = "https://example.com/new-window"
         )
-        val sessionWithRoom = fullSession.copy(tabs = fullSession.tabs.dropLast(1))
         val duplicateSession = createBlankWebsiteBrowserTab(
-            session = sessionWithRoom,
+            session = childSession,
             tabId = "tab-1"
         )
 
-        assertEquals(MAX_WEBSITE_BROWSER_TAB_COUNT, fullSession.tabs.size)
-        assertSame(fullSession, overLimitSession)
-        assertSame(fullSession, childOverLimitSession)
-        assertSame(sessionWithRoom, duplicateSession)
+        assertEquals(32, manyTabsSession.tabs.size)
+        assertEquals(33, websiteSession.tabs.size)
+        assertEquals(34, childSession.tabs.size)
+        assertEquals("tab-34", childSession.activeTabId)
+        assertSame(childSession, duplicateSession)
     }
 
     /**

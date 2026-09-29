@@ -109,7 +109,6 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.core.net.toUri
 import com.example.harleyapp.data.WebsiteToolRepository
 import com.example.harleyapp.model.EbookWebDownloadRequest
-import com.example.harleyapp.model.MAX_WEBSITE_BROWSER_TAB_COUNT
 import com.example.harleyapp.model.WebsiteBrowserSession
 import com.example.harleyapp.model.WebsiteBrowserTab
 import com.example.harleyapp.model.WebsiteBookmarkSaveResult
@@ -209,7 +208,7 @@ fun WebsiteScreen(
         }
     }
 
-    // 只为本次会话中真正显示过的标签创建WebView。冷启动恢复八个标签时不会一次创建八个渲染器，
+    // 只为本次会话中真正显示过的标签创建WebView。冷启动恢复多个标签时不会一次创建全部渲染器，
     // 但用户切换离开的标签仍留在列表中，因此返回时可以继续原页面、历史、滚动和表单状态。
     SideEffect {
         if (isBrowserActive) {
@@ -359,11 +358,13 @@ private fun WebsiteNewTabPage(
                             modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp)
                         ) {
                             Text(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState()),
                                 text = website.title,
                                 style = MaterialTheme.typography.titleSmall,
                                 fontWeight = FontWeight.SemiBold,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
+                                maxLines = 1
                             )
                             Text(
                                 text = "打开 ${website.openCount} 次 · ${website.url}",
@@ -486,6 +487,7 @@ private fun WebsiteTabSession(
     var errorText by remember {
         mutableStateOf<String?>(null)
     }
+    val isPageLoading = loadingProgress in 0..99 && errorText == null
     var canGoBack by remember {
         mutableStateOf(false)
     }
@@ -729,9 +731,10 @@ private fun WebsiteTabSession(
         currentOnFullscreenChanged(isActive && fullscreenContent != null)
     }
 
-    // 切走标签或离开“网站”时退出可能仍在处理中的全屏，并暂停标准HTML5媒体。WebView对象、
-    // DOM、历史、滚动和表单仍保留在内存中，重新选中时由onResume继续使用同一实例。
-    DisposableEffect(webView, isActive) {
+    // 切走标签或离开“网站”时退出全屏并暂停标准HTML5媒体。尚未完成主页面加载的后台标签保持
+    // WebView运行，允许网络与页面初始化继续；加载完成后再onPause，避免后台媒体和脚本长期耗电。
+    // WebView对象、DOM、历史、滚动和表单始终保留，重新选中时继续复用同一实例。
+    DisposableEffect(webView, isActive, isPageLoading) {
         if (isActive) {
             webView.onResume()
         } else {
@@ -739,7 +742,11 @@ private fun WebsiteTabSession(
             exitFullscreen()
             pauseWebsiteMedia(webView)
             webView.keepScreenOn = false
-            webView.onPause()
+            if (isPageLoading) {
+                webView.onResume()
+            } else {
+                webView.onPause()
+            }
             playingVideoCount = 0
         }
 
@@ -1247,100 +1254,6 @@ private fun WebsiteTabSession(
             }
         }
 
-        if (loadingProgress in 0..99) {
-            LinearProgressIndicator(
-                progress = { loadingProgress / 100f },
-                modifier = Modifier.fillMaxWidth()
-            )
-        }
-
-        AnimatedVisibility(visible = showInlineScriptTools) {
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                color = MaterialTheme.colorScheme.surfaceContainerLow
-            ) {
-                Row(
-                    modifier = Modifier
-                        .horizontalScroll(rememberScrollState())
-                        .padding(horizontal = 10.dp, vertical = 2.dp),
-                    horizontalArrangement = Arrangement.spacedBy(2.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    TextButton(onClick = { showToolbox = true }) {
-                        Text(text = "网页工具")
-                    }
-                    TextButton(onClick = { showToolbox = true }) {
-                        Text(text = formatToolbarRate(toolSettings.playbackRate))
-                    }
-                    TextButton(onClick = ::bookmarkCurrentPage) {
-                        Text(text = "收藏当前页")
-                    }
-                    TextButton(
-                        onClick = {
-                            scriptController.togglePlayback(webView) { count ->
-                                toolMessage = mediaActionMessage(count, "已切换播放状态")
-                            }
-                        }
-                    ) {
-                        Text(text = "播放/暂停")
-                    }
-                    TextButton(
-                        onClick = {
-                            scriptController.seekBy(
-                                webView,
-                                -WEBSITE_MEDIA_SEEK_STEP_SECONDS
-                            ) { count ->
-                                toolMessage = mediaActionMessage(
-                                    count,
-                                    "已快退${WEBSITE_MEDIA_SEEK_STEP_SECONDS}秒"
-                                )
-                            }
-                        }
-                    ) {
-                        Text(text = "-${WEBSITE_MEDIA_SEEK_STEP_SECONDS}秒")
-                    }
-                    TextButton(
-                        onClick = {
-                            scriptController.seekBy(
-                                webView,
-                                WEBSITE_MEDIA_SEEK_STEP_SECONDS
-                            ) { count ->
-                                toolMessage = mediaActionMessage(
-                                    count,
-                                    "已快进${WEBSITE_MEDIA_SEEK_STEP_SECONDS}秒"
-                                )
-                            }
-                        }
-                    ) {
-                        Text(text = "+${WEBSITE_MEDIA_SEEK_STEP_SECONDS}秒")
-                    }
-                    TextButton(
-                        onClick = {
-                            scriptController.requestFullscreen(webView) { count ->
-                                toolMessage = mediaActionMessage(count, "已向播放器请求全屏")
-                            }
-                        }
-                    ) {
-                        Text(text = "全屏")
-                    }
-                }
-            }
-        }
-
-        toolMessage?.let { message ->
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                color = MaterialTheme.colorScheme.secondaryContainer
-            ) {
-                Text(
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
-                    text = message,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSecondaryContainer
-                )
-            }
-        }
-
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1353,6 +1266,115 @@ private fun WebsiteTabSession(
                     webView
                 }
             )
+
+            // 加载进度和视频脚本栏覆盖在网页顶部，不再参与纵向测量。播放状态变化、进度条拖动或
+            // 页面加载结束时只改变覆盖层，不会反复改变WebView高度并造成视频画面上下跳动。
+            if (loadingProgress in 0..99) {
+                LinearProgressIndicator(
+                    progress = { loadingProgress / 100f },
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .fillMaxWidth()
+                        .zIndex(3f)
+                )
+            }
+
+            if (showInlineScriptTools) {
+                Surface(
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .fillMaxWidth()
+                        .padding(top = if (loadingProgress in 0..99) 4.dp else 0.dp)
+                        .zIndex(2f),
+                    color = MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.94f),
+                    shadowElevation = 2.dp
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .horizontalScroll(rememberScrollState())
+                            .padding(horizontal = 10.dp, vertical = 2.dp),
+                        horizontalArrangement = Arrangement.spacedBy(2.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        TextButton(onClick = { showToolbox = true }) {
+                            Text(text = "网页工具")
+                        }
+                        TextButton(onClick = { showToolbox = true }) {
+                            Text(text = formatToolbarRate(toolSettings.playbackRate))
+                        }
+                        TextButton(onClick = ::bookmarkCurrentPage) {
+                            Text(text = "收藏当前页")
+                        }
+                        TextButton(
+                            onClick = {
+                                scriptController.togglePlayback(webView) { count ->
+                                    toolMessage = mediaActionMessage(count, "已切换播放状态")
+                                }
+                            }
+                        ) {
+                            Text(text = "播放/暂停")
+                        }
+                        TextButton(
+                            onClick = {
+                                scriptController.seekBy(
+                                    webView,
+                                    -WEBSITE_MEDIA_SEEK_STEP_SECONDS
+                                ) { count ->
+                                    toolMessage = mediaActionMessage(
+                                        count,
+                                        "已快退${WEBSITE_MEDIA_SEEK_STEP_SECONDS}秒"
+                                    )
+                                }
+                            }
+                        ) {
+                            Text(text = "-${WEBSITE_MEDIA_SEEK_STEP_SECONDS}秒")
+                        }
+                        TextButton(
+                            onClick = {
+                                scriptController.seekBy(
+                                    webView,
+                                    WEBSITE_MEDIA_SEEK_STEP_SECONDS
+                                ) { count ->
+                                    toolMessage = mediaActionMessage(
+                                        count,
+                                        "已快进${WEBSITE_MEDIA_SEEK_STEP_SECONDS}秒"
+                                    )
+                                }
+                            }
+                        ) {
+                            Text(text = "+${WEBSITE_MEDIA_SEEK_STEP_SECONDS}秒")
+                        }
+                        TextButton(
+                            onClick = {
+                                scriptController.requestFullscreen(webView) { count ->
+                                    toolMessage = mediaActionMessage(count, "已向播放器请求全屏")
+                                }
+                            }
+                        ) {
+                            Text(text = "全屏")
+                        }
+                    }
+                }
+            }
+
+            toolMessage?.let { message ->
+                Surface(
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .fillMaxWidth()
+                        .padding(top = if (showInlineScriptTools) 54.dp else 8.dp)
+                        .zIndex(4f),
+                    color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.96f),
+                    shadowElevation = 2.dp
+                ) {
+                    Text(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
+                        text = message,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer
+                    )
+                }
+            }
 
             errorText?.let { message ->
                 WebsiteErrorView(
@@ -1431,7 +1453,7 @@ private fun WebsiteTabSession(
  * 使用方法：
  * [WebsiteScreen]在普通网页模式下调用。标签过多时中间区域可横向滚动，活动标签变化后会自动
  * 滚动到可见位置；用户也可以点击“☰”打开从右侧滑入的纵向总览抽屉，快速切换或连续关闭标签。
- * “+”按钮始终留在屏幕右侧，达到上限后仍把点击交给上层显示明确提示。
+ * “+”按钮始终留在屏幕右侧，标签数量不设固定上限。
  *
  * @param tabs 从左到右排列的完整标签列表。
  * @param activeTabId 当前活动标签标识。
@@ -1536,7 +1558,7 @@ private fun WebsiteBrowserTabStrip(
             }
 
             Text(
-                text = "${tabs.size}/$MAX_WEBSITE_BROWSER_TAB_COUNT",
+                text = "${tabs.size}",
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.labelSmall
             )
@@ -1714,7 +1736,7 @@ private fun WebsiteTabOverviewDrawer(
                             fontWeight = FontWeight.SemiBold
                         )
                         Text(
-                            text = "${tabs.size}/$MAX_WEBSITE_BROWSER_TAB_COUNT",
+                            text = "${tabs.size}",
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             style = MaterialTheme.typography.labelMedium
                         )
@@ -1962,6 +1984,8 @@ private fun createWebsiteWebView(
         settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
+            // 遵循HTTP缓存有效期复用资源；不使用过期缓存模式，避免登录态和视频分片长期陈旧。
+            cacheMode = WebSettings.LOAD_DEFAULT
             allowFileAccess = false
             allowContentAccess = false
             mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW

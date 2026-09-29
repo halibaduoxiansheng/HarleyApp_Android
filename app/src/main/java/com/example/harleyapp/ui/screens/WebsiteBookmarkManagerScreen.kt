@@ -1,7 +1,10 @@
 package com.example.harleyapp.ui.screens
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -275,6 +278,29 @@ fun WebsiteBookmarkManagerScreen(
         websiteBreadcrumbs(library.folders, currentFolderId)
     }
 
+    /**
+     * 返回当前文件夹的直接父级；已经位于根目录时才退出网站收藏详情。
+     *
+     * 使用方法：页面标题栏返回按钮和系统返回键共同调用，确保两种返回方式具有完全相同的层级行为。
+     * 当前文件夹异常丢失时安全回到根目录，不会直接跳过收藏页返回首页。
+     *
+     * @return 无返回值；函数直接更新[currentFolderId]或调用外层[onBack]。
+     */
+    fun navigateBackOneLevel() {
+        val selectedFolderId = currentFolderId
+        if (selectedFolderId == null) {
+            onBack()
+            return
+        }
+
+        currentFolderId = library.folders
+            .firstOrNull { folder -> folder.id == selectedFolderId }
+            ?.parentId
+    }
+
+    // 本页面内部返回优先于App根层返回：嵌套目录逐级退出，根目录才回到进入收藏详情前的页面。
+    BackHandler(onBack = ::navigateBackOneLevel)
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -293,7 +319,7 @@ fun WebsiteBookmarkManagerScreen(
                 .padding(start = 10.dp, top = 10.dp, end = 16.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            TextButton(onClick = onBack) {
+            TextButton(onClick = ::navigateBackOneLevel) {
                 Text(text = "‹ 返回")
             }
             Column(modifier = Modifier.weight(1f)) {
@@ -1127,11 +1153,13 @@ private fun WebsiteBookmarkRow(
             Spacer(modifier = Modifier.width(8.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
                     text = website.title,
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
+                    maxLines = 1
                 )
                 Text(
                     text = secondaryText,

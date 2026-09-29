@@ -9,6 +9,7 @@ package com.example.harleyapp.model
  *
  * @param playbackRate HTML5音视频播放倍速，允许0.25到5.00。
  * @param blockAutoplay 是否移除新出现音视频的autoplay属性并暂停自动播放。
+ * @param mediaPreloadEnabled 是否向标准HTML5音视频声明preload=auto，提示Chromium尽早缓冲。
  * @param videoMuted 是否让页面内音视频保持静音。
  * @param videoLoopEnabled 是否让页面内音视频循环播放。
  * @param textSelectionEnabled 是否通过样式允许网页文字选择和复制。
@@ -21,6 +22,7 @@ package com.example.harleyapp.model
 data class WebsiteToolSettings(
     val playbackRate: Float = DEFAULT_WEBSITE_PLAYBACK_RATE,
     val blockAutoplay: Boolean = false,
+    val mediaPreloadEnabled: Boolean = false,
     val videoMuted: Boolean = false,
     val videoLoopEnabled: Boolean = false,
     val textSelectionEnabled: Boolean = false,

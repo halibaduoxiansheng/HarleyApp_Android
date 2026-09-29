@@ -162,6 +162,14 @@ fun WebsiteToolboxDialog(
                             }
                         )
                         ToolboxSwitchRow(
+                            title = "弱网预加载",
+                            subtitle = "提示标准HTML5视频尽早缓冲；可能增加流量，网站仍可自行限制",
+                            checked = settings.mediaPreloadEnabled,
+                            onCheckedChange = { enabled ->
+                                onSettingsChanged(settings.copy(mediaPreloadEnabled = enabled))
+                            }
+                        )
+                        ToolboxSwitchRow(
                             title = "视频静音",
                             subtitle = "对当前页面及后续加载的媒体持续生效",
                             checked = settings.videoMuted,

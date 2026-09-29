@@ -3,7 +3,6 @@ package com.example.harleyapp.data
 import android.annotation.SuppressLint
 import android.content.Context
 import android.util.Log
-import com.example.harleyapp.model.MAX_WEBSITE_BROWSER_TAB_COUNT
 import com.example.harleyapp.model.WebsiteBrowserSession
 import com.example.harleyapp.model.WebsiteBrowserTab
 import com.example.harleyapp.model.WebsiteShortcut
@@ -36,7 +35,8 @@ class WebsiteBrowserSessionRepository(context: Context) {
      * 使用方法：
      * App冷启动或网站页面首次创建时调用。旧数据版本不支持、JSON损坏、标签非法或标签全部被
      * 过滤时，会使用[fallbackWebsite]创建一个默认网站标签；没有可用默认网站时创建空白标签。
-     * 重复标签只保留第一项，超过八项的有效标签会被丢弃，活动标签不存在时自动选择首项。
+     * 重复标签只保留第一项，活动标签不存在时自动选择首项。标签数量不设固定上限，恢复规模只受
+     * 会话JSON安全长度和设备内存限制。
      *
      * @param fallbackWebsite 无有效持久化数据时准备打开的默认网站；null表示恢复为空白标签。
      * @return 至少包含一个有效标签，并且活动标签一定存在于标签列表中的浏览会话。
@@ -61,7 +61,7 @@ class WebsiteBrowserSessionRepository(context: Context) {
      * 原子保存网站浏览器当前轻量会话。
      *
      * 使用方法：
-     * 仅从IO线程或其他后台任务传入完整会话。保存前会再次过滤非法、重复和超量标签并修复活动项；
+     * 仅从IO线程或其他后台任务传入完整会话。保存前会再次过滤非法、重复标签并修复活动项；
      * 若过滤后没有任何有效标签则拒绝覆盖旧数据。该函数使用commit同步确认写入结果，不应直接从
      * Compose回调或Android主线程调用；常规页面保存请使用[enqueueSessionSave]。
      *
@@ -138,7 +138,7 @@ class WebsiteBrowserSessionRepository(context: Context) {
  *
  * 使用方法：
  * 仓库写入前调用；单元测试也可直接调用以验证编码内容不包含网页正文、Cookie等额外字段。
- * 编码前会按与读取相同的规则过滤非法标签、去重、限制最多八项并修复活动标签。
+ * 编码前会按与读取相同的规则过滤非法标签、去重并修复活动标签，不按标签数量截断用户会话。
  *
  * @param session 待编码的网站浏览会话。
  * @return 可直接写入SharedPreferences的版本化JSON；没有有效标签时返回null。
@@ -184,7 +184,7 @@ internal fun encodeWebsiteBrowserSession(session: WebsiteBrowserSession): String
  *
  * 使用方法：
  * 仓库读取SharedPreferences后调用。该函数不访问Android Context或文件系统，所有过滤和回退行为
- * 都由输入决定，便于通过本地JUnit测试覆盖损坏数据、重复标签、数量上限和活动项修复。
+ * 都由输入决定，便于通过本地JUnit测试覆盖损坏数据、重复标签和活动项修复。
  *
  * @param encodedSession SharedPreferences读取的JSON；null或空白表示没有历史会话。
  * @param fallbackWebsite 无可恢复标签时用于创建首个标签的默认网站；null表示创建空白标签。
@@ -217,8 +217,6 @@ internal fun decodeWebsiteBrowserSession(
         val seenTabIds = mutableSetOf<String>()
 
         for (value in tabsJson) {
-            if (size >= MAX_WEBSITE_BROWSER_TAB_COUNT) break
-
             val tab = (value as? JsonObjectValue)
                 ?.let(::decodeWebsiteBrowserTab)
                 ?: continue
@@ -290,7 +288,6 @@ private fun normalizeWebsiteBrowserSession(
     val normalizedTabs = session.tabs.asSequence()
         .mapNotNull(::normalizeWebsiteBrowserTab)
         .filter { tab -> seenTabIds.add(tab.id) }
-        .take(MAX_WEBSITE_BROWSER_TAB_COUNT)
         .toList()
     if (normalizedTabs.isEmpty()) return null
 
@@ -758,7 +755,8 @@ private class WebsiteBrowserJsonParser(
 }
 
 private const val WEBSITE_BROWSER_SESSION_VERSION = 1
-private const val MAX_SESSION_JSON_LENGTH = 128 * 1024
+// 私有会话仍保留体积防护，避免损坏数据一次占满内存；8 MiB足以保存远超正常设备可承载的标签数。
+private const val MAX_SESSION_JSON_LENGTH = 8 * 1024 * 1024
 private const val MAX_JSON_NESTING_DEPTH = 24
 private const val JSON_UNICODE_ESCAPE_DIGIT_COUNT = 4
 private const val JSON_MIN_UNESCAPED_CHARACTER_CODE = 0x20
