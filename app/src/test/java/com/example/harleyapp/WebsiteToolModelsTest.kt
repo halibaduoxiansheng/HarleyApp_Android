@@ -10,6 +10,7 @@ import com.example.harleyapp.model.WebsiteBookmarkSaveResult
 import com.example.harleyapp.model.WebsiteToolSettings
 import com.example.harleyapp.ui.screens.FullscreenHoldDirection
 import com.example.harleyapp.ui.screens.calculateFullscreenBallOffset
+import com.example.harleyapp.ui.screens.calculateFullscreenSwipeTarget
 import com.example.harleyapp.ui.screens.fullscreenHoldDirectionForPosition
 import com.example.harleyapp.ui.screens.shouldShowInlineWebsiteScriptTools
 import com.example.harleyapp.ui.screens.websiteBookmarkSaveMessage
@@ -123,6 +124,48 @@ class WebsiteToolModelsTest {
         assertEquals(120f, calculateFullscreenBallOffset(80f, 90f, 120f), 0.001f)
         assertEquals(-120f, calculateFullscreenBallOffset(-80f, -90f, 120f), 0.001f)
         assertEquals(0f, calculateFullscreenBallOffset(20f, 10f, -1f), 0.001f)
+    }
+
+    /**
+     * 验证全屏横滑以整屏宽度映射完整时长，并在媒体首尾处正确限制目标。
+     *
+     * @return 无返回值；目标位置换算或边界限制错误时由JUnit报告测试失败。
+     */
+    @Test
+    fun fullscreenSwipeMapsDistanceToClampedPlaybackPosition() {
+        assertEquals(
+            150.0,
+            calculateFullscreenSwipeTarget(
+                startSeconds = 100.0,
+                durationSeconds = 200.0,
+                dragDistancePixels = 250f,
+                viewWidthPixels = 1_000
+            ) ?: -1.0,
+            0.001
+        )
+        assertEquals(
+            0.0,
+            calculateFullscreenSwipeTarget(10.0, 200.0, -1_000f, 1_000) ?: -1.0,
+            0.001
+        )
+        assertEquals(
+            200.0,
+            calculateFullscreenSwipeTarget(190.0, 200.0, 1_000f, 1_000) ?: -1.0,
+            0.001
+        )
+    }
+
+    /**
+     * 验证无效时间轴和容器尺寸不会生成可提交的网页跳转位置。
+     *
+     * @return 无返回值；任一非法输入仍返回时间时由JUnit报告测试失败。
+     */
+    @Test
+    fun fullscreenSwipeRejectsInvalidTimeline() {
+        assertNull(calculateFullscreenSwipeTarget(Double.NaN, 100.0, 10f, 1_000))
+        assertNull(calculateFullscreenSwipeTarget(10.0, 0.0, 10f, 1_000))
+        assertNull(calculateFullscreenSwipeTarget(10.0, 100.0, Float.NaN, 1_000))
+        assertNull(calculateFullscreenSwipeTarget(10.0, 100.0, 10f, 0))
     }
 
     /**

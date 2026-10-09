@@ -60,11 +60,13 @@ class WebsiteRepository(context: Context) {
     }
 
     /**
-     * 一次读取网站与收藏夹树，并修复旧版本没有文件夹字段的数据。
+     * 一次读取网站与收藏夹树，并修复旧版本没有文件夹字段或日期层级的数据。
      *
      * 使用方法：
      * HarleyApp初始化网站状态以及备份恢复后调用本函数。旧网站会保留原顺序、默认开启
      * 首页展示，并归入根目录“未分类”；引用已经不存在文件夹的网站也会安全移回根目录。
+     * 旧版一键收藏在根目录创建的合法`yyyy-MM-dd`文件夹会自动整理为“yyyy年/M月/yyyy-MM-dd”，
+     * 文件夹本身及其中全部内容保持原id和从属关系，普通文件夹不会参与迁移。
      *
      * @return 可直接交给收藏管理页面的完整网站库。
      */
@@ -79,16 +81,29 @@ class WebsiteRepository(context: Context) {
                 website
             }
         }
-        val library = WebsiteLibrary(
+        val repairedLibrary = WebsiteLibrary(
             websites = repairedWebsites,
             folders = folders
         )
 
-        if (repairedWebsites != websites && !saveLibrary(library)) {
-            Log.e(TAG, "Failed to persist repaired website folder references")
+        val organizedLibrary = organizeRootDateFoldersByYearMonth(
+            library = repairedLibrary,
+            newFolderId = { UUID.randomUUID().toString() }
+        )
+        if (organizedLibrary == null) {
+            Log.e(TAG, "Failed to organize legacy bookmark date folders")
+            if (repairedWebsites != websites && !saveLibrary(repairedLibrary)) {
+                Log.e(TAG, "Failed to persist repaired website folder references")
+            }
+            return repairedLibrary
+        }
+        if (organizedLibrary != repairedLibrary || repairedWebsites != websites) {
+            if (!saveLibrary(organizedLibrary)) {
+                Log.e(TAG, "Failed to persist organized website library")
+            }
         }
 
-        return library
+        return organizedLibrary
     }
 
     /**
@@ -220,7 +235,7 @@ class WebsiteRepository(context: Context) {
      *
      * 使用方法：
      * 调用方传入当前页面标题和地址即可。本函数统一完成HTTP/HTTPS校验、重复网址判断、标题
-     * 截断、按设备本地日期创建或复用根目录文件夹、默认不加入首页以及首次收藏的默认网站设置。
+     * 截断、按设备本地日期创建或复用“年/月/日”文件夹、默认不加入首页以及首次收藏的默认网站设置。
      * 无障碍悬浮球与App内“收藏当前页”必须共用本函数，避免两条入口产生不同的数据规则。
      *
      * @param pageTitle 浏览器公开的页面标题；为空时自动使用网址域名。
@@ -253,10 +268,12 @@ class WebsiteRepository(context: Context) {
                     .ifBlank { "未命名网站" }
             }
         val bookmarkId = UUID.randomUUID().toString()
-        val updatedLibrary = addBookmarkedPageToDateFolder(
+        val updatedLibrary = addBookmarkedPageToDateHierarchy(
             library = library,
-            dateFolderName = LocalDate.now().toString(),
-            newFolderId = UUID.randomUUID().toString(),
+            bookmarkDate = LocalDate.now(),
+            newYearFolderId = UUID.randomUUID().toString(),
+            newMonthFolderId = UUID.randomUUID().toString(),
+            newDateFolderId = UUID.randomUUID().toString(),
             bookmarkId = bookmarkId,
             pageTitle = normalizedTitle,
             normalizedUrl = normalizedUrl
@@ -590,36 +607,41 @@ class WebsiteRepository(context: Context) {
 }
 
 /**
- * 把一个经过校验的网页收藏追加到设备当天的根目录日期文件夹。
+ * 把一个经过校验的网页收藏追加到设备当天的“年/月/日”文件夹。
  *
  * 使用方法：
- * [WebsiteRepository.saveBookmarkedPage]完成网址和标题规范化后，传入`yyyy-MM-dd`日期名称以及
- * 新生成的文件夹、网站标识。根目录已经存在同名日期文件夹时直接复用；其他层级的同名文件夹
- * 不会被误用。新网站追加在日期文件夹现有内容末尾，并且默认不参与首页轮播。
+ * [WebsiteRepository.saveBookmarkedPage]完成网址和标题规范化后，传入设备本地日期以及年、月、日
+ * 三个候选文件夹标识。函数依次创建或复用根目录“yyyy年”、其下“M月”和其下`yyyy-MM-dd`，
+ * 只复用父级位置正确的同名文件夹。新网站追加在日期文件夹现有内容末尾，默认不参与首页轮播。
  *
  * @param library 收藏前的完整网站库。
- * @param dateFolderName 设备本地日期生成的`yyyy-MM-dd`文件夹名称。
- * @param newFolderId 当根目录尚无当天文件夹时使用的新文件夹标识。
+ * @param bookmarkDate 设备本地日期，用于生成“yyyy年/M月/yyyy-MM-dd”三级名称。
+ * @param newYearFolderId 根目录尚无对应年份文件夹时使用的新标识。
+ * @param newMonthFolderId 年份文件夹下尚无对应月份文件夹时使用的新标识。
+ * @param newDateFolderId 月份文件夹下尚无当天文件夹时使用的新标识。
  * @param bookmarkId 新网站的唯一标识。
  * @param pageTitle 已清理并限制长度的网页标题。
  * @param normalizedUrl 已通过HTTP或HTTPS规范化校验的完整网址。
  *
- * @return 已加入日期文件夹和新网站的数据副本；关键标识或文本无效、产生标识冲突时返回null。
+ * @return 已加入三级日期文件夹和新网站的数据副本；关键标识或文本无效、产生标识冲突时返回null。
  */
-internal fun addBookmarkedPageToDateFolder(
+internal fun addBookmarkedPageToDateHierarchy(
     library: WebsiteLibrary,
-    dateFolderName: String,
-    newFolderId: String,
+    bookmarkDate: LocalDate,
+    newYearFolderId: String,
+    newMonthFolderId: String,
+    newDateFolderId: String,
     bookmarkId: String,
     pageTitle: String,
     normalizedUrl: String
 ): WebsiteLibrary? {
-    val normalizedFolderName = dateFolderName.trim()
     val normalizedTitle = pageTitle.trim()
     if (
-        normalizedFolderName.isBlank() ||
         normalizedTitle.isBlank() ||
         bookmarkId.isBlank() ||
+        newYearFolderId == bookmarkId ||
+        newMonthFolderId == bookmarkId ||
+        newDateFolderId == bookmarkId ||
         normalizeWebsiteUrl(normalizedUrl) != normalizedUrl ||
         library.websites.any { website -> website.id == bookmarkId } ||
         library.folders.any { folder -> folder.id == bookmarkId }
@@ -627,31 +649,38 @@ internal fun addBookmarkedPageToDateFolder(
         return null
     }
 
-    val existingDateFolder = library.folders
-        .filter { folder ->
-            folder.parentId == null && folder.name == normalizedFolderName
-        }
-        .minWithOrNull(compareBy<WebsiteFolder> { folder -> folder.sortOrder }.thenBy { folder -> folder.id })
+    val parentFolders = ensureBookmarkYearMonthFolders(
+        library = library,
+        bookmarkDate = bookmarkDate,
+        newYearFolderId = newYearFolderId,
+        newMonthFolderId = newMonthFolderId
+    ) ?: return null
+    val dateFolderName = bookmarkDate.toString()
+    val existingDateFolder = firstWebsiteFolderNamed(
+        folders = parentFolders.library.folders,
+        parentId = parentFolders.monthFolderId,
+        name = dateFolderName
+    )
     val dateFolder = existingDateFolder ?: run {
         if (
-            newFolderId.isBlank() ||
-            newFolderId == bookmarkId ||
-            library.folders.any { folder -> folder.id == newFolderId } ||
-            library.websites.any { website -> website.id == newFolderId }
+            !isAvailableWebsiteNodeId(parentFolders.library, newDateFolderId)
         ) {
             return null
         }
         WebsiteFolder(
-            id = newFolderId,
-            name = normalizedFolderName,
-            parentId = null,
-            sortOrder = nextWebsiteBookmarkOrder(library, parentId = null)
+            id = newDateFolderId,
+            name = dateFolderName,
+            parentId = parentFolders.monthFolderId,
+            sortOrder = nextWebsiteBookmarkOrder(
+                parentFolders.library,
+                parentId = parentFolders.monthFolderId
+            )
         )
     }
     val libraryWithDateFolder = if (existingDateFolder == null) {
-        library.copy(folders = library.folders + dateFolder)
+        parentFolders.library.copy(folders = parentFolders.library.folders + dateFolder)
     } else {
-        library
+        parentFolders.library
     }
     val bookmark = WebsiteShortcut(
         id = bookmarkId,
@@ -665,6 +694,212 @@ internal fun addBookmarkedPageToDateFolder(
         websites = libraryWithDateFolder.websites + bookmark
     )
 }
+
+/**
+ * 把旧版本留在根目录的日期文件夹迁移到对应年份和月份文件夹。
+ *
+ * 使用方法：
+ * [WebsiteRepository.getLibrary]读取并修复网站引用后调用。函数只处理根目录中名称可严格解析为
+ * `yyyy-MM-dd`的文件夹；日期无效、名称格式不同或已经位于其他层级的文件夹全部保持原位。
+ * 每个日期文件夹保留原id，因此其中网站、子文件夹和用户排序关系不会被拆散。
+ *
+ * @param library 迁移前的完整网站库。
+ * @param newFolderId 创建缺失的年份或月份文件夹时调用的标识生成器；每次必须返回全库唯一的非空值。
+ *
+ * @return 完成迁移的新网站库；不需要迁移时原样返回，标识冲突或目录深度不允许移动时返回null。
+ */
+internal fun organizeRootDateFoldersByYearMonth(
+    library: WebsiteLibrary,
+    newFolderId: () -> String
+): WebsiteLibrary? {
+    val rootDateFolders = library.folders.mapNotNull { folder ->
+        if (folder.parentId != null) {
+            null
+        } else {
+            parseWebsiteBookmarkDate(folder.name)?.let { date -> folder to date }
+        }
+    }.sortedWith(
+        compareBy<Pair<WebsiteFolder, LocalDate>> { (folder, _) -> folder.sortOrder }
+            .thenBy { (folder, _) -> folder.id }
+    )
+    if (rootDateFolders.isEmpty()) {
+        return library
+    }
+
+    var updatedLibrary = library
+    rootDateFolders.forEach { (originalDateFolder, bookmarkDate) ->
+        val dateFolder = updatedLibrary.folders.firstOrNull { folder ->
+            folder.id == originalDateFolder.id
+        } ?: return null
+        val parentFolders = ensureBookmarkYearMonthFolders(
+            library = updatedLibrary,
+            bookmarkDate = bookmarkDate,
+            newYearFolderId = newFolderId(),
+            newMonthFolderId = newFolderId()
+        ) ?: return null
+        updatedLibrary = parentFolders.library
+        if (!canPlaceWebsiteFolder(
+                library = updatedLibrary,
+                folderId = dateFolder.id,
+                candidateParentId = parentFolders.monthFolderId
+            )
+        ) {
+            return null
+        }
+
+        val nextOrder = nextWebsiteBookmarkOrder(
+            library = updatedLibrary,
+            parentId = parentFolders.monthFolderId
+        )
+        updatedLibrary = updatedLibrary.copy(
+            folders = updatedLibrary.folders.map { folder ->
+                if (folder.id == dateFolder.id) {
+                    folder.copy(
+                        parentId = parentFolders.monthFolderId,
+                        sortOrder = nextOrder
+                    )
+                } else {
+                    folder
+                }
+            }
+        )
+    }
+
+    return updatedLibrary
+}
+
+/**
+ * 确保指定日期对应的根年份文件夹和直属月份文件夹已经存在。
+ *
+ * 使用方法：
+ * 新增当天收藏和迁移旧日期文件夹时调用。年份名称使用“yyyy年”，月份名称使用不补零的“M月”；
+ * 同层有重名文件夹时稳定复用排序最小、id最小的一项，不合并或删除其余用户数据。
+ *
+ * @param library 当前完整网站库。
+ * @param bookmarkDate 需要归档的本地日期。
+ * @param newYearFolderId 缺少年份文件夹时使用的候选标识。
+ * @param newMonthFolderId 缺少月份文件夹时使用的候选标识。
+ *
+ * @return 包含所需父目录的数据和月份文件夹id；候选标识无效或冲突时返回null。
+ */
+private fun ensureBookmarkYearMonthFolders(
+    library: WebsiteLibrary,
+    bookmarkDate: LocalDate,
+    newYearFolderId: String,
+    newMonthFolderId: String
+): WebsiteBookmarkParentFolders? {
+    val yearFolderName = "${bookmarkDate.year}年"
+    val existingYearFolder = firstWebsiteFolderNamed(
+        folders = library.folders,
+        parentId = null,
+        name = yearFolderName
+    )
+    val yearFolder = existingYearFolder ?: run {
+        if (!isAvailableWebsiteNodeId(library, newYearFolderId)) {
+            return null
+        }
+        WebsiteFolder(
+            id = newYearFolderId,
+            name = yearFolderName,
+            parentId = null,
+            sortOrder = nextWebsiteBookmarkOrder(library, parentId = null)
+        )
+    }
+    val libraryWithYear = if (existingYearFolder == null) {
+        library.copy(folders = library.folders + yearFolder)
+    } else {
+        library
+    }
+
+    val monthFolderName = "${bookmarkDate.monthValue}月"
+    val existingMonthFolder = firstWebsiteFolderNamed(
+        folders = libraryWithYear.folders,
+        parentId = yearFolder.id,
+        name = monthFolderName
+    )
+    val monthFolder = existingMonthFolder ?: run {
+        if (!isAvailableWebsiteNodeId(libraryWithYear, newMonthFolderId)) {
+            return null
+        }
+        WebsiteFolder(
+            id = newMonthFolderId,
+            name = monthFolderName,
+            parentId = yearFolder.id,
+            sortOrder = nextWebsiteBookmarkOrder(libraryWithYear, parentId = yearFolder.id)
+        )
+    }
+    val libraryWithMonth = if (existingMonthFolder == null) {
+        libraryWithYear.copy(folders = libraryWithYear.folders + monthFolder)
+    } else {
+        libraryWithYear
+    }
+
+    return WebsiteBookmarkParentFolders(
+        library = libraryWithMonth,
+        monthFolderId = monthFolder.id
+    )
+}
+
+/**
+ * 在指定父目录中稳定选择一个名称完全相同的文件夹。
+ *
+ * @param folders 当前全部文件夹。
+ * @param parentId 指定父目录id；null表示根目录。
+ * @param name 需要完整匹配的文件夹名称。
+ *
+ * @return 排序值最小、id最小的同名文件夹；不存在时返回null。
+ */
+private fun firstWebsiteFolderNamed(
+    folders: List<WebsiteFolder>,
+    parentId: String?,
+    name: String
+): WebsiteFolder? {
+    return folders
+        .filter { folder -> folder.parentId == parentId && folder.name == name }
+        .minWithOrNull(
+            compareBy<WebsiteFolder> { folder -> folder.sortOrder }
+                .thenBy { folder -> folder.id }
+        )
+}
+
+/**
+ * 判断候选标识是否可以用于新的网站收藏文件夹。
+ *
+ * @param library 当前完整网站库。
+ * @param candidateId 待检查的文件夹标识。
+ *
+ * @return 标识非空且没有与现有网站或文件夹冲突时返回true，否则返回false。
+ */
+private fun isAvailableWebsiteNodeId(
+    library: WebsiteLibrary,
+    candidateId: String
+): Boolean {
+    return candidateId.isNotBlank() &&
+        library.folders.none { folder -> folder.id == candidateId } &&
+        library.websites.none { website -> website.id == candidateId }
+}
+
+/**
+ * 严格解析系统一键收藏使用的日期文件夹名称。
+ *
+ * @param folderName 待检查的文件夹名称。
+ *
+ * @return 名称严格符合`yyyy-MM-dd`且日期真实存在时返回对应日期，否则返回null。
+ */
+private fun parseWebsiteBookmarkDate(folderName: String): LocalDate? {
+    if (!WEBSITE_BOOKMARK_DATE_FOLDER_REGEX.matches(folderName)) {
+        return null
+    }
+    return runCatching { LocalDate.parse(folderName) }.getOrNull()
+}
+
+/** 年月父目录准备结果，供新增收藏和旧数据迁移继续使用同一份网站库。 */
+private data class WebsiteBookmarkParentFolders(
+    /** 已创建或复用年份、月份文件夹的完整网站库。 */
+    val library: WebsiteLibrary,
+    /** 当前日期对应的月份文件夹稳定标识。 */
+    val monthFolderId: String
+)
 
 /**
  * 计算指定文件夹末尾可用的网站收藏顺序值。
@@ -692,6 +927,9 @@ private fun nextWebsiteBookmarkOrder(
 
 /** 同层收藏顺序之间的固定间隔，便于后续继续追加内容。 */
 private const val WEBSITE_BOOKMARK_ORDER_STEP = 10
+
+/** 只识别四位年份、两位月份和两位日期的系统一键收藏旧文件夹。 */
+private val WEBSITE_BOOKMARK_DATE_FOLDER_REGEX = Regex("""\d{4}-\d{2}-\d{2}""")
 
 /**
  * 新安装且尚未创建网站收藏时使用的初始列表。

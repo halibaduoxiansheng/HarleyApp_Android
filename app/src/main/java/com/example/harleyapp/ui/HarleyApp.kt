@@ -83,6 +83,7 @@ import com.example.harleyapp.data.FitnessRepository
 import com.example.harleyapp.data.FeatureCenterOrderRepository
 import com.example.harleyapp.data.GlobalSearchRepository
 import com.example.harleyapp.data.HomeFeatureRepository
+import com.example.harleyapp.data.HomeLayoutRepository
 import com.example.harleyapp.data.HotTopicRepository
 import com.example.harleyapp.data.LedgerRepository
 import com.example.harleyapp.data.NotebookRepository
@@ -430,6 +431,9 @@ fun HarleyApp(
     val homeFeatureRepository = remember {
         HomeFeatureRepository(applicationContext)
     }
+    val homeLayoutRepository = remember {
+        HomeLayoutRepository(applicationContext)
+    }
     val featureCenterOrderRepository = remember {
         FeatureCenterOrderRepository(applicationContext)
     }
@@ -602,6 +606,9 @@ fun HarleyApp(
     }
     var selectedHomeFeatures by remember {
         mutableStateOf(homeFeatureRepository.getSelectedFeatures())
+    }
+    var homeLayout by remember {
+        mutableStateOf(homeLayoutRepository.getLayout())
     }
     var featureCenterOrder by remember {
         mutableStateOf(featureCenterOrderRepository.getOrder())
@@ -1305,6 +1312,14 @@ fun HarleyApp(
                     val saved = homeFeatureRepository.saveSelectedFeatures(newSelection)
                     if (saved) {
                         selectedHomeFeatures = newSelection
+                    }
+                    saved
+                },
+                homeLayout = homeLayout,
+                onSaveHomeLayout = { newLayout ->
+                    val saved = homeLayoutRepository.saveLayout(newLayout)
+                    if (saved) {
+                        homeLayout = newLayout
                     }
                     saved
                 },

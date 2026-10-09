@@ -21,6 +21,10 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- 实时翻译仅在用户主动授权MediaProjection后读取系统允许内录的播放声音，不启用麦克风回退。 -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- Android 9及以下把用户主动截取的网页视频画面和录屏写入公共相册需要旧版存储权限。 -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
     <!-- 允许高重要性提醒渠道在用户未关闭系统或渠道振动时提供振动反馈。 -->
     <uses-permission android:name="android.permission.VIBRATE" />
     <!-- 后台Alarm触发后短时播放用户选择的系统提示音，服务最多运行五秒并自动退出。 -->
@@ -232,6 +236,17 @@
         -->
         <service
             android:name=".system.livetranslation.LiveTranslationService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection"
+            android:stopWithTask="false" />
+
+        <!--
+            用户在网站视频全屏工具栏主动授权后，本服务以当前屏幕最高可用H.264参数录制画面；
+            Android 10及以上仅在权限和播放方策略允许时附加系统声音，不使用麦克风回退。停止后
+            自动写入Movies/HarleyApp，并采用START_NOT_STICKY避免复用一次性投屏令牌。
+        -->
+        <service
+            android:name=".system.webcapture.WebsiteScreenRecordingService"
             android:exported="false"
             android:foregroundServiceType="mediaProjection"
             android:stopWithTask="false" />

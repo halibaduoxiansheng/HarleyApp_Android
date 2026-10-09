@@ -49,6 +49,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -68,7 +69,6 @@ import com.example.harleyapp.system.DeviceMonitor
 import com.example.harleyapp.system.NetworkSample
 import com.example.harleyapp.ui.components.HarleyPageBackground
 import com.example.harleyapp.ui.components.HarleyPageHeader
-import com.example.harleyapp.ui.components.HarleySectionHeader
 import com.example.harleyapp.ui.components.HarleyStatusPill
 import com.example.harleyapp.ui.components.bouncyClickable
 import com.example.harleyapp.ui.components.harleyCardBorder
@@ -84,8 +84,8 @@ import java.util.Locale
  *
  * 使用方法：
  * 由HarleyApp在底部“我的”选中时调用。用户切换主题或勾选快捷应用后立即通过回调持久化，
- * 首页会同步显示仍然安装的已选应用；版本信息直接从当前已安装包读取。页面可见期间每5秒
- * 更新一次物理内存、交换空间和内部存储，离开页面后协程自动取消。
+ * 首页会同步显示仍然安装的已选应用；版本信息直接从当前已安装包读取。个人健康信息始终显示，
+ * 其他设置按主题分组且默认折叠；只有展开“应用与设备”时才每5秒更新一次设备状态，折叠后自动停止。
  *
  * @param modifier 外部传入的页面安全边距。
  * @param isDarkTheme 当前是否启用黑夜模式。
@@ -143,6 +143,24 @@ fun ProfileScreen(
     var showAppPicker by rememberSaveable {
         mutableStateOf(false)
     }
+    var appearanceExpanded by rememberSaveable {
+        mutableStateOf(false)
+    }
+    var privacyExpanded by rememberSaveable {
+        mutableStateOf(false)
+    }
+    var appDeviceExpanded by rememberSaveable {
+        mutableStateOf(false)
+    }
+    var advancedExpanded by rememberSaveable {
+        mutableStateOf(false)
+    }
+    var shortcutsExpanded by rememberSaveable {
+        mutableStateOf(false)
+    }
+    var aboutExpanded by rememberSaveable {
+        mutableStateOf(false)
+    }
     val selectedApps = remember(apps, selectedPackages) {
         apps.filter { app -> app.packageName in selectedPackages }
     }
@@ -150,8 +168,12 @@ fun ProfileScreen(
         mutableStateOf(DeviceSnapshot())
     }
 
-    // “我的”页面可见时低频更新容量信息，既保持数值新鲜，也避免为缓慢变化的数据每秒采样。
-    LaunchedEffect(deviceMonitor) {
+    // 只有用户展开“应用与设备”时才低频更新容量信息，折叠后立即停止，减少后台读取和无效重组。
+    LaunchedEffect(deviceMonitor, appDeviceExpanded) {
+        if (!appDeviceExpanded) {
+            return@LaunchedEffect
+        }
+
         var previousSample: NetworkSample? = null
 
         while (isActive) {
@@ -203,167 +225,265 @@ fun ProfileScreen(
             }
 
             item {
-                HarleySectionHeader(
+                ProfileExpandableSectionHeader(
                     title = "外观与体验",
-                    subtitle = "主题、启动动画与充电效果"
+                    subtitle = "主题、启动动画与充电效果",
+                    expanded = appearanceExpanded,
+                    onExpandedChanged = { expanded -> appearanceExpanded = expanded }
                 )
             }
 
-            item {
-                AppearanceCard(
-                    isDarkTheme = isDarkTheme,
-                    visualTheme = visualTheme,
-                    onSetDarkTheme = onSetDarkTheme,
-                    onSetVisualTheme = onSetVisualTheme
-                )
-            }
-
-            item {
-                StartupAnimationSettingsCard(
-                    enabled = startupAnimationEnabled,
-                    onEnabledChanged = onSetStartupAnimationEnabled
-                )
-            }
-
-            item {
-                ChargingEffectSettingsCard()
-            }
-
-            item {
-                HarleySectionHeader(
-                    title = "隐私与安全",
-                    subtitle = "网站收藏、应用锁与本机权限"
-                )
-            }
-
-            item {
-                BrowserBookmarkSettingsCard()
-            }
-
-            item {
-                AppLockSettingsCard(repository = appLockRepository)
-            }
-
-            item {
-                HarleySectionHeader(
-                    title = "应用与设备",
-                    subtitle = "版本、设备状态与高级选项"
-                )
-            }
-
-            item {
-                DeveloperModeCard(
-                    configured = developerModeConfigured,
-                    enabled = developerModeEnabled,
-                    progress = companionProgress,
-                    onVerifyKey = onVerifyDeveloperKey,
-                    onDisable = onDisableDeveloperMode,
-                    onAddLevels = onAddDeveloperLevels,
-                    onAddCoins = onAddDeveloperCoins
-                )
-            }
-
-            item {
-                AppInfoCard(appInfo = appInfo)
-            }
-
-            item {
-                CompactDeviceStatusCard(snapshot = deviceSnapshot)
-            }
-
-            item {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    modifier = Modifier.weight(1f),
-                    text = "快捷应用管理",
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold
-                )
-                Text(
-                    text = "已添加 ${selectedApps.size}",
-                    color = MaterialTheme.colorScheme.primary,
-                    style = MaterialTheme.typography.labelLarge
-                )
-                Spacer(modifier = Modifier.width(10.dp))
-                Button(
-                    onClick = {
-                        showAppPicker = true
-                    },
-                    enabled = !isLoading
-                ) {
-                    Text(text = if (isLoading) "读取中" else "添加应用")
-                }
-            }
-        }
-
-            when {
-            isLoading -> {
+            if (appearanceExpanded) {
                 item {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(28.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        CircularProgressIndicator()
-                        Text(text = "正在读取可启动应用…")
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        AppearanceCard(
+                            isDarkTheme = isDarkTheme,
+                            visualTheme = visualTheme,
+                            onSetDarkTheme = onSetDarkTheme,
+                            onSetVisualTheme = onSetVisualTheme
+                        )
+                        StartupAnimationSettingsCard(
+                            enabled = startupAnimationEnabled,
+                            onEnabledChanged = onSetStartupAnimationEnabled
+                        )
+                        ChargingEffectSettingsCard()
                     }
                 }
             }
 
-            selectedApps.isEmpty() -> {
+            item {
+                ProfileExpandableSectionHeader(
+                    title = "隐私与安全",
+                    subtitle = "网站收藏、应用锁与本机权限",
+                    expanded = privacyExpanded,
+                    onExpandedChanged = { expanded -> privacyExpanded = expanded }
+                )
+            }
+
+            if (privacyExpanded) {
                 item {
-                    EmptyShortcutSelectionCard(
-                        onAddApp = {
-                            showAppPicker = true
-                        }
-                    )
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        BrowserBookmarkSettingsCard()
+                        AppLockSettingsCard(repository = appLockRepository)
+                    }
                 }
             }
 
-            else -> {
-                items(
-                    items = selectedApps,
-                    key = { it.packageName }
-                ) { app ->
-                    AppSelectionRow(
-                        app = app,
-                        selected = true,
-                        onSelectedChanged = { selected ->
-                            val updatedSelection = selectedPackages.toMutableSet().apply {
-                                if (selected) {
-                                    add(app.packageName)
-                                } else {
-                                    remove(app.packageName)
-                                }
-                            }
-                            onSelectionChanged(updatedSelection)
-                        }
+            item {
+                ProfileExpandableSectionHeader(
+                    title = "应用与设备",
+                    subtitle = "版本、设备状态与高级选项",
+                    expanded = appDeviceExpanded,
+                    onExpandedChanged = { expanded -> appDeviceExpanded = expanded }
+                )
+            }
+
+            if (appDeviceExpanded) {
+                item {
+                    AppInfoCard(appInfo = appInfo)
+                }
+
+                item {
+                    CompactDeviceStatusCard(snapshot = deviceSnapshot)
+                }
+
+                item {
+                    ProfileExpandableSectionHeader(
+                        title = "高级设置",
+                        subtitle = "开发者模式与伙伴调试工具",
+                        expanded = advancedExpanded,
+                        onExpandedChanged = { expanded -> advancedExpanded = expanded }
                     )
+                }
+
+                if (advancedExpanded) {
+                    item {
+                        DeveloperModeCard(
+                            configured = developerModeConfigured,
+                            enabled = developerModeEnabled,
+                            progress = companionProgress,
+                            onVerifyKey = onVerifyDeveloperKey,
+                            onDisable = onDisableDeveloperMode,
+                            onAddLevels = onAddDeveloperLevels,
+                            onAddCoins = onAddDeveloperCoins
+                        )
+                    }
+                }
+            }
+
+            item {
+                ProfileExpandableSectionHeader(
+                    title = "快捷应用",
+                    subtitle = "已添加 ${selectedApps.size} 个首页快捷入口",
+                    expanded = shortcutsExpanded,
+                    onExpandedChanged = { expanded -> shortcutsExpanded = expanded }
+                )
+            }
+
+            if (shortcutsExpanded) {
+                item {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            modifier = Modifier.weight(1f),
+                            text = "快捷应用管理",
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "已添加 ${selectedApps.size}",
+                            color = MaterialTheme.colorScheme.primary,
+                            style = MaterialTheme.typography.labelLarge
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Button(
+                            onClick = {
+                                showAppPicker = true
+                            },
+                            enabled = !isLoading
+                        ) {
+                            Text(text = if (isLoading) "读取中" else "添加应用")
+                        }
+                    }
+                }
+
+                when {
+                    isLoading -> {
+                        item {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(28.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                CircularProgressIndicator()
+                                Text(text = "正在读取可启动应用…")
+                            }
+                        }
+                    }
+
+                    selectedApps.isEmpty() -> {
+                        item {
+                            EmptyShortcutSelectionCard(
+                                onAddApp = {
+                                    showAppPicker = true
+                                }
+                            )
+                        }
+                    }
+
+                    else -> {
+                        items(
+                            items = selectedApps,
+                            key = { it.packageName }
+                        ) { app ->
+                            AppSelectionRow(
+                                app = app,
+                                selected = true,
+                                onSelectedChanged = { selected ->
+                                    val updatedSelection = selectedPackages.toMutableSet().apply {
+                                        if (selected) {
+                                            add(app.packageName)
+                                        } else {
+                                            remove(app.packageName)
+                                        }
+                                    }
+                                    onSelectionChanged(updatedSelection)
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+
+            item {
+                ProfileExpandableSectionHeader(
+                    title = "关于",
+                    subtitle = "数据说明与项目来源",
+                    expanded = aboutExpanded,
+                    onExpandedChanged = { expanded -> aboutExpanded = expanded }
+                )
+            }
+
+            if (aboutExpanded) {
+                item {
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        PrivacyCard()
+                        ProjectSourceCodeCard(
+                            onOpenSource = onOpenProjectSource
+                        )
+                    }
                 }
             }
         }
+    }
+}
 
-            item {
-                HarleySectionHeader(
-                    title = "关于",
-                    subtitle = "数据说明与项目来源"
+/**
+ * 显示“我的”页面可点击的折叠分组标题，让首屏只保留分类摘要而不是一次展开全部设置。
+ *
+ * 使用方法：
+ * [ProfileScreen]为每组传入独立的[expanded]状态。用户点击整张标题卡后，本函数通过
+ * [onExpandedChanged]返回相反状态；具体设置内容仍由调用方按状态决定是否加入列表。
+ *
+ * @param title 分组主标题。
+ * @param subtitle 分组包含内容的简短说明。
+ * @param expanded 当前分组是否已经展开。
+ * @param onExpandedChanged 用户点击后返回新的展开状态。
+ * @param modifier 外部布局修饰器。
+ *
+ * @return 无返回值，直接输出带展开状态提示的分组标题卡片。
+ */
+@Composable
+private fun ProfileExpandableSectionHeader(
+    title: String,
+    subtitle: String,
+    expanded: Boolean,
+    onExpandedChanged: (Boolean) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Card(
+        modifier = modifier
+            .fillMaxWidth()
+            .bouncyClickable(
+                role = Role.Button,
+                onClick = { onExpandedChanged(!expanded) }
+            ),
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainerLow
+        ),
+        border = harleyCardBorder(alpha = 0.74f)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 18.dp, vertical = 16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(3.dp)
+            ) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
 
-            item {
-                PrivacyCard()
-            }
-
-            item {
-                ProjectSourceCodeCard(
-                    onOpenSource = onOpenProjectSource
-                )
-            }
+            Spacer(modifier = Modifier.width(12.dp))
+            Text(
+                text = if (expanded) "收起 ↑" else "展开 ↓",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary
+            )
         }
     }
 }

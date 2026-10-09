@@ -2,7 +2,19 @@ package com.example.harleyapp.web
 
 import android.webkit.WebView
 import com.example.harleyapp.model.WebsiteToolSettings
+import org.json.JSONArray
 import java.util.Locale
+
+/**
+ * 标准HTML媒体当前可用于全屏滑动定位的时间轴快照。
+ *
+ * @param currentSeconds 当前播放位置，单位为秒。
+ * @param durationSeconds 媒体总时长，单位为秒；只接受有限且大于零的值。
+ */
+data class WebsiteMediaPlaybackPosition(
+    val currentSeconds: Double,
+    val durationSeconds: Double
+)
 
 /**
  * 向当前WebView主文档及可访问的同源iframe注入网页增强脚本。
@@ -81,6 +93,65 @@ class WebsiteScriptController {
         val safeSeconds = seconds.coerceIn(-MAX_SEEK_SECONDS, MAX_SEEK_SECONDS)
         val action = MEDIA_SEEK_BODY.format(Locale.US, safeSeconds, safeSeconds)
         evaluateMediaScript(webView, mediaActionScript(action), onMediaCount)
+    }
+
+    /**
+     * 把当前主要媒体直接定位到指定时间。
+     *
+     * 使用方法：
+     * 全屏横向滑动结束后传入预览目标时间。函数只注入有限的非负秒数，网页侧会再次按媒体总时长
+     * 和可用seekable区间限制目标，避免直播流或异常页面抛出未处理错误。
+     *
+     * @param webView 当前网站WebView。
+     * @param targetSeconds 目标播放位置，单位为秒。
+     * @param onMediaCount 找到并成功提交主要媒体定位时返回1，否则返回0。
+     * @return 无返回值。
+     */
+    fun seekTo(
+        webView: WebView,
+        targetSeconds: Double,
+        onMediaCount: (Int) -> Unit
+    ) {
+        if (!targetSeconds.isFinite() || targetSeconds < 0.0) {
+            onMediaCount(0)
+            return
+        }
+        val action = MEDIA_SEEK_TO_BODY.format(Locale.US, targetSeconds)
+        evaluateMediaScript(webView, mediaActionScript(action), onMediaCount)
+    }
+
+    /**
+     * 查询当前主要媒体的播放位置和有限总时长。
+     *
+     * 使用方法：
+     * 进入网页视频全屏后低频调用，为原生横滑手势提供稳定起点。返回值只包含时间数字，不读取网页
+     * 正文、地址或账号信息；跨域iframe、直播流和非标准播放器无法访问时返回null。
+     *
+     * @param webView 当前网站WebView。
+     * @param onPosition 可定位媒体返回时间轴快照，否则返回null。
+     * @return 无返回值。
+     */
+    fun queryPlaybackPosition(
+        webView: WebView,
+        onPosition: (WebsiteMediaPlaybackPosition?) -> Unit
+    ) {
+        webView.evaluateJavascript(MEDIA_POSITION_SCRIPT) { result ->
+            val position = runCatching {
+                val values = JSONArray(result)
+                val currentSeconds = values.getDouble(0)
+                val durationSeconds = values.getDouble(1)
+                WebsiteMediaPlaybackPosition(
+                    currentSeconds = currentSeconds,
+                    durationSeconds = durationSeconds
+                ).takeIf {
+                    currentSeconds.isFinite() &&
+                        currentSeconds >= 0.0 &&
+                        durationSeconds.isFinite() &&
+                        durationSeconds > 0.0
+                }
+            }.getOrNull()
+            onPosition(position)
+        }
     }
 
     /**
@@ -388,9 +459,49 @@ class WebsiteScriptController {
             })();
         """.trimIndent()
 
+        val MEDIA_POSITION_SCRIPT = """
+            (function() {
+                var tools = window.__harleyWebToolsV1;
+                var media = tools && tools.activeMedia ? tools.activeMedia() : null;
+                if (!media) {
+                    var items = Array.prototype.slice.call(document.querySelectorAll('video, audio'));
+                    media = items.sort(function(a, b) {
+                        var ar = a.getBoundingClientRect();
+                        var br = b.getBoundingClientRect();
+                        return (br.width * br.height) - (ar.width * ar.height);
+                    })[0] || null;
+                }
+                if (!media ||
+                    !isFinite(media.currentTime) ||
+                    !isFinite(media.duration) ||
+                    media.duration <= 0
+                ) {
+                    return [];
+                }
+                return [media.currentTime, media.duration];
+            })();
+        """.trimIndent()
+
         const val MEDIA_TOGGLE_BODY = "if (media.paused) { media.play(); } else { media.pause(); }"
         const val MEDIA_SEEK_BODY =
             "media.currentTime = Math.max(0, Math.min(isFinite(media.duration) ? media.duration : media.currentTime + (%d), media.currentTime + (%d)));"
+        val MEDIA_SEEK_TO_BODY = """
+            var targetTime = %.3f;
+            if (!isFinite(media.currentTime)) return 0;
+            if (isFinite(media.duration) && media.duration > 0) {
+                targetTime = Math.min(targetTime, media.duration);
+            }
+            try {
+                if (media.seekable && media.seekable.length > 0) {
+                    var seekStart = media.seekable.start(0);
+                    var seekEnd = media.seekable.end(media.seekable.length - 1);
+                    targetTime = Math.max(seekStart, Math.min(seekEnd, targetTime));
+                }
+                media.currentTime = Math.max(0, targetTime);
+            } catch (ignored) {
+                return 0;
+            }
+        """.trimIndent()
         val MEDIA_HOLD_REWIND_BODY = """
             if (!isFinite(media.currentTime)) return 0;
             var initialSeekFloor = 0;

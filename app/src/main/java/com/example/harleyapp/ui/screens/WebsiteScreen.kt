@@ -1,13 +1,17 @@
 package com.example.harleyapp.ui.screens
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ActivityInfo
 import android.graphics.Bitmap
+import android.media.projection.MediaProjectionManager
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.Message
@@ -15,6 +19,7 @@ import android.os.SystemClock
 import android.util.Log
 import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
+import android.view.ScaleGestureDetector
 import android.view.View
 import android.view.ViewConfiguration
 import android.view.ViewGroup
@@ -27,6 +32,8 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -72,6 +79,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
@@ -80,6 +88,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -109,6 +118,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.core.net.toUri
+import androidx.core.content.ContextCompat
 import com.example.harleyapp.data.WebsiteToolRepository
 import com.example.harleyapp.model.EbookWebDownloadRequest
 import com.example.harleyapp.model.WebsiteBrowserSession
@@ -119,7 +129,12 @@ import com.example.harleyapp.model.WebsiteShortcut
 import com.example.harleyapp.model.WebsiteToolSettings
 import com.example.harleyapp.model.normalizeWebsiteBrowserUrl
 import com.example.harleyapp.model.websitesByOpenCount
+import com.example.harleyapp.system.webcapture.WebsiteRecordingSessionStore
+import com.example.harleyapp.system.webcapture.WebsiteRecordingStatus
+import com.example.harleyapp.system.webcapture.WebsiteScreenRecordingService
+import com.example.harleyapp.system.webcapture.WebsiteScreenshotSaver
 import com.example.harleyapp.web.WebsiteScriptController
+import com.example.harleyapp.web.WebsiteMediaPlaybackPosition
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -127,6 +142,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 /**
@@ -461,6 +477,7 @@ private fun WebsiteTabSession(
     val settingsKey = tab.websiteId ?: tab.id
 
     val context = androidx.compose.ui.platform.LocalContext.current
+    val densityDpi = (LocalDensity.current.density * 160f).roundToInt()
     val activity = remember(context) { context.findActivity() }
     val websiteToolRepository = remember(context) {
         WebsiteToolRepository(context.applicationContext)
@@ -468,6 +485,13 @@ private fun WebsiteTabSession(
     val scriptController = remember {
         WebsiteScriptController()
     }
+    val screenshotSaver = remember(context) {
+        WebsiteScreenshotSaver(context.applicationContext)
+    }
+    val mediaProjectionManager = remember(context) {
+        context.getSystemService(MediaProjectionManager::class.java)
+    }
+    val recordingSnapshot by WebsiteRecordingSessionStore.snapshot.collectAsState()
     var toolSettings by remember(tab.id) {
         mutableStateOf(websiteToolRepository.getSettings(settingsKey))
     }
@@ -519,13 +543,180 @@ private fun WebsiteTabSession(
     var fullscreenHoldRevision by remember(tab.id) {
         mutableIntStateOf(0)
     }
+    var fullscreenPlaybackPosition by remember(tab.id) {
+        mutableStateOf<WebsiteMediaPlaybackPosition?>(null)
+    }
+    var fullscreenSeekPreview by remember(tab.id) {
+        mutableStateOf<FullscreenSeekPreview?>(null)
+    }
+    var fullscreenZoomScale by remember(tab.id) {
+        mutableFloatStateOf(1f)
+    }
+    var fullscreenZoomGestureActive by remember(tab.id) {
+        mutableStateOf(false)
+    }
+    var screenshotRequestRevision by remember(tab.id) {
+        mutableIntStateOf(0)
+    }
+    var processedScreenshotRevision by remember(tab.id) {
+        mutableIntStateOf(0)
+    }
+    var screenshotCaptureInProgress by remember(tab.id) {
+        mutableStateOf(false)
+    }
+    var pendingLegacyCaptureAction by remember(tab.id) {
+        mutableStateOf<PendingWebsiteCaptureAction?>(null)
+    }
+    var includePlaybackAudioForNextRecording by remember(tab.id) {
+        mutableStateOf(false)
+    }
+    var pendingProjectionGrant by remember(tab.id) {
+        mutableStateOf<PendingWebsiteProjectionGrant?>(null)
+    }
+    var captureAuthorizationInProgress by remember(tab.id) {
+        mutableStateOf(false)
+    }
+    var captureAuthorizationFinishPending by remember(tab.id) {
+        mutableStateOf(false)
+    }
+    var recordingElapsedMillis by remember(tab.id) {
+        mutableLongStateOf(0L)
+    }
+    val recordingOwnedByCurrentTab = recordingSnapshot.ownerTabId == tab.id
+    val mediaSessionActive = isActive || captureAuthorizationInProgress
+
+    val projectionPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK && result.data != null) {
+            pendingProjectionGrant = PendingWebsiteProjectionGrant(
+                resultCode = result.resultCode,
+                projectionData = requireNotNull(result.data),
+                includePlaybackAudio = includePlaybackAudioForNextRecording
+            )
+        } else {
+            toolMessage = "已取消系统录屏授权"
+            captureAuthorizationFinishPending = true
+        }
+    }
+
+    val recordAudioPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        includePlaybackAudioForNextRecording = granted
+        if (!granted) {
+            toolMessage = "未授权系统声音，将继续录制无声高画质视频"
+        }
+        runCatching {
+            projectionPermissionLauncher.launch(mediaProjectionManager.createScreenCaptureIntent())
+        }.onFailure { error ->
+            Log.e(TAG, "Failed to request website recording projection", error)
+            toolMessage = "无法打开系统录屏授权页面"
+            captureAuthorizationFinishPending = true
+        }
+    }
+
+    val legacyStoragePermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        val pendingAction = pendingLegacyCaptureAction
+        pendingLegacyCaptureAction = null
+        if (!granted) {
+            toolMessage = "未获得存储权限，无法保存截图或录屏"
+            captureAuthorizationFinishPending = true
+        } else {
+            when (pendingAction) {
+                PendingWebsiteCaptureAction.SCREENSHOT -> screenshotRequestRevision++
+                PendingWebsiteCaptureAction.RECORDING -> {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+                        ContextCompat.checkSelfPermission(
+                            context,
+                            Manifest.permission.RECORD_AUDIO
+                        ) != PackageManager.PERMISSION_GRANTED
+                    ) {
+                        recordAudioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                    } else {
+                        includePlaybackAudioForNextRecording =
+                            Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+                        projectionPermissionLauncher.launch(
+                            mediaProjectionManager.createScreenCaptureIntent()
+                        )
+                    }
+                }
+                null -> captureAuthorizationFinishPending = true
+            }
+        }
+    }
+
+    /**
+     * 请求截取当前全屏视频画面；Android 9及以下先申请一次旧版公共存储权限。
+     *
+     * @return 无返回值，结果通过顶部提示显示。
+     */
+    fun requestFullscreenScreenshot() {
+        if (screenshotCaptureInProgress) return
+        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P &&
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.WRITE_EXTERNAL_STORAGE
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            captureAuthorizationInProgress = true
+            pendingLegacyCaptureAction = PendingWebsiteCaptureAction.SCREENSHOT
+            legacyStoragePermissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        } else {
+            screenshotRequestRevision++
+        }
+    }
+
+    /**
+     * 请求开始一次手动停止的网页视频录屏，并按系统版本串行申请必要权限。
+     *
+     * @return 无返回值；系统授权成功后由前台服务开始编码。
+     */
+    fun requestWebsiteRecording() {
+        if (recordingSnapshot.isBusy) {
+            if (recordingOwnedByCurrentTab && recordingSnapshot.status != WebsiteRecordingStatus.SAVING) {
+                WebsiteScreenRecordingService.stop(context)
+            } else if (!recordingOwnedByCurrentTab) {
+                toolMessage = "其他网站标签正在录屏，请先停止后再开始"
+            }
+            return
+        }
+
+        captureAuthorizationInProgress = true
+        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P &&
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.WRITE_EXTERNAL_STORAGE
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            pendingLegacyCaptureAction = PendingWebsiteCaptureAction.RECORDING
+            legacyStoragePermissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            recordAudioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        } else {
+            includePlaybackAudioForNextRecording = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+            runCatching {
+                projectionPermissionLauncher.launch(mediaProjectionManager.createScreenCaptureIntent())
+            }.onFailure { error ->
+                Log.e(TAG, "Failed to request website recording projection", error)
+                toolMessage = "无法打开系统录屏授权页面"
+                captureAuthorizationFinishPending = true
+            }
+        }
+    }
+
     val currentOnFullscreenChanged by rememberUpdatedState(onFullscreenChanged)
     val currentOnEbookDownloadRequested by rememberUpdatedState(onEbookDownloadRequested)
     val currentOnBookmarkCurrentPage by rememberUpdatedState(onBookmarkCurrentPage)
     val currentOnOpenChildTab by rememberUpdatedState(onOpenChildTab)
     val currentOnTabPageChanged by rememberUpdatedState(onTabPageChanged)
     val currentOnExitWebsite by rememberUpdatedState(onExitWebsite)
-    val currentIsActive by rememberUpdatedState(isActive)
+    val currentIsActive by rememberUpdatedState(mediaSessionActive)
     var loadingProgress by remember {
         mutableIntStateOf(0)
     }
@@ -557,6 +748,12 @@ private fun WebsiteTabSession(
     /** 关闭当前全屏View并只回调网站一次。 */
     fun exitFullscreen() {
         val content = fullscreenContent ?: return
+        if (recordingOwnedByCurrentTab &&
+            (recordingSnapshot.status == WebsiteRecordingStatus.STARTING ||
+                recordingSnapshot.status == WebsiteRecordingStatus.RECORDING)
+        ) {
+            WebsiteScreenRecordingService.stop(context)
+        }
         fullscreenHoldRevision++
         fullscreenHoldDirection = null
         fullscreenContent = null
@@ -564,6 +761,10 @@ private fun WebsiteTabSession(
         fullscreenControlsVisible = false
         showFullscreenRatePicker = false
         fullscreenBallOffsetY = 0f
+        fullscreenPlaybackPosition = null
+        fullscreenSeekPreview = null
+        fullscreenZoomScale = 1f
+        fullscreenZoomGestureActive = false
         content.close()
     }
 
@@ -607,6 +808,10 @@ private fun WebsiteTabSession(
                     fullscreenBallOffsetY = 0f
                     fullscreenHoldRevision++
                     fullscreenHoldDirection = null
+                    fullscreenPlaybackPosition = null
+                    fullscreenSeekPreview = null
+                    fullscreenZoomScale = 1f
+                    fullscreenZoomGestureActive = false
                     fullscreenControlRevision++
                 } else {
                     callback.onCustomViewHidden()
@@ -779,8 +984,8 @@ private fun WebsiteTabSession(
     // 切走标签或离开“网站”时退出全屏并暂停标准HTML5媒体。尚未完成主页面加载的后台标签保持
     // WebView运行，允许网络与页面初始化继续；加载完成后再onPause，避免后台媒体和脚本长期耗电。
     // WebView对象、DOM、历史、滚动和表单始终保留，重新选中时继续复用同一实例。
-    DisposableEffect(webView, isActive, isPageLoading) {
-        if (isActive) {
+    DisposableEffect(webView, mediaSessionActive, isPageLoading) {
+        if (mediaSessionActive) {
             webView.onResume()
         } else {
             endFullscreenHold(restorePlayback = false)
@@ -838,6 +1043,23 @@ private fun WebsiteTabSession(
         }
     }
 
+    // 全屏期间低频同步标准HTML媒体时间轴，横滑开始后固定使用按下瞬间快照，避免播放推进使目标跳动。
+    LaunchedEffect(webView, fullscreenContent, isActive) {
+        if (!isActive || fullscreenContent == null) {
+            fullscreenPlaybackPosition = null
+            return@LaunchedEffect
+        }
+
+        while (isActive) {
+            if (fullscreenSeekPreview == null && !webViewReleased.get()) {
+                scriptController.queryPlaybackPosition(webView) { position ->
+                    fullscreenPlaybackPosition = position
+                }
+            }
+            delay(FULLSCREEN_MEDIA_POSITION_REFRESH_MILLIS)
+        }
+    }
+
     // 一段视频播放结束后解除本轮手动隐藏，下一次开始播放仍可自动给出脚本入口。
     LaunchedEffect(playingVideoCount) {
         if (playingVideoCount <= 0) {
@@ -853,10 +1075,155 @@ private fun WebsiteTabSession(
         }
     }
 
-    // 网站进入自定义全屏后隐藏系统栏并允许设备自由旋转；退出时恢复Activity原状态。
-    DisposableEffect(fullscreenContent, activity, isActive) {
+    // 系统授权页返回后等全屏View重新附着并绘制两帧，再启动VirtualDisplay，避免录屏开头出现黑帧。
+    LaunchedEffect(isActive, pendingProjectionGrant) {
+        val grant = pendingProjectionGrant
+        if (!isActive || grant == null) return@LaunchedEffect
+
         val content = fullscreenContent
-        if (!isActive || content == null || activity == null) {
+        val hostActivity = activity
+        if (content == null || hostActivity == null) {
+            pendingProjectionGrant = null
+            toolMessage = "视频已退出全屏，本次录屏未开始"
+            captureAuthorizationFinishPending = true
+            return@LaunchedEffect
+        }
+
+        // 真正建立VirtualDisplay前收起原生工具层，避免把录屏按钮录进片段开头。
+        fullscreenControlsVisible = false
+        showFullscreenRatePicker = false
+        withFrameNanos { }
+        withFrameNanos { }
+        val captureWidth = content.view.width
+            .takeIf { width -> width > 0 }
+            ?: hostActivity.window.decorView.width
+        val captureHeight = content.view.height
+            .takeIf { height -> height > 0 }
+            ?: hostActivity.window.decorView.height
+        runCatching {
+            WebsiteRecordingSessionStore.resetTerminalState()
+            WebsiteRecordingSessionStore.publishStarting(tab.id)
+            WebsiteScreenRecordingService.start(
+                context = context,
+                startIntent = WebsiteScreenRecordingService.createStartIntent(
+                    context = context,
+                    resultCode = grant.resultCode,
+                    projectionData = grant.projectionData,
+                    ownerTabId = tab.id,
+                    captureWidth = captureWidth,
+                    captureHeight = captureHeight,
+                    densityDpi = densityDpi,
+                    includePlaybackAudio = grant.includePlaybackAudio
+                )
+            )
+        }.onFailure { error ->
+            Log.e(TAG, "Failed to dispatch website recording service", error)
+            WebsiteRecordingSessionStore.publishError(
+                ownerTabId = tab.id,
+                message = "录屏服务启动失败，请关闭其他录屏应用后重试"
+            )
+        }
+        pendingProjectionGrant = null
+        captureAuthorizationFinishPending = true
+    }
+
+    // 权限Activity返回时先等主页面真正恢复RESUMED，再解除全屏保活，避免系统弹窗导致视频提前退出。
+    LaunchedEffect(isActive, captureAuthorizationFinishPending) {
+        if (isActive && captureAuthorizationFinishPending) {
+            captureAuthorizationFinishPending = false
+            captureAuthorizationInProgress = false
+        }
+    }
+
+    // 截图前收起原生工具层并等待两帧，让PixelCopy只保存当前播放画面而不是操作按钮。
+    LaunchedEffect(screenshotRequestRevision, isActive) {
+        if (screenshotRequestRevision <= processedScreenshotRevision ||
+            !isActive ||
+            screenshotCaptureInProgress
+        ) {
+            return@LaunchedEffect
+        }
+        processedScreenshotRevision = screenshotRequestRevision
+        val content = fullscreenContent
+        val hostActivity = activity
+        if (content == null || hostActivity == null) {
+            toolMessage = "当前视频尚未进入可截图的全屏状态"
+            captureAuthorizationFinishPending = true
+            return@LaunchedEffect
+        }
+
+        screenshotCaptureInProgress = true
+        fullscreenControlsVisible = false
+        showFullscreenRatePicker = false
+        withFrameNanos { }
+        withFrameNanos { }
+        val result = screenshotSaver.captureAndSave(
+            window = hostActivity.window,
+            fullscreenView = content.view
+        )
+        screenshotCaptureInProgress = false
+        toolMessage = result.message
+        captureAuthorizationFinishPending = true
+    }
+
+    // 服务状态只回显给发起录屏的标签；其他标签不会收到完成提示或误显示停止按钮。
+    LaunchedEffect(
+        recordingSnapshot.status,
+        recordingSnapshot.ownerTabId,
+        recordingSnapshot.message
+    ) {
+        if (recordingOwnedByCurrentTab && recordingSnapshot.message != null) {
+            toolMessage = recordingSnapshot.message
+        }
+    }
+
+    // 录制按钮每秒显示当前片段时长，用户无需展开系统通知即可准确决定停止位置。
+    LaunchedEffect(
+        recordingSnapshot.status,
+        recordingSnapshot.ownerTabId,
+        recordingSnapshot.startedAtElapsedRealtime
+    ) {
+        val startedAt = recordingSnapshot.startedAtElapsedRealtime
+        if (!recordingOwnedByCurrentTab ||
+            recordingSnapshot.status != WebsiteRecordingStatus.RECORDING ||
+            startedAt == null
+        ) {
+            recordingElapsedMillis = 0L
+            return@LaunchedEffect
+        }
+        while (isActive) {
+            recordingElapsedMillis = (SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(0L)
+            delay(RECORDING_ELAPSED_REFRESH_MILLIS)
+        }
+    }
+
+    // 用户切换标签、离开网站或播放器主动退出全屏时，自动停止并保存已经录到的有效片段。
+    LaunchedEffect(
+        isActive,
+        fullscreenContent,
+        captureAuthorizationInProgress,
+        recordingSnapshot.status,
+        recordingSnapshot.ownerTabId
+    ) {
+        if (!captureAuthorizationInProgress &&
+            recordingOwnedByCurrentTab &&
+            recordingSnapshot.status == WebsiteRecordingStatus.RECORDING &&
+            (!isActive || fullscreenContent == null)
+        ) {
+            WebsiteScreenRecordingService.stop(context)
+        }
+    }
+
+    // 网站进入自定义全屏后隐藏系统栏并允许设备自由旋转；退出时恢复Activity原状态。
+    DisposableEffect(
+        fullscreenContent,
+        activity,
+        mediaSessionActive,
+        recordingSnapshot.status,
+        recordingSnapshot.ownerTabId
+    ) {
+        val content = fullscreenContent
+        if (!mediaSessionActive || content == null || activity == null) {
             onDispose { }
         } else {
             val previousOrientation = activity.requestedOrientation
@@ -868,7 +1235,14 @@ private fun WebsiteTabSession(
             insetsController.systemBarsBehavior =
                 WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
             insetsController.hide(WindowInsetsCompat.Type.systemBars())
-            activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR
+            activity.requestedOrientation = if (recordingOwnedByCurrentTab &&
+                (recordingSnapshot.status == WebsiteRecordingStatus.STARTING ||
+                    recordingSnapshot.status == WebsiteRecordingStatus.RECORDING)
+            ) {
+                ActivityInfo.SCREEN_ORIENTATION_LOCKED
+            } else {
+                ActivityInfo.SCREEN_ORIENTATION_SENSOR
+            }
 
             onDispose {
                 content.view.keepScreenOn = false
@@ -916,15 +1290,30 @@ private fun WebsiteTabSession(
             AndroidView(
                 modifier = Modifier.fillMaxSize(),
                 factory = { androidContext ->
-                    FullscreenHoldGestureHost(androidContext).apply {
+                    FullscreenMediaGestureHost(androidContext).apply {
                         attachContent(content.view)
                         updateGestureHandling(
                             enabled = !fullscreenControlsLocked && !showFullscreenRatePicker,
+                            playbackPosition = fullscreenPlaybackPosition,
+                            zoomScale = fullscreenZoomScale,
                             onHoldStarted = ::beginFullscreenHold,
                             onHoldEnded = { restorePlayback ->
                                 endFullscreenHold(
                                     restorePlayback = restorePlayback && currentIsActive
                                 )
+                            },
+                            onSeekPreviewChanged = { preview ->
+                                fullscreenSeekPreview = preview
+                            },
+                            onSeekCommitted = { targetSeconds ->
+                                fullscreenSeekPreview = null
+                                scriptController.seekTo(webView, targetSeconds) { count ->
+                                    toolMessage = mediaActionMessage(count, "已调整播放进度")
+                                }
+                            },
+                            onZoomChanged = { scale, gestureActive ->
+                                fullscreenZoomScale = scale
+                                fullscreenZoomGestureActive = gestureActive
                             }
                         )
                     }
@@ -933,11 +1322,26 @@ private fun WebsiteTabSession(
                     gestureHost.attachContent(content.view)
                     gestureHost.updateGestureHandling(
                         enabled = !fullscreenControlsLocked && !showFullscreenRatePicker,
+                        playbackPosition = fullscreenPlaybackPosition,
+                        zoomScale = fullscreenZoomScale,
                         onHoldStarted = ::beginFullscreenHold,
                         onHoldEnded = { restorePlayback ->
                             endFullscreenHold(
                                 restorePlayback = restorePlayback && currentIsActive
                             )
+                        },
+                        onSeekPreviewChanged = { preview ->
+                            fullscreenSeekPreview = preview
+                        },
+                        onSeekCommitted = { targetSeconds ->
+                            fullscreenSeekPreview = null
+                            scriptController.seekTo(webView, targetSeconds) { count ->
+                                toolMessage = mediaActionMessage(count, "已调整播放进度")
+                            }
+                        },
+                        onZoomChanged = { scale, gestureActive ->
+                            fullscreenZoomScale = scale
+                            fullscreenZoomGestureActive = gestureActive
                         }
                     )
                 }
@@ -993,6 +1397,41 @@ private fun WebsiteTabSession(
                         color = Color.White,
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+
+            fullscreenSeekPreview?.let { preview ->
+                Surface(
+                    modifier = Modifier.align(Alignment.Center),
+                    color = Color.Black.copy(alpha = 0.68f),
+                    shape = MaterialTheme.shapes.extraLarge,
+                    shadowElevation = 8.dp
+                ) {
+                    Text(
+                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
+                        text = fullscreenSeekPreviewText(preview),
+                        color = Color.White,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+
+            if (fullscreenZoomGestureActive) {
+                Surface(
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = 54.dp),
+                    color = Color.Black.copy(alpha = 0.62f),
+                    shape = MaterialTheme.shapes.large
+                ) {
+                    Text(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
+                        text = "画面 ${formatFullscreenZoomScale(fullscreenZoomScale)}",
+                        color = Color.White,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold
                     )
                 }
             }
@@ -1151,6 +1590,51 @@ private fun WebsiteTabSession(
                                                 nightModeEnabled = !toolSettings.nightModeEnabled
                                             )
                                         )
+                                    }
+                                )
+                                FullscreenToolButton(
+                                    text = if (fullscreenZoomScale > 1.001f) {
+                                        "画面 ${formatFullscreenZoomScale(fullscreenZoomScale)}"
+                                    } else {
+                                        "双指缩放"
+                                    },
+                                    active = fullscreenZoomScale > 1.001f,
+                                    onClick = {
+                                        fullscreenZoomScale = 1f
+                                        fullscreenZoomGestureActive = false
+                                        toolMessage = "画面已恢复原始大小"
+                                        revealFullscreenControls()
+                                    }
+                                )
+                                FullscreenToolButton(
+                                    text = if (screenshotCaptureInProgress) "截图中" else "截图",
+                                    enabled = !screenshotCaptureInProgress &&
+                                        recordingSnapshot.status != WebsiteRecordingStatus.SAVING,
+                                    onClick = {
+                                        requestFullscreenScreenshot()
+                                    }
+                                )
+                                FullscreenToolButton(
+                                    text = when {
+                                        recordingOwnedByCurrentTab &&
+                                            recordingSnapshot.status == WebsiteRecordingStatus.RECORDING ->
+                                            "停止 ${formatMediaClock(recordingElapsedMillis / 1_000.0)}"
+                                        recordingOwnedByCurrentTab &&
+                                            recordingSnapshot.status == WebsiteRecordingStatus.STARTING ->
+                                            "准备录屏"
+                                        recordingOwnedByCurrentTab &&
+                                            recordingSnapshot.status == WebsiteRecordingStatus.SAVING ->
+                                            "保存中"
+                                        else -> "录屏"
+                                    },
+                                    active = recordingOwnedByCurrentTab &&
+                                        (recordingSnapshot.status == WebsiteRecordingStatus.STARTING ||
+                                            recordingSnapshot.status == WebsiteRecordingStatus.RECORDING),
+                                    enabled = recordingSnapshot.status != WebsiteRecordingStatus.SAVING &&
+                                        (!recordingSnapshot.isBusy || recordingOwnedByCurrentTab),
+                                    onClick = {
+                                        requestWebsiteRecording()
+                                        revealFullscreenControls()
                                     }
                                 )
                                 FullscreenToolButton(
@@ -2619,10 +3103,75 @@ private class PopupCleanupWebChromeClient(
     }
 }
 
+/** 旧版存储权限授权完成后需要继续执行的用户主动媒体操作。 */
+private enum class PendingWebsiteCaptureAction {
+    SCREENSHOT,
+    RECORDING
+}
+
+/**
+ * 系统录屏授权页返回后暂存的一次性令牌及声音选择。
+ *
+ * @param resultCode ActivityResult返回码。
+ * @param projectionData MediaProjection一次性授权Intent。
+ * @param includePlaybackAudio 是否尝试附加系统播放声音。
+ */
+private data class PendingWebsiteProjectionGrant(
+    val resultCode: Int,
+    val projectionData: Intent,
+    val includePlaybackAudio: Boolean
+)
+
 /** 全屏长按所在区域，左侧连续倒退，右侧临时加速播放。 */
 internal enum class FullscreenHoldDirection {
     REWIND,
     FAST_FORWARD
+}
+
+/**
+ * 全屏横滑过程中用于界面预览的稳定时间轴。
+ *
+ * @param startSeconds 手指按下时的播放位置，单位为秒。
+ * @param targetSeconds 按当前横向位移计算出的目标位置，单位为秒。
+ * @param durationSeconds 媒体总时长，单位为秒。
+ */
+internal data class FullscreenSeekPreview(
+    val startSeconds: Double,
+    val targetSeconds: Double,
+    val durationSeconds: Double
+)
+
+/**
+ * 把全屏横向拖动距离换算为绝对播放位置。
+ *
+ * 使用方法：
+ * 手势开始时固定[startSeconds]和[durationSeconds]，移动期间只更新[dragDistancePixels]。从屏幕最左
+ * 拖到最右对应完整媒体时长，结果始终限制在0到总时长之间；非法时间轴或尺寸返回null。
+ *
+ * @param startSeconds 手势开始时的播放位置，单位为秒。
+ * @param durationSeconds 媒体总时长，单位为秒。
+ * @param dragDistancePixels 当前触点相对按下位置的水平位移，向右为正。
+ * @param viewWidthPixels 全屏手势区域宽度，单位为像素。
+ * @return 合法目标秒数；输入无效时返回null。
+ */
+internal fun calculateFullscreenSwipeTarget(
+    startSeconds: Double,
+    durationSeconds: Double,
+    dragDistancePixels: Float,
+    viewWidthPixels: Int
+): Double? {
+    if (!startSeconds.isFinite() ||
+        !durationSeconds.isFinite() ||
+        !dragDistancePixels.isFinite() ||
+        startSeconds < 0.0 ||
+        durationSeconds <= 0.0 ||
+        viewWidthPixels <= 0
+    ) {
+        return null
+    }
+
+    val deltaSeconds = durationSeconds * dragDistancePixels / viewWidthPixels
+    return (startSeconds + deltaSeconds).coerceIn(0.0, durationSeconds)
 }
 
 /**
@@ -2670,15 +3219,15 @@ internal fun fullscreenHoldDirectionForPosition(
 }
 
 /**
- * 在不破坏播放器短按和拖动的前提下识别全屏左右半屏长按。
+ * 统一识别全屏视频的单指横滑定位、左右半屏长按和双指缩放。
  *
- * 使用方法：通过[attachContent]挂载Chromium提供的全屏View，再由[updateGestureHandling]传入当前
- * 是否允许手势及开始、结束回调。未达到系统长按阈值的事件会完整转发给子View；长按成立后先向
- * 子View发送ACTION_CANCEL，再由本容器接管到抬手或取消，避免网页播放器同时执行自身长按动作。
+ * 使用方法：通过[attachContent]挂载Chromium提供的全屏View，再由[updateGestureHandling]同步媒体
+ * 时间轴、缩放值和回调。短按、轻微移动与底部播放器控制区仍完整交给子View；只有明确横滑、长按
+ * 或双指缩放成立后才先发送ACTION_CANCEL并接管剩余事件，避免网页播放器执行重复动作。
  *
  * @param context 当前全屏页面使用的Android上下文。
  */
-private class FullscreenHoldGestureHost(context: Context) : FrameLayout(context) {
+private class FullscreenMediaGestureHost(context: Context) : FrameLayout(context) {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val touchSlopSquared = ViewConfiguration.get(context).scaledTouchSlop.let { slop ->
         slop.toFloat() * slop.toFloat()
@@ -2690,6 +3239,10 @@ private class FullscreenHoldGestureHost(context: Context) : FrameLayout(context)
     private var longPressEligible = false
     private var holdStarted = false
     private var captureUntilGestureEnd = false
+    private var seekGestureActive = false
+    private var seekGestureEligible = false
+    private var zoomCapturedSequence = false
+    private var zoomGestureActive = false
     private var activePointerId = INVALID_POINTER_ID
     private var downTimeMillis = 0L
     private var downX = 0f
@@ -2697,9 +3250,58 @@ private class FullscreenHoldGestureHost(context: Context) : FrameLayout(context)
     private var lastX = 0f
     private var lastY = 0f
     private var pendingDirection: FullscreenHoldDirection? = null
+    private var playbackPosition: WebsiteMediaPlaybackPosition? = null
+    private var gesturePlaybackPosition: WebsiteMediaPlaybackPosition? = null
+    private var requestedZoomScale = 1f
     private var onHoldStarted: (FullscreenHoldDirection) -> Unit = {}
     private var onHoldEnded: (Boolean) -> Unit = {}
+    private var onSeekPreviewChanged: (FullscreenSeekPreview?) -> Unit = {}
+    private var onSeekCommitted: (Double) -> Unit = {}
+    private var onZoomChanged: (Float, Boolean) -> Unit = { _, _ -> }
     private val beginHoldRunnable = Runnable { beginHoldIfEligible() }
+    private val scaleGestureDetector = ScaleGestureDetector(
+        context,
+        object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            /** @return 手势允许且存在全屏内容时开始接管双指缩放。 */
+            override fun onScaleBegin(detector: ScaleGestureDetector): Boolean {
+                if (!gestureHandlingEnabled || childCount <= 0 || !sequenceActive) {
+                    return false
+                }
+
+                cancelPendingLongPress()
+                finishActiveHold(restorePlayback = true)
+                finishSeekGesture(commit = false)
+                zoomCapturedSequence = true
+                zoomGestureActive = true
+                if (!captureUntilGestureEnd) {
+                    captureUntilGestureEnd = true
+                    sendCancelToContent()
+                }
+                onZoomChanged(requestedZoomScale, true)
+                performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                return true
+            }
+
+            /** @return 成功应用本次缩放增量时返回true。 */
+            override fun onScale(detector: ScaleGestureDetector): Boolean {
+                if (!zoomGestureActive || !detector.scaleFactor.isFinite()) return false
+
+                requestedZoomScale = (requestedZoomScale * detector.scaleFactor)
+                    .coerceIn(MIN_FULLSCREEN_VIDEO_ZOOM, MAX_FULLSCREEN_VIDEO_ZOOM)
+                applyContentZoom(requestedZoomScale)
+                onZoomChanged(requestedZoomScale, true)
+                return true
+            }
+
+            /** 双指结束后保留当前倍率，并只关闭临时倍率提示。 */
+            override fun onScaleEnd(detector: ScaleGestureDetector) {
+                if (zoomGestureActive) {
+                    zoomGestureActive = false
+                    onZoomChanged(requestedZoomScale, false)
+                }
+            }
+        }
+    )
 
     /**
      * 把当前Chromium全屏View挂入手势容器并铺满可用区域。
@@ -2719,26 +3321,54 @@ private class FullscreenHoldGestureHost(context: Context) : FrameLayout(context)
             contentView,
             LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)
         )
+        applyContentZoom(requestedZoomScale)
     }
 
     /**
-     * 更新长按开关与回调，供Compose重组时同步锁屏和倍速选择器状态。
+     * 更新全屏手势开关、媒体时间轴、画面倍率与全部回调。
      *
-     * @param enabled true允许新长按；false取消尚未成立的长按并结束已启动操作。
+     * @param enabled true允许开始横滑、长按和双指缩放；false立即结束当前手势。
+     * @param playbackPosition 当前标准HTML媒体时间轴；null时仍保留长按与缩放，但不接管横滑。
+     * @param zoomScale Compose保存的目标画面倍率。
      * @param onHoldStarted 长按成立后的方向回调，每轮触摸最多调用一次。
      * @param onHoldEnded 已成立长按结束后的清理回调；参数true允许恢复播放，false只做安全清理。
+     * @param onSeekPreviewChanged 横滑目标变化回调；null表示预览结束或取消。
+     * @param onSeekCommitted 用户抬手后提交的绝对目标秒数回调。
+     * @param onZoomChanged 缩放倍率与手势是否仍进行中的回调。
      * @return 无返回值。
      */
     fun updateGestureHandling(
         enabled: Boolean,
+        playbackPosition: WebsiteMediaPlaybackPosition?,
+        zoomScale: Float,
         onHoldStarted: (FullscreenHoldDirection) -> Unit,
-        onHoldEnded: (Boolean) -> Unit
+        onHoldEnded: (Boolean) -> Unit,
+        onSeekPreviewChanged: (FullscreenSeekPreview?) -> Unit,
+        onSeekCommitted: (Double) -> Unit,
+        onZoomChanged: (Float, Boolean) -> Unit
     ) {
+        this.playbackPosition = playbackPosition
         this.onHoldStarted = onHoldStarted
         this.onHoldEnded = onHoldEnded
+        this.onSeekPreviewChanged = onSeekPreviewChanged
+        this.onSeekCommitted = onSeekCommitted
+        this.onZoomChanged = onZoomChanged
+        val normalizedZoom = zoomScale
+            .takeIf(Float::isFinite)
+            ?.coerceIn(MIN_FULLSCREEN_VIDEO_ZOOM, MAX_FULLSCREEN_VIDEO_ZOOM)
+            ?: MIN_FULLSCREEN_VIDEO_ZOOM
+        if (abs(requestedZoomScale - normalizedZoom) > ZOOM_SCALE_EPSILON) {
+            requestedZoomScale = normalizedZoom
+            applyContentZoom(requestedZoomScale)
+        }
         if (gestureHandlingEnabled && !enabled) {
             cancelPendingLongPress()
             finishActiveHold(restorePlayback = true)
+            finishSeekGesture(commit = false)
+            if (zoomGestureActive) {
+                zoomGestureActive = false
+                onZoomChanged(requestedZoomScale, false)
+            }
         }
         gestureHandlingEnabled = enabled
     }
@@ -2752,7 +3382,15 @@ private class FullscreenHoldGestureHost(context: Context) : FrameLayout(context)
     override fun dispatchTouchEvent(event: MotionEvent): Boolean {
         if (event.actionMasked == MotionEvent.ACTION_DOWN) {
             prepareTouchSequence(event)
-        } else if (sequenceActive) {
+        }
+
+        if (sequenceActive && gestureHandlingEnabled) {
+            scaleGestureDetector.onTouchEvent(event)
+        }
+        if (event.actionMasked != MotionEvent.ACTION_DOWN &&
+            sequenceActive &&
+            !zoomCapturedSequence
+        ) {
             updateTouchSequence(event)
         }
 
@@ -2768,7 +3406,12 @@ private class FullscreenHoldGestureHost(context: Context) : FrameLayout(context)
             event.actionMasked == MotionEvent.ACTION_CANCEL
         ) {
             cancelPendingLongPress()
+            finishSeekGesture(commit = event.actionMasked == MotionEvent.ACTION_UP)
             finishActiveHold(restorePlayback = true)
+            if (zoomGestureActive) {
+                zoomGestureActive = false
+                onZoomChanged(requestedZoomScale, false)
+            }
             resetTouchSequence()
         }
 
@@ -2782,9 +3425,28 @@ private class FullscreenHoldGestureHost(context: Context) : FrameLayout(context)
      */
     override fun onDetachedFromWindow() {
         cancelPendingLongPress()
+        finishSeekGesture(commit = false)
         finishActiveHold(restorePlayback = true)
+        if (zoomGestureActive) {
+            zoomGestureActive = false
+            onZoomChanged(requestedZoomScale, false)
+        }
         resetTouchSequence()
         super.onDetachedFromWindow()
+    }
+
+    /**
+     * 全屏容器横竖屏尺寸变化后重新以新中心点应用当前倍率。
+     *
+     * @param width 新宽度，单位为像素。
+     * @param height 新高度，单位为像素。
+     * @param oldWidth 旧宽度，单位为像素。
+     * @param oldHeight 旧高度，单位为像素。
+     * @return 无返回值。
+     */
+    override fun onSizeChanged(width: Int, height: Int, oldWidth: Int, oldHeight: Int) {
+        super.onSizeChanged(width, height, oldWidth, oldHeight)
+        applyContentZoom(requestedZoomScale)
     }
 
     /**
@@ -2805,6 +3467,7 @@ private class FullscreenHoldGestureHost(context: Context) : FrameLayout(context)
         downY = event.y
         lastX = event.x
         lastY = event.y
+        gesturePlaybackPosition = playbackPosition
         pendingDirection = fullscreenHoldDirectionForPosition(
             pointerX = event.x,
             pointerY = event.y,
@@ -2813,6 +3476,7 @@ private class FullscreenHoldGestureHost(context: Context) : FrameLayout(context)
             bottomExclusionHeight = bottomControlExclusionPixels
         )
         longPressEligible = gestureHandlingEnabled && pendingDirection != null
+        seekGestureEligible = longPressEligible && gesturePlaybackPosition != null
         if (longPressEligible) {
             mainHandler.postDelayed(
                 beginHoldRunnable,
@@ -2832,6 +3496,7 @@ private class FullscreenHoldGestureHost(context: Context) : FrameLayout(context)
             MotionEvent.ACTION_POINTER_DOWN -> {
                 cancelPendingLongPress()
                 finishActiveHold(restorePlayback = true)
+                finishSeekGesture(commit = false)
             }
 
             MotionEvent.ACTION_MOVE -> {
@@ -2843,11 +3508,18 @@ private class FullscreenHoldGestureHost(context: Context) : FrameLayout(context)
                 }
                 lastX = event.getX(pointerIndex)
                 lastY = event.getY(pointerIndex)
-                if (!holdStarted) {
+                if (seekGestureActive) {
+                    updateSeekPreview(lastX - downX)
+                } else if (!holdStarted) {
                     val deltaX = lastX - downX
                     val deltaY = lastY - downY
                     if (deltaX * deltaX + deltaY * deltaY > touchSlopSquared) {
                         cancelPendingLongPress()
+                        if (seekGestureEligible && abs(deltaX) > abs(deltaY) * SEEK_DIRECTION_RATIO) {
+                            beginSeekGesture(deltaX)
+                        } else {
+                            seekGestureEligible = false
+                        }
                     }
                 }
             }
@@ -2871,6 +3543,97 @@ private class FullscreenHoldGestureHost(context: Context) : FrameLayout(context)
         sendCancelToContent()
         performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
         onHoldStarted(direction)
+    }
+
+    /**
+     * 横向位移明确超过触摸阈值后取消播放器原触摸并开始进度预览。
+     *
+     * @param dragDistancePixels 当前相对按下点的横向位移。
+     * @return 无返回值；时间轴失效时不会接管触摸。
+     */
+    private fun beginSeekGesture(dragDistancePixels: Float) {
+        val position = gesturePlaybackPosition ?: return
+        val target = calculateFullscreenSwipeTarget(
+            startSeconds = position.currentSeconds,
+            durationSeconds = position.durationSeconds,
+            dragDistancePixels = dragDistancePixels,
+            viewWidthPixels = width
+        ) ?: return
+
+        seekGestureEligible = false
+        seekGestureActive = true
+        captureUntilGestureEnd = true
+        sendCancelToContent()
+        performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+        onSeekPreviewChanged(
+            FullscreenSeekPreview(
+                startSeconds = position.currentSeconds,
+                targetSeconds = target,
+                durationSeconds = position.durationSeconds
+            )
+        )
+    }
+
+    /**
+     * 根据最新触点更新横滑目标，但不在移动过程中高频修改网页播放器。
+     *
+     * @param dragDistancePixels 当前相对按下点的横向位移。
+     * @return 无返回值。
+     */
+    private fun updateSeekPreview(dragDistancePixels: Float) {
+        val position = gesturePlaybackPosition ?: return
+        val target = calculateFullscreenSwipeTarget(
+            startSeconds = position.currentSeconds,
+            durationSeconds = position.durationSeconds,
+            dragDistancePixels = dragDistancePixels,
+            viewWidthPixels = width
+        ) ?: return
+        onSeekPreviewChanged(
+            FullscreenSeekPreview(
+                startSeconds = position.currentSeconds,
+                targetSeconds = target,
+                durationSeconds = position.durationSeconds
+            )
+        )
+    }
+
+    /**
+     * 结束横滑预览；正常抬手提交最后目标，系统取消或手势切换只清理预览。
+     *
+     * @param commit true提交最后目标，false保持播放器原进度。
+     * @return 无返回值。
+     */
+    private fun finishSeekGesture(commit: Boolean) {
+        if (!seekGestureActive) return
+        val position = gesturePlaybackPosition
+        val target = position?.let {
+            calculateFullscreenSwipeTarget(
+                startSeconds = it.currentSeconds,
+                durationSeconds = it.durationSeconds,
+                dragDistancePixels = lastX - downX,
+                viewWidthPixels = width
+            )
+        }
+        seekGestureActive = false
+        seekGestureEligible = false
+        onSeekPreviewChanged(null)
+        if (commit && target != null) {
+            onSeekCommitted(target)
+        }
+    }
+
+    /**
+     * 把当前倍率应用到Chromium全屏View；恢复1倍时同步清理轴心，避免下一次全屏沿用旧状态。
+     *
+     * @param scale 已限制在允许范围内的画面倍率。
+     * @return 无返回值。
+     */
+    private fun applyContentZoom(scale: Float) {
+        val contentView = getChildAt(0) ?: return
+        contentView.pivotX = width.coerceAtLeast(contentView.width) / 2f
+        contentView.pivotY = height.coerceAtLeast(contentView.height) / 2f
+        contentView.scaleX = scale
+        contentView.scaleY = scale
     }
 
     /**
@@ -2927,13 +3690,22 @@ private class FullscreenHoldGestureHost(context: Context) : FrameLayout(context)
         longPressEligible = false
         holdStarted = false
         captureUntilGestureEnd = false
+        seekGestureActive = false
+        seekGestureEligible = false
+        zoomCapturedSequence = false
+        zoomGestureActive = false
         activePointerId = INVALID_POINTER_ID
         downTimeMillis = 0L
         pendingDirection = null
+        gesturePlaybackPosition = null
     }
 
     private companion object {
         const val INVALID_POINTER_ID = -1
+        const val SEEK_DIRECTION_RATIO = 1.15f
+        const val MIN_FULLSCREEN_VIDEO_ZOOM = 1f
+        const val MAX_FULLSCREEN_VIDEO_ZOOM = 3f
+        const val ZOOM_SCALE_EPSILON = 0.001f
     }
 }
 
@@ -2966,6 +3738,7 @@ private class FullscreenWebContent(
  *
  * @param text 按钮文字或当前状态。
  * @param active 是否使用强调色表示功能已经开启。
+ * @param enabled 是否允许点击；保存等不可中断阶段传false。
  * @param onClick 点击回调。
  * @return 无返回值。
  */
@@ -2973,12 +3746,20 @@ private class FullscreenWebContent(
 private fun FullscreenToolButton(
     text: String,
     active: Boolean = false,
+    enabled: Boolean = true,
     onClick: () -> Unit
 ) {
-    TextButton(onClick = onClick) {
+    TextButton(
+        enabled = enabled,
+        onClick = onClick
+    ) {
         Text(
             text = text,
-            color = if (active) FULLSCREEN_ACTIVE_COLOR else Color.White,
+            color = when {
+                !enabled -> Color.White.copy(alpha = 0.45f)
+                active -> FULLSCREEN_ACTIVE_COLOR
+                else -> Color.White
+            },
             fontWeight = if (active) FontWeight.Bold else FontWeight.Medium
         )
     }
@@ -3086,6 +3867,51 @@ private fun formatToolbarRate(rate: Float): String {
 }
 
 /**
+ * 把全屏视频缩放倍率格式化为紧凑文本。
+ *
+ * @param scale 当前画面倍率。
+ * @return 例如“1.0×”或“2.3×”的中文界面文本。
+ */
+private fun formatFullscreenZoomScale(scale: Float): String {
+    return String.format(Locale.CHINA, "%.1f×", scale)
+}
+
+/**
+ * 生成全屏横滑中央预览文字。
+ *
+ * @param preview 手势开始、目标和总时长。
+ * @return 包含方向、目标时间、总时长和相对变化秒数的单行文本。
+ */
+private fun fullscreenSeekPreviewText(preview: FullscreenSeekPreview): String {
+    val deltaSeconds = (preview.targetSeconds - preview.startSeconds).roundToInt()
+    val direction = if (deltaSeconds >= 0) "快进" else "快退"
+    return "$direction ${formatMediaClock(preview.targetSeconds)} / " +
+        "${formatMediaClock(preview.durationSeconds)} (${if (deltaSeconds >= 0) "+" else ""}$deltaSeconds 秒)"
+}
+
+/**
+ * 把媒体秒数格式化为时钟文本。
+ *
+ * @param seconds 非负媒体秒数。
+ * @return 不足一小时返回mm:ss，一小时及以上返回h:mm:ss。
+ */
+private fun formatMediaClock(seconds: Double): String {
+    val totalSeconds = seconds
+        .takeIf(Double::isFinite)
+        ?.coerceAtLeast(0.0)
+        ?.roundToInt()
+        ?: 0
+    val hours = totalSeconds / 3_600
+    val minutes = totalSeconds % 3_600 / 60
+    val remainingSeconds = totalSeconds % 60
+    return if (hours > 0) {
+        String.format(Locale.CHINA, "%d:%02d:%02d", hours, minutes, remainingSeconds)
+    } else {
+        String.format(Locale.CHINA, "%02d:%02d", minutes, remainingSeconds)
+    }
+}
+
+/**
  * 根据脚本找到的媒体数量生成操作反馈。
  *
  * @param mediaCount 脚本找到并尝试控制的媒体数量。
@@ -3143,6 +3969,10 @@ internal fun calculateFullscreenBallOffset(
 private const val TAG = "WebsiteScreen"
 private const val TOOL_MESSAGE_DURATION_MILLIS = 2_600L
 private const val FULLSCREEN_CONTROLS_HIDE_DELAY_MILLIS = 3_000L
+/** 全屏标准HTML媒体时间轴的刷新间隔，横滑期间暂停查询以保持按下时起点稳定。 */
+private const val FULLSCREEN_MEDIA_POSITION_REFRESH_MILLIS = 500L
+/** 全屏录屏按钮刷新已录时长的间隔。 */
+private const val RECORDING_ELAPSED_REFRESH_MILLIS = 1_000L
 /** 标签总览抽屉从右侧滑入或滑回时的动画时长。 */
 private const val TAB_OVERVIEW_DRAWER_ANIMATION_MILLIS = 260
 /** 标签总览左侧空白遮罩淡入或淡出时的动画时长。 */

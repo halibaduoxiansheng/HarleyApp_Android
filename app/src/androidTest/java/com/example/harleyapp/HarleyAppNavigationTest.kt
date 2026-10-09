@@ -228,17 +228,30 @@ class HarleyAppNavigationTest {
     }
 
     /**
-     * 验证“我的”页显示外观、应用版本和快捷应用管理入口。
+     * 验证“我的”页折叠分组可分别展开外观、应用版本和快捷应用管理内容。
      *
-     * @return 无返回值；页面或微信设置卡片未显示时由测试框架报告失败。
+     * 使用方法：
+     * 测试只展开和收起设置分组，不切换主题、不修改快捷应用，也不进入高级开发者工具。
+     *
+     * @return 无返回值；任一分组或展开后的固定内容未显示时由测试框架报告失败。
      */
     @Test
     fun profileNavigationShowsBasicSettings() {
         launchMainActivity()
 
         clickNode("我的")
+        waitForNode("外观与体验")
+        clickNode("外观与体验")
         waitForNode("外观模式")
+        clickNode("外观与体验")
+
+        scrollUntilNode("应用与设备")
+        clickNode("应用与设备")
         waitForNode("Harley生活助手")
+        clickNode("应用与设备")
+
+        scrollUntilNode("快捷应用")
+        clickNode("快捷应用")
         waitForNode("快捷应用管理")
     }
 

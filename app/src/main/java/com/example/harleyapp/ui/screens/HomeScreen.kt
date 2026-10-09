@@ -82,8 +82,11 @@ import com.example.harleyapp.model.DeviceSnapshot
 import com.example.harleyapp.model.ENGLISH_WORD_MASTERY_COUNT
 import com.example.harleyapp.model.EnglishWord
 import com.example.harleyapp.model.HomeFeatureId
+import com.example.harleyapp.model.HomeLayoutPreferences
+import com.example.harleyapp.model.HomeSectionId
 import com.example.harleyapp.model.LaunchableApp
 import com.example.harleyapp.model.WebsiteShortcut
+import com.example.harleyapp.model.moveHomeSection
 import com.example.harleyapp.system.DeviceMonitor
 import com.example.harleyapp.system.NetworkSample
 import com.example.harleyapp.system.OfflineEnglishTtsState
@@ -119,6 +122,8 @@ import java.util.Locale
  * @param onSetDefaultWebsite 把指定网站设为底部网站页签默认入口的回调。
  * @param selectedHomeFeatures 用户选择在首页展示的功能标识集合。
  * @param onSaveHomeFeatures 覆盖保存首页功能选择的回调，成功返回true。
+ * @param homeLayout 首页内容模块当前的完整顺序和隐藏状态。
+ * @param onSaveHomeLayout 覆盖保存首页模块布局的回调，成功返回true。
  * @param onOpenFeature 点击首页功能卡片后的统一导航回调，参数为功能标识。
  * @param englishWord 首页当前随机显示的尚未完成单词；全部达到三次时为null。
  * @param englishRemainingCount 当前尚未达到三次、仍参与首页随机复习的单词数量。
@@ -151,6 +156,8 @@ fun HomeScreen(
     onSetDefaultWebsite: (String) -> Boolean,
     selectedHomeFeatures: Set<HomeFeatureId>,
     onSaveHomeFeatures: (Set<HomeFeatureId>) -> Boolean,
+    homeLayout: HomeLayoutPreferences,
+    onSaveHomeLayout: (HomeLayoutPreferences) -> Boolean,
     onOpenFeature: (HomeFeatureId) -> Unit,
     englishWord: EnglishWord?,
     englishRemainingCount: Int,
@@ -174,6 +181,7 @@ fun HomeScreen(
     var quickSearchVisible by rememberSaveable { mutableStateOf(true) }
     var quickSearchQuery by rememberSaveable { mutableStateOf("") }
     var quickSearchFocused by remember { mutableStateOf(false) }
+    var layoutEditorVisible by rememberSaveable { mutableStateOf(false) }
 
     // 用累计滚动距离而不是单个像素方向切换搜索框，避免手指轻微抖动导致显隐状态反复翻转。
     LaunchedEffect(listState) {
@@ -223,8 +231,12 @@ fun HomeScreen(
         }
     }
 
-    // 仅在首页可见时每秒采样，避免无意义地常驻消耗电量。
-    LaunchedEffect(deviceMonitor) {
+    // 只有实时状态模块可见时才每秒采样；用户隐藏模块后同步停止读取，避免无展示价值的后台开销。
+    LaunchedEffect(deviceMonitor, homeLayout.isVisible(HomeSectionId.REALTIME_STATUS)) {
+        if (!homeLayout.isVisible(HomeSectionId.REALTIME_STATUS)) {
+            return@LaunchedEffect
+        }
+
         var previousSample: NetworkSample? = null
 
         while (isActive) {
@@ -235,6 +247,20 @@ fun HomeScreen(
             previousSample = reading.networkSample
             delay(1_000L)
         }
+    }
+
+    if (layoutEditorVisible) {
+        HomeLayoutDialog(
+            layout = homeLayout,
+            onDismiss = { layoutEditorVisible = false },
+            onSave = { newLayout ->
+                val saved = onSaveHomeLayout(newLayout)
+                if (saved) {
+                    layoutEditorVisible = false
+                }
+                saved
+            }
+        )
     }
 
     HarleyPageBackground(modifier = modifier) {
@@ -250,122 +276,126 @@ fun HomeScreen(
             ),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            item {
-                WebsiteCarousel(
-                    websites = websites,
-                    defaultWebsiteId = defaultWebsiteId,
-                    onOpenWebsite = onOpenWebsite,
-                    onOpenDetails = onOpenWebsiteDetails,
-                    onSetDefaultWebsite = onSetDefaultWebsite,
-                    onSaveWebsite = onSaveWebsite,
-                    onDeleteWebsite = onDeleteWebsite
-                )
-            }
-
-        item {
-            HomeFeatureCarousel(
-                selectedFeatures = selectedHomeFeatures,
-                onSaveSelection = onSaveHomeFeatures,
-                onOpenFeature = onOpenFeature
-            )
-        }
-
-        item {
-            HomeEnglishWordCard(
-                word = englishWord,
-                remainingCount = englishRemainingCount,
-                ttsState = englishTtsState,
-                onSpeakEnglish = onSpeakEnglish,
-                onMarkLearned = onMarkEnglishWordLearned,
-                onOpenAll = { onOpenFeature(HomeFeatureId.ENGLISH_WORDS) }
-            )
-        }
-
-        item {
-            SectionTitle(
-                title = "我的伙伴",
-                subtitle = "完成每日任务，解锁新形态与技能"
-            )
-        }
-
-        item {
-            CompanionCard(
-                progress = companionProgress,
-                onSelectCategory = onSelectCompanionCategory,
-                onPurchaseItem = onPurchaseCompanionItem,
-                onUseItem = onUseCompanionItem,
-                onCompleteInteraction = onCompleteCompanionInteraction
-            )
-        }
-
-        item {
-            SectionTitle(
-                title = "实时状态",
-                subtitle = "每秒刷新 · 不主动消耗流量"
-            )
-        }
-
-        item {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                MetricCard(
-                    modifier = Modifier.weight(1f),
-                    symbol = "↑",
-                    title = "上传",
-                    value = formatSpeed(snapshot.uploadBytesPerSecond),
-                    highlighted = true
-                )
-
-                MetricCard(
-                    modifier = Modifier.weight(1f),
-                    symbol = "↓",
-                    title = "下载",
-                    value = formatSpeed(snapshot.downloadBytesPerSecond),
-                    highlighted = false
-                )
-            }
-        }
-
-        item {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                SectionTitle(
-                    modifier = Modifier.weight(1f),
-                    title = "快捷应用",
-                    subtitle = if (shortcuts.isEmpty()) "还没有选择应用" else "点击即可打开"
-                )
-
-                TextButton(onClick = onManageShortcuts) {
-                    Text(text = "管理")
-                }
-            }
-        }
-
-        if (shortcuts.isEmpty()) {
-            item {
-                EmptyShortcutCard(onManageShortcuts = onManageShortcuts)
-            }
-        } else {
-            item {
-                FlowRow(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    shortcuts.forEach { app ->
-                        ShortcutItem(
-                            app = app,
-                            onClick = {
-                                onLaunchApp(app.packageName)
-                            }
+            homeLayout.visibleSections.forEach { section ->
+                item(key = section.name) {
+                    when (section) {
+                        HomeSectionId.WEBSITES -> WebsiteCarousel(
+                            websites = websites,
+                            defaultWebsiteId = defaultWebsiteId,
+                            onOpenWebsite = onOpenWebsite,
+                            onOpenDetails = onOpenWebsiteDetails,
+                            onSetDefaultWebsite = onSetDefaultWebsite,
+                            onSaveWebsite = onSaveWebsite,
+                            onDeleteWebsite = onDeleteWebsite
                         )
+
+                        HomeSectionId.FEATURES -> HomeFeatureCarousel(
+                            selectedFeatures = selectedHomeFeatures,
+                            onSaveSelection = onSaveHomeFeatures,
+                            onOpenFeature = onOpenFeature
+                        )
+
+                        HomeSectionId.ENGLISH_WORD -> HomeEnglishWordCard(
+                            word = englishWord,
+                            remainingCount = englishRemainingCount,
+                            ttsState = englishTtsState,
+                            onSpeakEnglish = onSpeakEnglish,
+                            onMarkLearned = onMarkEnglishWordLearned,
+                            onOpenAll = { onOpenFeature(HomeFeatureId.ENGLISH_WORDS) }
+                        )
+
+                        HomeSectionId.COMPANION -> Column(
+                            verticalArrangement = Arrangement.spacedBy(16.dp)
+                        ) {
+                            SectionTitle(
+                                title = "我的伙伴",
+                                subtitle = "完成每日任务，解锁新形态与技能"
+                            )
+                            CompanionCard(
+                                progress = companionProgress,
+                                onSelectCategory = onSelectCompanionCategory,
+                                onPurchaseItem = onPurchaseCompanionItem,
+                                onUseItem = onUseCompanionItem,
+                                onCompleteInteraction = onCompleteCompanionInteraction
+                            )
+                        }
+
+                        HomeSectionId.REALTIME_STATUS -> Column(
+                            verticalArrangement = Arrangement.spacedBy(16.dp)
+                        ) {
+                            SectionTitle(
+                                title = "实时状态",
+                                subtitle = "每秒刷新 · 不主动消耗流量"
+                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                MetricCard(
+                                    modifier = Modifier.weight(1f),
+                                    symbol = "↑",
+                                    title = "上传",
+                                    value = formatSpeed(snapshot.uploadBytesPerSecond),
+                                    highlighted = true
+                                )
+                                MetricCard(
+                                    modifier = Modifier.weight(1f),
+                                    symbol = "↓",
+                                    title = "下载",
+                                    value = formatSpeed(snapshot.downloadBytesPerSecond),
+                                    highlighted = false
+                                )
+                            }
+                        }
+
+                        HomeSectionId.SHORTCUT_APPS -> Column(
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                SectionTitle(
+                                    modifier = Modifier.weight(1f),
+                                    title = "快捷应用",
+                                    subtitle = if (shortcuts.isEmpty()) {
+                                        "还没有选择应用"
+                                    } else {
+                                        "点击即可打开"
+                                    }
+                                )
+                                TextButton(onClick = onManageShortcuts) {
+                                    Text(text = "管理")
+                                }
+                            }
+
+                            if (shortcuts.isEmpty()) {
+                                EmptyShortcutCard(onManageShortcuts = onManageShortcuts)
+                            } else {
+                                FlowRow(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    shortcuts.forEach { app ->
+                                        ShortcutItem(
+                                            app = app,
+                                            onClick = { onLaunchApp(app.packageName) }
+                                        )
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
+
+            if (homeLayout.visibleSections.isEmpty()) {
+                item(key = "hidden_home_sections") {
+                    HiddenHomeSectionsCard(
+                        onManageLayout = { layoutEditorVisible = true }
+                    )
+                }
             }
         }
 
@@ -394,7 +424,8 @@ fun HomeScreen(
                         onQuickSearch(normalizedQuery)
                     }
                 },
-                onOpenQrScanner = onOpenQrScanner
+                onOpenQrScanner = onOpenQrScanner,
+                onOpenLayout = { layoutEditorVisible = true }
             )
         }
     }
@@ -412,6 +443,7 @@ fun HomeScreen(
  * @param onFocusChanged 输入框焦点变化回调，用于输入期间保持搜索条可见。
  * @param onSearch 提交非空关键词的回调。
  * @param onOpenQrScanner 点击二维码图标后直接进入扫码页的回调。
+ * @param onOpenLayout 搜索框为空时点击“整理”按钮打开首页模块管理弹窗的回调。
  *
  * @return 无返回值，直接输出一行搜索框和按钮。
  */
@@ -421,7 +453,8 @@ private fun HomeQuickSearchBar(
     onQueryChanged: (String) -> Unit,
     onFocusChanged: (Boolean) -> Unit,
     onSearch: () -> Unit,
-    onOpenQrScanner: () -> Unit
+    onOpenQrScanner: () -> Unit,
+    onOpenLayout: () -> Unit
 ) {
     val searchIconColor = MaterialTheme.colorScheme.primary
     Surface(
@@ -492,6 +525,17 @@ private fun HomeQuickSearchBar(
 
             QrScannerShortcut(onClick = onOpenQrScanner)
 
+            AnimatedVisibility(visible = query.isBlank()) {
+                TextButton(
+                    modifier = Modifier
+                        .heightIn(min = 48.dp)
+                        .semantics { contentDescription = "整理首页模块" },
+                    onClick = onOpenLayout
+                ) {
+                    Text(text = "整理")
+                }
+            }
+
             AnimatedVisibility(visible = query.isNotBlank()) {
                 Surface(
                     enabled = query.isNotBlank(),
@@ -513,6 +557,213 @@ private fun HomeQuickSearchBar(
                     }
                 }
             }
+        }
+    }
+}
+
+/**
+ * 显示首页模块的统一整理弹窗，支持控制模块显隐和调整展示顺序。
+ *
+ * 使用方法：
+ * 由[HomeScreen]在用户点击搜索条“整理”按钮或空首页提示时调用。所有操作先写入弹窗临时状态；
+ * 点击“保存”后才通过[onSave]一次性持久化，保存成功由上层更新首页并关闭弹窗，取消不会改变原布局。
+ * 搜索条不属于可隐藏模块，因此即使用户取消全部模块，仍可随时重新进入本弹窗恢复内容。
+ *
+ * @param layout 打开弹窗时已经保存的模块顺序和隐藏状态。
+ * @param onDismiss 放弃本次临时修改并关闭弹窗的回调。
+ * @param onSave 保存完整布局的同步回调，成功返回true，失败返回false并保留弹窗供用户重试。
+ *
+ * @return 无返回值，直接输出首页模块整理对话框。
+ */
+@Composable
+private fun HomeLayoutDialog(
+    layout: HomeLayoutPreferences,
+    onDismiss: () -> Unit,
+    onSave: (HomeLayoutPreferences) -> Boolean
+) {
+    var pendingLayout by remember(layout) {
+        mutableStateOf(layout)
+    }
+    var saveFailed by remember {
+        mutableStateOf(false)
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(text = "整理首页")
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = "勾选要显示的模块，并用上下按钮调整顺序。顶部搜索、扫码和整理入口始终保留。",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+
+                Column(
+                    modifier = Modifier
+                        .heightIn(max = 460.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    pendingLayout.sectionOrder.forEachIndexed { index, section ->
+                        val checked = pendingLayout.isVisible(section)
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(14.dp))
+                                .bouncyClickable(
+                                    role = Role.Checkbox,
+                                    onClick = {
+                                        pendingLayout = pendingLayout.copy(
+                                            hiddenSections = if (checked) {
+                                                pendingLayout.hiddenSections + section
+                                            } else {
+                                                pendingLayout.hiddenSections - section
+                                            }
+                                        )
+                                        saveFailed = false
+                                    }
+                                )
+                                .padding(horizontal = 4.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Checkbox(
+                                checked = checked,
+                                onCheckedChange = null
+                            )
+
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = section.title,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    text = section.description,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+
+                            TextButton(
+                                modifier = Modifier.semantics {
+                                    contentDescription = "上移${section.title}"
+                                },
+                                enabled = index > 0,
+                                onClick = {
+                                    pendingLayout = pendingLayout.copy(
+                                        sectionOrder = moveHomeSection(
+                                            order = pendingLayout.sectionOrder,
+                                            fromIndex = index,
+                                            toIndex = index - 1
+                                        )
+                                    )
+                                    saveFailed = false
+                                }
+                            ) {
+                                Text(text = "↑")
+                            }
+
+                            TextButton(
+                                modifier = Modifier.semantics {
+                                    contentDescription = "下移${section.title}"
+                                },
+                                enabled = index < pendingLayout.sectionOrder.lastIndex,
+                                onClick = {
+                                    pendingLayout = pendingLayout.copy(
+                                        sectionOrder = moveHomeSection(
+                                            order = pendingLayout.sectionOrder,
+                                            fromIndex = index,
+                                            toIndex = index + 1
+                                        )
+                                    )
+                                    saveFailed = false
+                                }
+                            ) {
+                                Text(text = "↓")
+                            }
+                        }
+                    }
+                }
+
+                if (saveFailed) {
+                    Text(
+                        text = "保存失败，请重试。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    saveFailed = !onSave(pendingLayout)
+                }
+            ) {
+                Text(text = "保存")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(text = "取消")
+            }
+        }
+    )
+}
+
+/**
+ * 在用户隐藏全部首页模块后保留明确的恢复入口，避免页面看似空白且无法撤销。
+ *
+ * 使用方法：
+ * 由[HomeScreen]在[HomeLayoutPreferences.visibleSections]为空时显示。用户点击卡片后通过
+ * [onManageLayout]重新打开整理弹窗，顶部搜索条仍保持可用。
+ *
+ * @param onManageLayout 打开首页模块整理弹窗的回调。
+ *
+ * @return 无返回值，直接输出首页空布局提示卡片。
+ */
+@Composable
+private fun HiddenHomeSectionsCard(onManageLayout: () -> Unit) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .bouncyClickable(
+                role = Role.Button,
+                onClick = onManageLayout
+            ),
+        shape = MaterialTheme.shapes.large,
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainerLow
+        ),
+        border = harleyCardBorder()
+    ) {
+        Row(
+            modifier = Modifier.padding(20.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "首页模块已全部隐藏",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Text(
+                    text = "搜索和扫码仍可使用，也可以随时恢复需要的模块。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Spacer(modifier = Modifier.width(12.dp))
+            Text(
+                text = "重新显示 ›",
+                color = MaterialTheme.colorScheme.primary,
+                fontWeight = FontWeight.SemiBold
+            )
         }
     }
 }
