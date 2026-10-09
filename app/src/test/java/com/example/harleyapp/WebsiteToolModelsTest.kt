@@ -8,11 +8,13 @@ import com.example.harleyapp.model.MIN_TEXT_ZOOM_PERCENT
 import com.example.harleyapp.model.MIN_WEBSITE_PLAYBACK_RATE
 import com.example.harleyapp.model.WebsiteBookmarkSaveResult
 import com.example.harleyapp.model.WebsiteToolSettings
+import com.example.harleyapp.system.webcapture.WebsiteRecordingStatus
 import com.example.harleyapp.ui.screens.FullscreenHoldDirection
 import com.example.harleyapp.ui.screens.calculateFullscreenBallOffset
 import com.example.harleyapp.ui.screens.calculateFullscreenSwipeTarget
 import com.example.harleyapp.ui.screens.fullscreenHoldDirectionForPosition
 import com.example.harleyapp.ui.screens.shouldShowInlineWebsiteScriptTools
+import com.example.harleyapp.ui.screens.shouldStopWebsiteRecordingForInactiveTab
 import com.example.harleyapp.ui.screens.websiteBookmarkSaveMessage
 import com.example.harleyapp.web.WebsiteScriptController
 import org.junit.Assert.assertEquals
@@ -294,6 +296,65 @@ class WebsiteToolModelsTest {
                 manuallyOpen = true,
                 playingVideoCount = 0,
                 suppressAutomaticOpen = true
+            )
+        )
+    }
+
+    /**
+     * 验证系统录屏授权返回后，即使网页全屏View曾被系统界面短暂隐藏，只要所属标签仍在前台，
+     * 就不会自动停止录制；只有用户切走该标签后才触发自动保存。
+     *
+     * @return 无返回值；录制停止条件错误时由JUnit报告失败。
+     */
+    @Test
+    fun websiteRecordingOnlyAutoStopsAfterOwnerTabBecomesInactive() {
+        assertFalse(
+            shouldStopWebsiteRecordingForInactiveTab(
+                captureAuthorizationInProgress = false,
+                recordingOwnedByCurrentTab = true,
+                recordingStatus = WebsiteRecordingStatus.RECORDING,
+                isTabActive = true
+            )
+        )
+        assertTrue(
+            shouldStopWebsiteRecordingForInactiveTab(
+                captureAuthorizationInProgress = false,
+                recordingOwnedByCurrentTab = true,
+                recordingStatus = WebsiteRecordingStatus.RECORDING,
+                isTabActive = false
+            )
+        )
+    }
+
+    /**
+     * 验证系统授权尚未结束、录制属于其他标签或会话尚未进入录制状态时均不会误发停止命令。
+     *
+     * @return 无返回值；任一受保护场景错误触发停止时由JUnit报告失败。
+     */
+    @Test
+    fun websiteRecordingAutoStopIgnoresAuthorizationAndUnownedSessions() {
+        assertFalse(
+            shouldStopWebsiteRecordingForInactiveTab(
+                captureAuthorizationInProgress = true,
+                recordingOwnedByCurrentTab = true,
+                recordingStatus = WebsiteRecordingStatus.RECORDING,
+                isTabActive = false
+            )
+        )
+        assertFalse(
+            shouldStopWebsiteRecordingForInactiveTab(
+                captureAuthorizationInProgress = false,
+                recordingOwnedByCurrentTab = false,
+                recordingStatus = WebsiteRecordingStatus.RECORDING,
+                isTabActive = false
+            )
+        )
+        assertFalse(
+            shouldStopWebsiteRecordingForInactiveTab(
+                captureAuthorizationInProgress = false,
+                recordingOwnedByCurrentTab = true,
+                recordingStatus = WebsiteRecordingStatus.STARTING,
+                isTabActive = false
             )
         )
     }

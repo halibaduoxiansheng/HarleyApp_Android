@@ -528,9 +528,6 @@ private fun WebsiteTabSession(
     var fullscreenControlsLocked by remember(tab.id) {
         mutableStateOf(false)
     }
-    var fullscreenControlRevision by remember(tab.id) {
-        mutableIntStateOf(0)
-    }
     var showFullscreenRatePicker by remember(tab.id) {
         mutableStateOf(false)
     }
@@ -739,10 +736,16 @@ private fun WebsiteTabSession(
         suppressAutomaticOpen = suppressAutomaticScriptTools
     )
 
-    /** 显示全屏控制层并重新开始自动隐藏倒计时。 */
+    /**
+     * 展开全屏控制层。
+     *
+     * 使用方法：全屏手势、工具按钮或倍速选择结束后调用。控制层会持续显示，直到用户再次点击
+     * 脚本悬浮球主动收起，避免阅读按钮文字或连续操作时面板自行消失。
+     *
+     * @return 无返回值；函数只更新当前标签的全屏控制层显示状态。
+     */
     fun revealFullscreenControls() {
         fullscreenControlsVisible = true
-        fullscreenControlRevision++
     }
 
     /** 关闭当前全屏View并只回调网站一次。 */
@@ -812,7 +815,6 @@ private fun WebsiteTabSession(
                     fullscreenSeekPreview = null
                     fullscreenZoomScale = 1f
                     fullscreenZoomGestureActive = false
-                    fullscreenControlRevision++
                 } else {
                     callback.onCustomViewHidden()
                 }
@@ -1005,21 +1007,6 @@ private fun WebsiteTabSession(
         onDispose { }
     }
 
-    // 悬浮球展开的工具面板停止操作后自动收起；悬浮球本身始终保留且不覆盖底部播放器进度条。
-    LaunchedEffect(
-        fullscreenContent,
-        fullscreenControlsVisible,
-        fullscreenControlRevision,
-        showFullscreenRatePicker
-    ) {
-        if (fullscreenContent != null &&
-            fullscreenControlsVisible &&
-            !showFullscreenRatePicker
-        ) {
-            delay(FULLSCREEN_CONTROLS_HIDE_DELAY_MILLIS)
-            fullscreenControlsVisible = false
-        }
-    }
     // 页面加载完成或设置变化后重应用脚本；同时更新不依赖JavaScript的原生文字缩放和常亮状态。
     LaunchedEffect(webView, pageGeneration, toolSettings, isActive) {
         if (isActive) {
@@ -1197,30 +1184,31 @@ private fun WebsiteTabSession(
         }
     }
 
-    // 用户切换标签、离开网站或播放器主动退出全屏时，自动停止并保存已经录到的有效片段。
+    // 仅在用户切走当前录制标签或离开“网站”时自动保存。系统录屏授权页可能短暂触发网页全屏
+    // View隐藏，不能据此停止录制；用户主动退出全屏仍由exitFullscreen明确停止并保存。
     LaunchedEffect(
         isActive,
-        fullscreenContent,
         captureAuthorizationInProgress,
         recordingSnapshot.status,
         recordingSnapshot.ownerTabId
     ) {
-        if (!captureAuthorizationInProgress &&
-            recordingOwnedByCurrentTab &&
-            recordingSnapshot.status == WebsiteRecordingStatus.RECORDING &&
-            (!isActive || fullscreenContent == null)
+        if (shouldStopWebsiteRecordingForInactiveTab(
+                captureAuthorizationInProgress = captureAuthorizationInProgress,
+                recordingOwnedByCurrentTab = recordingOwnedByCurrentTab,
+                recordingStatus = recordingSnapshot.status,
+                isTabActive = isActive
+            )
         ) {
             WebsiteScreenRecordingService.stop(context)
         }
     }
 
-    // 网站进入自定义全屏后隐藏系统栏并允许设备自由旋转；退出时恢复Activity原状态。
+    // 本Effect只管理全屏View的真实生命周期。录制状态不能作为key，否则IDLE、STARTING和RECORDING
+    // 之间的正常切换会执行onDispose并关闭Chromium全屏View，导致刚授权的录屏立即被停止。
     DisposableEffect(
         fullscreenContent,
         activity,
-        mediaSessionActive,
-        recordingSnapshot.status,
-        recordingSnapshot.ownerTabId
+        mediaSessionActive
     ) {
         val content = fullscreenContent
         if (!mediaSessionActive || content == null || activity == null) {
@@ -1235,6 +1223,21 @@ private fun WebsiteTabSession(
             insetsController.systemBarsBehavior =
                 WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
             insetsController.hide(WindowInsetsCompat.Type.systemBars())
+            activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR
+
+            onDispose {
+                content.view.keepScreenOn = false
+                content.close()
+                insetsController.show(WindowInsetsCompat.Type.systemBars())
+                activity.requestedOrientation = previousOrientation
+            }
+        }
+    }
+
+    // 录制期间固定用户开始录制时的屏幕方向，避免旋转导致MediaProjection尺寸变化；只更新方向，
+    // 不拥有也不关闭全屏View，因此录制状态变化不会结束当前视频全屏会话。
+    SideEffect {
+        if (mediaSessionActive && fullscreenContent != null && activity != null) {
             activity.requestedOrientation = if (recordingOwnedByCurrentTab &&
                 (recordingSnapshot.status == WebsiteRecordingStatus.STARTING ||
                     recordingSnapshot.status == WebsiteRecordingStatus.RECORDING)
@@ -1242,13 +1245,6 @@ private fun WebsiteTabSession(
                 ActivityInfo.SCREEN_ORIENTATION_LOCKED
             } else {
                 ActivityInfo.SCREEN_ORIENTATION_SENSOR
-            }
-
-            onDispose {
-                content.view.keepScreenOn = false
-                content.close()
-                insetsController.show(WindowInsetsCompat.Type.systemBars())
-                activity.requestedOrientation = previousOrientation
             }
         }
     }
@@ -1672,7 +1668,6 @@ private fun WebsiteTabSession(
                         .clickable {
                             fullscreenControlsVisible = !fullscreenControlsVisible
                             showFullscreenRatePicker = false
-                            fullscreenControlRevision++
                         },
                     color = if (fullscreenControlsVisible) {
                         FULLSCREEN_ACTIVE_COLOR.copy(alpha = 0.92f)
@@ -2427,6 +2422,31 @@ internal fun shouldShowInlineWebsiteScriptTools(
     suppressAutomaticOpen: Boolean
 ): Boolean {
     return manuallyOpen || (playingVideoCount > 0 && !suppressAutomaticOpen)
+}
+
+/**
+ * 判断是否应因录制所属网站标签离开前台而停止录屏。
+ *
+ * 使用方法：录制状态、授权状态或当前标签可见性变化时调用。系统录屏授权页可能暂时隐藏网页的
+ * 自定义全屏View，因此本函数只把“所属标签不再活动”视为自动停止条件；用户点击停止录屏或
+ * 主动退出全屏由对应操作入口直接调用录屏服务停止并保存。
+ *
+ * @param captureAuthorizationInProgress 是否仍在系统录屏授权流程中。
+ * @param recordingOwnedByCurrentTab 当前录制任务是否属于本网站标签。
+ * @param recordingStatus 当前录制会话状态。
+ * @param isTabActive 本网站标签及“网站”一级页面当前是否仍在前台活动。
+ * @return 仅当授权流程已结束、当前标签拥有正在进行的录制且标签已经离开前台时返回true。
+ */
+internal fun shouldStopWebsiteRecordingForInactiveTab(
+    captureAuthorizationInProgress: Boolean,
+    recordingOwnedByCurrentTab: Boolean,
+    recordingStatus: WebsiteRecordingStatus,
+    isTabActive: Boolean
+): Boolean {
+    return !captureAuthorizationInProgress &&
+        recordingOwnedByCurrentTab &&
+        recordingStatus == WebsiteRecordingStatus.RECORDING &&
+        !isTabActive
 }
 
 /**
@@ -3968,7 +3988,6 @@ internal fun calculateFullscreenBallOffset(
 
 private const val TAG = "WebsiteScreen"
 private const val TOOL_MESSAGE_DURATION_MILLIS = 2_600L
-private const val FULLSCREEN_CONTROLS_HIDE_DELAY_MILLIS = 3_000L
 /** 全屏标准HTML媒体时间轴的刷新间隔，横滑期间暂停查询以保持按下时起点稳定。 */
 private const val FULLSCREEN_MEDIA_POSITION_REFRESH_MILLIS = 500L
 /** 全屏录屏按钮刷新已录时长的间隔。 */
