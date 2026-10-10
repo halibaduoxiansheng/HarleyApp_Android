@@ -1,3 +1,5 @@
+import java.security.KeyStore
+import java.security.MessageDigest
 import java.util.Properties
 
 plugins {
@@ -20,6 +22,15 @@ val configuredDeveloperKeySha256 = (
     ?.lowercase()
     ?.takeIf { hash -> hash.matches(Regex("[0-9a-f]{64}")) }
     .orEmpty()
+
+// HarleyApp 已安装版本长期使用这把工程专用调试证书。若继续采用 AGP 默认配置，
+// Gradle 会根据当前用户目录选择或新建 debug.keystore，换电脑、换用户或改变
+// ANDROID_USER_HOME 后都可能生成不同证书，最终导致覆盖安装被 Android 拒绝。
+val harleyDebugKeystore = rootProject.file(".android/debug.keystore")
+val harleyDebugKeyAlias = "androiddebugkey"
+val harleyDebugKeyPassword = "android"
+val expectedHarleyDebugCertificateSha256 =
+    "2c1f206d1ee68fa61ac92030cc7aa2ca23beb6fea96c06f9dad6329f1e3f214c"
 
 android {
     namespace = "com.example.harleyapp"
@@ -47,7 +58,21 @@ android {
         )
     }
 
+    signingConfigs {
+        getByName("debug") {
+            // 私钥文件由 .gitignore 排除，不上传到 GitHub；构建机必须从安全备份恢复同一文件。
+            storeFile = harleyDebugKeystore
+            storePassword = harleyDebugKeyPassword
+            keyAlias = harleyDebugKeyAlias
+            keyPassword = harleyDebugKeyPassword
+        }
+    }
+
     buildTypes {
+        getByName("debug") {
+            signingConfig = signingConfigs.getByName("debug")
+        }
+
         release {
             optimization {
                 enable = false
@@ -70,6 +95,60 @@ android {
         }
     }
 
+}
+
+val verifyHarleyDebugSigning by tasks.registering {
+    group = "verification"
+    description = "Verifies the project-specific HarleyApp debug signing certificate."
+
+    // 不缓存此校验，确保每次打包或安装前都会重新检查本地私钥是否缺失或被替换。
+    outputs.upToDateWhen { false }
+
+    doLast {
+        if (!harleyDebugKeystore.isFile) {
+            throw GradleException(
+                "Required HarleyApp debug keystore is missing: ${harleyDebugKeystore.absolutePath}. " +
+                    "Restore the project-specific keystore before building an APK."
+            )
+        }
+
+        val keyStore = try {
+            KeyStore.getInstance(harleyDebugKeystore, harleyDebugKeyPassword.toCharArray())
+        } catch (exception: Exception) {
+            throw GradleException(
+                "Unable to read the HarleyApp debug keystore: ${harleyDebugKeystore.absolutePath}",
+                exception
+            )
+        }
+        val certificate = keyStore.getCertificate(harleyDebugKeyAlias)
+            ?: throw GradleException(
+                "Required alias '$harleyDebugKeyAlias' was not found in the HarleyApp debug keystore."
+            )
+        val actualCertificateSha256 = MessageDigest.getInstance("SHA-256")
+            .digest(certificate.encoded)
+            .joinToString(separator = "") { byte -> "%02x".format(byte.toInt() and 0xff) }
+
+        if (actualCertificateSha256 != expectedHarleyDebugCertificateSha256) {
+            throw GradleException(
+                "HarleyApp debug signing certificate mismatch. " +
+                    "Expected $expectedHarleyDebugCertificateSha256, " +
+                    "but found $actualCertificateSha256. Refusing to build an incompatible APK."
+            )
+        }
+    }
+}
+
+tasks.configureEach {
+    // assembleDebug 覆盖命令行构建，installDebug 覆盖 Android Studio/ADB 安装，
+    // bundleDebug 覆盖调试 Bundle；validateSigningDebug 则保护底层打包链路。
+    if (
+        name == "assembleDebug" ||
+        name == "installDebug" ||
+        name == "bundleDebug" ||
+        name == "validateSigningDebug"
+    ) {
+        dependsOn(verifyHarleyDebugSigning)
+    }
 }
 
 dependencies {

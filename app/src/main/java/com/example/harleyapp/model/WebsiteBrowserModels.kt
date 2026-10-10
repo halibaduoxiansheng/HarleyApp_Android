@@ -35,6 +35,35 @@ data class WebsiteBrowserTab(
 )
 
 /**
+ * 解析浏览器标签当前可以直接编辑的网站收藏。
+ *
+ * 使用方法：
+ * 标签总览准备显示“编辑”入口时传入当前标签和最新收藏列表。优先使用标签从收藏入口打开时保存的
+ * [WebsiteBrowserTab.websiteId]，因此网页内部跳转后仍编辑原收藏；没有有效来源标识时，再按当前
+ * HTTP或HTTPS网址精确查找收藏，使用户从外部链接进入或一键收藏当前页后也能直接编辑。
+ *
+ * @param tab 待判断的浏览器标签快照。
+ * @param websites 当前仍然存在的全部网站收藏，列表顺序用于稳定处理异常的重复网址。
+ *
+ * @return 可直接编辑的网站收藏；来源标识失效且当前网址尚未收藏时返回null。
+ */
+fun resolveEditableWebsiteBookmark(
+    tab: WebsiteBrowserTab,
+    websites: List<WebsiteShortcut>
+): WebsiteShortcut? {
+    tab.websiteId?.let { websiteId ->
+        websites.firstOrNull { website -> website.id == websiteId }?.let { website ->
+            return website
+        }
+    }
+
+    val normalizedTabUrl = tab.url?.let(::normalizeWebsiteUrl) ?: return null
+    return websites.firstOrNull { website ->
+        normalizeWebsiteUrl(website.url) == normalizedTabUrl
+    }
+}
+
+/**
  * 网站浏览器当前全部标签及选中状态。
  *
  * 使用方法：

@@ -10,6 +10,7 @@ import com.example.harleyapp.model.createWebsiteBrowserChildTab
 import com.example.harleyapp.model.createWebsiteBrowserSession
 import com.example.harleyapp.model.createWebsiteBrowserTab
 import com.example.harleyapp.model.fillWebsiteBrowserTab
+import com.example.harleyapp.model.resolveEditableWebsiteBookmark
 import com.example.harleyapp.model.selectWebsiteBrowserTab
 import com.example.harleyapp.model.updateWebsiteBrowserTab
 import org.junit.Assert.assertEquals
@@ -40,6 +41,66 @@ class WebsiteBrowserModelsTest {
         assertEquals(WEBSITE_BROWSER_NEW_TAB_TITLE, session.tabs.single().title)
         assertNull(session.tabs.single().websiteId)
         assertNull(session.tabs.single().url)
+    }
+
+    /**
+     * 验证标签从收藏打开后即使网页已经内部跳转，直接编辑入口仍优先关联原网站收藏。
+     *
+     * @return 无返回值；页面跳转导致收藏关联丢失或错误切换到同网址条目时由JUnit报告失败。
+     */
+    @Test
+    fun editableBookmarkPrefersStableWebsiteSourceId() {
+        val source = website(id = "source")
+        val currentPageMatch = WebsiteShortcut(
+            id = "current-page",
+            title = "当前页面",
+            url = "https://example.com/current"
+        )
+        val tab = WebsiteBrowserTab(
+            id = "tab",
+            websiteId = source.id,
+            title = "跳转后的页面",
+            url = currentPageMatch.url
+        )
+
+        assertEquals(
+            source,
+            resolveEditableWebsiteBookmark(tab, listOf(currentPageMatch, source))
+        )
+    }
+
+    /**
+     * 验证没有收藏来源标识的标签可按当前完整网址找到已收藏网站，未收藏网址不显示编辑入口。
+     *
+     * @return 无返回值；精确网址收藏无法编辑或未收藏页面被误判为可编辑时由JUnit报告失败。
+     */
+    @Test
+    fun editableBookmarkFallsBackToExactSavedUrl() {
+        val saved = WebsiteShortcut(
+            id = "saved",
+            title = "已收藏页面",
+            url = "https://example.com/article"
+        )
+
+        assertEquals(
+            saved,
+            resolveEditableWebsiteBookmark(
+                tab = WebsiteBrowserTab(
+                    id = "saved-tab",
+                    url = "https://example.com/article"
+                ),
+                websites = listOf(saved)
+            )
+        )
+        assertNull(
+            resolveEditableWebsiteBookmark(
+                tab = WebsiteBrowserTab(
+                    id = "other-tab",
+                    url = "https://example.com/other"
+                ),
+                websites = listOf(saved)
+            )
+        )
     }
 
     /**

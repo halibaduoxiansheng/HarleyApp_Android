@@ -6,6 +6,7 @@ import com.example.harleyapp.model.WebsiteShortcut
 import com.example.harleyapp.ui.screens.reorderWebsiteNodes
 import com.example.harleyapp.ui.screens.updateWebsiteNodePinned
 import com.example.harleyapp.ui.screens.websiteNodesAt
+import com.example.harleyapp.ui.screens.websiteSearchResults
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertSame
@@ -19,6 +20,65 @@ import org.junit.Test
  * 在项目根目录执行`gradlew testDebugUnitTest`，JUnit会直接调用管理页公开给测试模块的内部函数。
  */
 class WebsiteBookmarkManagerModelsTest {
+
+    /**
+     * 验证独立标签筛选会跨文件夹返回全部同标签网站，并能继续与原文字搜索条件叠加。
+     *
+     * @return 无返回值；标签筛选混入文件夹、漏掉同标签网站或忽略文字条件时由JUnit报告失败。
+     */
+    @Test
+    fun tagSearchReturnsOnlyWebsitesMatchingTagAndOptionalText() {
+        val library = WebsiteLibrary(
+            folders = listOf(
+                WebsiteFolder(id = "learning-folder", name = "学习")
+            ),
+            websites = listOf(
+                WebsiteShortcut(
+                    id = "android",
+                    title = "Android开发文档",
+                    url = "https://developer.android.com",
+                    folderId = "learning-folder",
+                    tags = listOf("学习", "工具")
+                ),
+                WebsiteShortcut(
+                    id = "kotlin",
+                    title = "Kotlin语言",
+                    url = "https://kotlinlang.org",
+                    tags = listOf("学习")
+                ),
+                WebsiteShortcut(
+                    id = "video",
+                    title = "视频网站",
+                    url = "https://video.example.com",
+                    tags = listOf("视频")
+                )
+            )
+        )
+
+        assertEquals(
+            listOf("website:android", "website:kotlin"),
+            websiteSearchResults(
+                library = library,
+                query = "",
+                selectedTag = "学习"
+            ).map { result -> result.key }
+        )
+        assertEquals(
+            listOf("website:android"),
+            websiteSearchResults(
+                library = library,
+                query = "Android",
+                selectedTag = "学习"
+            ).map { result -> result.key }
+        )
+        assertTrue(
+            websiteSearchResults(
+                library = library,
+                query = "财务",
+                selectedTag = "学习"
+            ).isEmpty()
+        )
+    }
 
     /**
      * 验证置顶文件夹和置顶网站共同位于普通节点前方，并继续按手动顺序混合排列。

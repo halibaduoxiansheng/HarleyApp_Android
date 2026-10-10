@@ -120,14 +120,17 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.core.net.toUri
 import androidx.core.content.ContextCompat
 import com.example.harleyapp.data.WebsiteToolRepository
+import com.example.harleyapp.data.WebsiteCardBackgroundStore
 import com.example.harleyapp.model.EbookWebDownloadRequest
 import com.example.harleyapp.model.WebsiteBrowserSession
 import com.example.harleyapp.model.WebsiteBrowserTab
 import com.example.harleyapp.model.WebsiteBookmarkSaveResult
+import com.example.harleyapp.model.WebsiteLibrary
 import com.example.harleyapp.model.WEBSITE_MEDIA_SEEK_STEP_SECONDS
 import com.example.harleyapp.model.WebsiteShortcut
 import com.example.harleyapp.model.WebsiteToolSettings
 import com.example.harleyapp.model.normalizeWebsiteBrowserUrl
+import com.example.harleyapp.model.resolveEditableWebsiteBookmark
 import com.example.harleyapp.model.websitesByOpenCount
 import com.example.harleyapp.system.webcapture.WebsiteRecordingSessionStore
 import com.example.harleyapp.system.webcapture.WebsiteRecordingStatus
@@ -154,7 +157,7 @@ import kotlin.math.roundToInt
  * 用户点击标签关闭按钮后，上层删除对应模型，相关WebView才会真正释放。
  *
  * @param session 当前完整标签会话，包含标签顺序和活动标签标识。
- * @param websites 新标签页按累计打开次数展示的全部网站收藏。
+ * @param library 当前完整网站收藏库，新标签页使用其中网站，标签总览用它确认收藏来源是否仍有效。
  * @param isVisible 当前是否正在显示底部“网站”页面；false时暂停全部网页媒体与交互。
  * @param isFullscreen 活动网页是否处于HTML5自定义全屏，用于暂时隐藏标签栏。
  * @param onSelectTab 用户点击已有标签后的切换回调。
@@ -167,6 +170,7 @@ import kotlin.math.roundToInt
  * @param onFullscreenChanged 自定义视频全屏状态回调，用于让宿主隐藏底部导航。
  * @param onEbookDownloadRequested 网页触发下载时，把公开直链交给电子书仓库的回调。
  * @param onBookmarkCurrentPage 把WebView当前实际标题和地址收藏进网站库的回调。
+ * @param onSaveLibrary 标签总览直接编辑收藏网站后，同步保存完整网站库的回调，成功返回true。
  * @param modifier 外部传入的页面尺寸与系统安全边距。
  *
  * @return 无返回值，直接输出标签栏、新标签页或当前网页。
@@ -174,7 +178,7 @@ import kotlin.math.roundToInt
 @Composable
 fun WebsiteScreen(
     session: WebsiteBrowserSession,
-    websites: List<WebsiteShortcut>,
+    library: WebsiteLibrary,
     isVisible: Boolean,
     isFullscreen: Boolean,
     onSelectTab: (String) -> Unit,
@@ -187,9 +191,15 @@ fun WebsiteScreen(
     onFullscreenChanged: (Boolean) -> Unit,
     onEbookDownloadRequested: (EbookWebDownloadRequest) -> Unit,
     onBookmarkCurrentPage: (String, String) -> WebsiteBookmarkSaveResult,
+    onSaveLibrary: (WebsiteLibrary) -> Boolean,
     modifier: Modifier = Modifier
 ) {
+    val websites = library.websites
     val lifecycleOwner = LocalLifecycleOwner.current
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val backgroundStore = remember {
+        WebsiteCardBackgroundStore(context.applicationContext)
+    }
     var isHostResumed by remember(lifecycleOwner) {
         mutableStateOf(
             lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
@@ -201,6 +211,41 @@ fun WebsiteScreen(
     val activeTab = session.tabs.firstOrNull { tab -> tab.id == activeTabId }
     val createdWebViewTabIds = remember { mutableStateListOf<String>() }
     var showTabOverview by remember { mutableStateOf(false) }
+    var editingWebsiteId by remember { mutableStateOf<String?>(null) }
+    val editingWebsite = library.websites.firstOrNull { website ->
+        website.id == editingWebsiteId
+    }
+    val editableWebsiteIdsByTabId = remember(session.tabs, websites) {
+        session.tabs.mapNotNull { tab ->
+            resolveEditableWebsiteBookmark(tab, websites)?.id?.let { websiteId ->
+                tab.id to websiteId
+            }
+        }.toMap()
+    }
+
+    if (editingWebsite != null) {
+        WebsiteBookmarkEditorDialog(
+            library = library,
+            website = editingWebsite,
+            initialFolderId = editingWebsite.folderId,
+            backgroundStore = backgroundStore,
+            onDismiss = { editingWebsiteId = null },
+            onSave = { updatedLibrary ->
+                val saved = onSaveLibrary(updatedLibrary)
+                if (saved) {
+                    editingWebsiteId = null
+                }
+                saved
+            }
+        )
+    }
+
+    // 收藏在其他入口被删除时同步关闭待编辑状态，确保标签总览不会保留失效的网站引用。
+    LaunchedEffect(editingWebsiteId, library.websites.map(WebsiteShortcut::id)) {
+        if (editingWebsiteId != null && editingWebsite == null) {
+            editingWebsiteId = null
+        }
+    }
 
     // 一级页面仍可能在Activity退到后台时留在组合中，因此额外跟踪宿主生命周期。只有“网站”栏目
     // 真正可见且Activity已经恢复交互时才唤醒活动WebView，避免按Home键后网页媒体继续播放。
@@ -324,6 +369,7 @@ fun WebsiteScreen(
                 expanded = showTabOverview,
                 tabs = session.tabs,
                 activeTabId = activeTabId,
+                editableWebsiteIdsByTabId = editableWebsiteIdsByTabId,
                 onDismiss = {
                     showTabOverview = false
                 },
@@ -336,6 +382,10 @@ fun WebsiteScreen(
                         showTabOverview = false
                     }
                     onCloseTab(tabId)
+                },
+                onEditWebsite = { websiteId ->
+                    showTabOverview = false
+                    editingWebsiteId = websiteId
                 }
             )
         }
@@ -2130,9 +2180,11 @@ private fun WebsiteBrowserTabStrip(
  * @param expanded 是否显示标签总览抽屉。
  * @param tabs 按标签栏顺序排列的全部标签快照。
  * @param activeTabId 当前活动标签标识；为空时不高亮任何标签。
+ * @param editableWebsiteIdsByTabId 标签标识到可编辑收藏标识的映射；没有映射的标签不显示编辑入口。
  * @param onDismiss 点击左侧空白区域、关闭按钮或系统返回键时的收起回调。
  * @param onSelectTab 点击标签正文时的切换回调；调用方应同时收起抽屉。
  * @param onCloseTab 点击单项关闭按钮时的回调；除最后一个标签外，抽屉可保持打开以便连续整理。
+ * @param onEditWebsite 点击已收藏网站的“编辑”按钮后，传出对应收藏标识的回调。
  *
  * @return 无返回值，直接在网站页面上层输出带遮罩、进出场动画和纵向列表的右侧抽屉。
  */
@@ -2141,9 +2193,11 @@ private fun WebsiteTabOverviewDrawer(
     expanded: Boolean,
     tabs: List<WebsiteBrowserTab>,
     activeTabId: String?,
+    editableWebsiteIdsByTabId: Map<String, String>,
     onDismiss: () -> Unit,
     onSelectTab: (String) -> Unit,
-    onCloseTab: (String) -> Unit
+    onCloseTab: (String) -> Unit,
+    onEditWebsite: (String) -> Unit
 ) {
     val listState = rememberLazyListState()
     val tabIds = tabs.map(WebsiteBrowserTab::id)
@@ -2299,6 +2353,7 @@ private fun WebsiteTabOverviewDrawer(
                             val isSelected = tab.id == activeTabId
                             val displayTitle = tab.title.ifBlank { "新标签页" }
                             val secondaryText = tab.url ?: "空白标签页"
+                            val bookmarkedWebsiteId = editableWebsiteIdsByTabId[tab.id]
 
                             Surface(
                                 modifier = Modifier.fillMaxWidth(),
@@ -2378,6 +2433,20 @@ private fun WebsiteTabOverviewDrawer(
                                             overflow = TextOverflow.Ellipsis,
                                             style = MaterialTheme.typography.labelSmall
                                         )
+                                    }
+                                    bookmarkedWebsiteId?.let { websiteId ->
+                                        TextButton(
+                                            onClick = { onEditWebsite(websiteId) },
+                                            modifier = Modifier.semantics {
+                                                contentDescription = "编辑收藏网站：$displayTitle"
+                                            },
+                                            contentPadding = PaddingValues(horizontal = 8.dp)
+                                        ) {
+                                            Text(
+                                                text = "编辑",
+                                                style = MaterialTheme.typography.labelMedium
+                                            )
+                                        }
                                     }
                                     Text(
                                         modifier = Modifier

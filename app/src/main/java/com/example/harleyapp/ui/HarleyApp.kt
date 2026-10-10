@@ -2255,7 +2255,7 @@ fun HarleyApp(
                         .padding(innerPadding)
                 },
                 session = websiteBrowserSession,
-                websites = websites,
+                library = websiteLibrary,
                 isVisible = currentSection == AppSection.WEBSITE,
                 isFullscreen = isWebsiteFullscreen,
                 onSelectTab = { tabId ->
@@ -2347,6 +2347,18 @@ fun HarleyApp(
                         )
                     }
                     result
+                },
+                onSaveLibrary = { updatedLibrary ->
+                    val saved = websiteRepository.saveLibrary(updatedLibrary)
+                    if (saved) {
+                        websiteLibrary = updatedLibrary
+                        websiteBackgroundStore.cleanupUnused(
+                            updatedLibrary.websites.mapNotNull { website ->
+                                website.backgroundImageFileName
+                            }.toSet()
+                        )
+                    }
+                    saved
                 }
             )
         }

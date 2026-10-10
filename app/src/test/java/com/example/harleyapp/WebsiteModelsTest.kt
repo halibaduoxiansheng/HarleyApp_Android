@@ -16,11 +16,14 @@ import com.example.harleyapp.model.formatWebsiteThemeColor
 import com.example.harleyapp.model.homeCarouselWebsites
 import com.example.harleyapp.model.isValidWebsiteBackgroundFileName
 import com.example.harleyapp.model.moveWebsiteNodesToFolder
+import com.example.harleyapp.model.normalizeWebsiteTags
 import com.example.harleyapp.model.parseWebsiteThemeColor
 import com.example.harleyapp.model.resolveBrowserBookmarkPage
 import com.example.harleyapp.model.resolveSharedBrowserPage
 import com.example.harleyapp.model.websiteFolderPath
+import com.example.harleyapp.model.websiteHasTag
 import com.example.harleyapp.model.websiteMatchesQuery
+import com.example.harleyapp.model.websiteTagChoices
 import com.example.harleyapp.model.websitesByOpenCount
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
@@ -351,6 +354,50 @@ class WebsiteModelsTest {
         assertTrue(websiteMatchesQuery(website, "学习 / 编程", "developer"))
         assertTrue(websiteMatchesQuery(website, "学习 / 编程", "学编"))
         assertFalse(websiteMatchesQuery(website, "学习 / 编程", "财务"))
+    }
+
+    /**
+     * 验证网站标签会清除首尾空白、丢弃空项并按首次出现顺序忽略英文大小写去重。
+     *
+     * @return 无返回值；清理结果改变用户首次输入的显示文本或保留重复项时由JUnit报告失败。
+     */
+    @Test
+    fun websiteTagsAreNormalizedWithoutChangingFirstDisplayName() {
+        assertEquals(
+            listOf("学习", "Tools", "视频"),
+            normalizeWebsiteTags(
+                listOf(" 学习 ", "Tools", "tools", "", "  ", "视频")
+            )
+        )
+    }
+
+    /**
+     * 验证已有标签选择列表会跨网站去重排序，标签筛选只匹配完整名称且忽略英文大小写。
+     *
+     * @return 无返回值；标签选项出现重复项、顺序不稳定或发生模糊误匹配时由JUnit报告失败。
+     */
+    @Test
+    fun websiteTagChoicesAndExactFilterUseSharedNames() {
+        val learningWebsite = WebsiteShortcut(
+            id = "learning",
+            title = "学习网站",
+            url = "https://learning.example.com",
+            tags = listOf("学习", "Tools")
+        )
+        val videoWebsite = WebsiteShortcut(
+            id = "video",
+            title = "视频网站",
+            url = "https://video.example.com",
+            tags = listOf("tools", "视频")
+        )
+
+        assertEquals(
+            listOf("Tools", "学习", "视频"),
+            websiteTagChoices(listOf(videoWebsite, learningWebsite))
+        )
+        assertTrue(websiteHasTag(learningWebsite, "tools"))
+        assertFalse(websiteHasTag(learningWebsite, "学"))
+        assertFalse(websiteHasTag(videoWebsite, ""))
     }
 
     /**

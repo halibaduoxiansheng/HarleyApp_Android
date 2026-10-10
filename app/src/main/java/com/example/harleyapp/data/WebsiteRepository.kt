@@ -12,6 +12,7 @@ import com.example.harleyapp.model.WebsitePalette
 import com.example.harleyapp.model.WebsiteShortcut
 import com.example.harleyapp.model.canPlaceWebsiteFolder
 import com.example.harleyapp.model.isValidWebsiteBackgroundFileName
+import com.example.harleyapp.model.normalizeWebsiteTags
 import com.example.harleyapp.model.normalizeWebsiteUrl
 import com.example.harleyapp.model.normalizeWebsiteThemeColor
 import com.example.harleyapp.model.resolveDefaultWebsiteId
@@ -209,7 +210,8 @@ class WebsiteRepository(context: Context) {
                     title = website.title.trim(),
                     url = normalizeWebsiteUrl(website.url) ?: website.url,
                     customColorArgb = normalizeWebsiteThemeColor(website.customColorArgb),
-                    sortOrder = website.sortOrder.coerceAtLeast(0)
+                    sortOrder = website.sortOrder.coerceAtLeast(0),
+                    tags = normalizeWebsiteTags(website.tags)
                 )
             },
             folders = library.folders.map { folder ->
@@ -399,7 +401,8 @@ class WebsiteRepository(context: Context) {
                             isPinned = jsonObject.optBoolean(JSON_IS_PINNED, false),
                             openCount = jsonObject
                                 .optLong(JSON_OPEN_COUNT, 0L)
-                                .coerceAtLeast(0L)
+                                .coerceAtLeast(0L),
+                            tags = decodeWebsiteTags(jsonObject)
                         )
                     )
                 }
@@ -496,10 +499,37 @@ class WebsiteRepository(context: Context) {
                         put(JSON_SORT_ORDER, website.sortOrder.coerceAtLeast(0))
                         put(JSON_IS_PINNED, website.isPinned)
                         put(JSON_OPEN_COUNT, website.openCount.coerceAtLeast(0L))
+                        put(
+                            JSON_TAGS,
+                            JSONArray().apply {
+                                normalizeWebsiteTags(website.tags).forEach { tag -> put(tag) }
+                            }
+                        )
                     }
                 )
             }
         }
+    }
+
+    /**
+     * 从单条网站JSON中读取并清理标签数组。
+     *
+     * 使用方法：
+     * [decodeWebsites]完成网站基础字段校验后调用。旧版本没有标签字段、字段类型错误或数组中混有
+     * 非字符串值时，只保留能够安全显示的字符串标签，不影响该网站其他收藏信息的恢复。
+     *
+     * @param jsonObject 当前网站对应的JSON对象。
+     *
+     * @return 已去除空白、空标签和重复项的标签列表；没有可用标签时返回空列表。
+     */
+    private fun decodeWebsiteTags(jsonObject: JSONObject): List<String> {
+        val jsonTags = jsonObject.optJSONArray(JSON_TAGS) ?: return emptyList()
+        val decodedTags = buildList {
+            for (index in 0 until jsonTags.length()) {
+                (jsonTags.opt(index) as? String)?.let(::add)
+            }
+        }
+        return normalizeWebsiteTags(decodedTags)
     }
 
     /**
@@ -578,6 +608,7 @@ class WebsiteRepository(context: Context) {
             normalizeWebsiteUrl(website.url) != null &&
             normalizeWebsiteThemeColor(website.customColorArgb) == website.customColorArgb &&
             isValidWebsiteBackgroundFileName(website.backgroundImageFileName) &&
+            website.tags.none { tag -> tag.trim().isBlank() } &&
             website.openCount >= 0L
     }
 
@@ -601,6 +632,7 @@ class WebsiteRepository(context: Context) {
         const val JSON_SORT_ORDER = "sort_order"
         const val JSON_IS_PINNED = "is_pinned"
         const val JSON_OPEN_COUNT = "open_count"
+        const val JSON_TAGS = "tags"
         const val JSON_NAME = "name"
         const val JSON_PARENT_ID = "parent_id"
     }

@@ -37,6 +37,7 @@ enum class WebsitePalette {
  * @param sortOrder 同一层级中的显示顺序，数值越小越靠前。
  * @param isPinned true表示在当前文件夹内固定显示于普通条目前方；多个置顶条目仍按sortOrder排列。
  * @param openCount 用户从App入口成功打开该网站的累计次数，不统计网页刷新、内部跳转或会话恢复。
+ * @param tags 用户为网站设置的有序标签；空列表表示未设置标签，同一网站内按名称忽略大小写去重。
  */
 data class WebsiteShortcut(
     val id: String,
@@ -49,8 +50,76 @@ data class WebsiteShortcut(
     val showOnHome: Boolean = true,
     val sortOrder: Int = 0,
     val isPinned: Boolean = false,
-    val openCount: Long = 0L
+    val openCount: Long = 0L,
+    val tags: List<String> = emptyList()
 )
+
+/**
+ * 清理网站标签并按首次出现顺序去重。
+ *
+ * 使用方法：
+ * 网站编辑器提交用户输入、仓库读取旧数据或准备持久化前调用。函数会移除标签首尾空白和空标签，
+ * 并按不区分英文大小写的名称去重；保留第一次出现的原始大小写和标签顺序，便于界面稳定展示。
+ *
+ * @param tags 待清理的标签名称列表，允许包含空白、空字符串和重复项。
+ *
+ * @return 已去除空标签并按名称忽略大小写去重的新列表，不修改调用方传入的原列表。
+ */
+fun normalizeWebsiteTags(tags: List<String>): List<String> {
+    val usedNames = mutableSetOf<String>()
+    return tags.mapNotNull { tag ->
+        val normalizedTag = tag.trim()
+        val comparisonName = normalizedTag.lowercase(Locale.ROOT)
+        normalizedTag.takeIf { value ->
+            value.isNotBlank() && usedNames.add(comparisonName)
+        }
+    }
+}
+
+/**
+ * 汇总网站编辑器和标签筛选器可复用的全部标签。
+ *
+ * 使用方法：
+ * 传入当前网站库的全部网站。函数会先复用[normalizeWebsiteTags]的清理规则，再对跨网站重复标签
+ * 做不区分英文大小写的合并，最后按名称排序，保证标签选择列表在网站排序变化后仍保持稳定。
+ *
+ * @param websites 当前网站库中的全部网站。
+ *
+ * @return 已清理、去重并按名称排序的标签列表；没有任何标签时返回空列表。
+ */
+fun websiteTagChoices(websites: List<WebsiteShortcut>): List<String> {
+    val sortedTags = websites
+        .flatMap(WebsiteShortcut::tags)
+        .map(String::trim)
+        .filter(String::isNotBlank)
+        .sortedWith(
+            compareBy<String> { tag -> tag.lowercase(Locale.ROOT) }
+                .thenBy { tag -> tag }
+        )
+    return normalizeWebsiteTags(sortedTags)
+}
+
+/**
+ * 判断网站是否包含指定标签。
+ *
+ * 使用方法：
+ * 收藏管理页选中某个标签后，对全部网站调用本函数生成独立标签搜索结果。匹配采用完整名称匹配，
+ * 不使用模糊包含，避免“学习”和“学习资料”两个不同标签被同时选中。
+ *
+ * @param website 待检查的网站。
+ * @param tag 用户在标签筛选器中选择的完整标签名称；空白名称不匹配任何网站。
+ *
+ * @return 网站存在同名标签时返回true，否则返回false；英文大小写差异不影响匹配。
+ */
+fun websiteHasTag(website: WebsiteShortcut, tag: String): Boolean {
+    val normalizedTag = tag.trim()
+    if (normalizedTag.isBlank()) {
+        return false
+    }
+    return website.tags.any { websiteTag ->
+        websiteTag.trim().equals(normalizedTag, ignoreCase = true)
+    }
+}
 
 /**
  * 把用户输入的十六进制主题色转换成不透明ARGB值。

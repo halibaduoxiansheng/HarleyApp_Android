@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -62,11 +63,14 @@ import com.example.harleyapp.model.WebsitePalette
 import com.example.harleyapp.model.WebsiteShortcut
 import com.example.harleyapp.model.canPlaceWebsiteFolder
 import com.example.harleyapp.model.moveWebsiteNodesToFolder
+import com.example.harleyapp.model.normalizeWebsiteTags
 import com.example.harleyapp.model.normalizeWebsiteUrl
 import com.example.harleyapp.model.websiteFolderDepth
 import com.example.harleyapp.model.websiteFolderDescendantIds
 import com.example.harleyapp.model.websiteFolderPath
+import com.example.harleyapp.model.websiteHasTag
 import com.example.harleyapp.model.websiteMatchesQuery
+import com.example.harleyapp.model.websiteTagChoices
 import com.example.harleyapp.model.websitesByOpenCount
 import java.util.Locale
 import java.util.UUID
@@ -110,6 +114,9 @@ fun WebsiteBookmarkManagerScreen(
     }
     var query by rememberSaveable {
         mutableStateOf("")
+    }
+    var selectedTag by rememberSaveable {
+        mutableStateOf<String?>(null)
     }
     var sortByOpenCount by rememberSaveable {
         mutableStateOf(false)
@@ -271,11 +278,29 @@ fun WebsiteBookmarkManagerScreen(
     val currentNodes = remember(library, currentFolderId) {
         websiteNodesAt(library, currentFolderId)
     }
-    val searchResults = remember(library, query) {
-        websiteSearchResults(library, query)
+    val availableTags = remember(library.websites) {
+        websiteTagChoices(library.websites)
+    }
+    val searchResults = remember(library, query, selectedTag) {
+        websiteSearchResults(
+            library = library,
+            query = query,
+            selectedTag = selectedTag
+        )
     }
     val breadcrumbs = remember(library.folders, currentFolderId) {
         websiteBreadcrumbs(library.folders, currentFolderId)
+    }
+
+    // 编辑网站移除最后一个同名标签后同步退出已经失效的筛选，避免页面停在无法再选择的空结果。
+    LaunchedEffect(selectedTag, availableTags) {
+        val currentTag = selectedTag
+        if (currentTag != null && availableTags.none { tag ->
+                tag.equals(currentTag, ignoreCase = true)
+            }
+        ) {
+            selectedTag = null
+        }
     }
 
     /**
@@ -362,8 +387,53 @@ fun WebsiteBookmarkManagerScreen(
             shape = RoundedCornerShape(18.dp)
         )
 
+        if (availableTags.isNotEmpty()) {
+            Text(
+                text = "按标签筛选",
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 2.dp),
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.SemiBold
+            )
+            LazyRow(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                items(
+                    items = listOf<String?>(null) + availableTags,
+                    key = { tag -> tag ?: "all_website_tags" }
+                ) { tag ->
+                    val selected = if (tag == null) {
+                        selectedTag == null
+                    } else {
+                        selectedTag?.equals(tag, ignoreCase = true) == true
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            selectedTag = tag
+                            sortByOpenCount = false
+                        }
+                    ) {
+                        Text(
+                            text = if (tag == null) {
+                                if (selected) "✓ 全部标签" else "全部标签"
+                            } else {
+                                if (selected) "✓ $tag" else tag
+                            },
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+        }
+
         OutlinedButton(
-            onClick = { sortByOpenCount = !sortByOpenCount },
+            onClick = {
+                selectedTag = null
+                sortByOpenCount = !sortByOpenCount
+            },
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 20.dp, vertical = 2.dp)
@@ -377,7 +447,7 @@ fun WebsiteBookmarkManagerScreen(
             )
         }
 
-        if (query.isBlank() && !sortByOpenCount) {
+        if (query.isBlank() && selectedTag == null && !sortByOpenCount) {
             LazyRow(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -460,7 +530,7 @@ fun WebsiteBookmarkManagerScreen(
             )
         }
 
-        if (query.isBlank() && !sortByOpenCount) {
+        if (query.isBlank() && selectedTag == null && !sortByOpenCount) {
             WebsiteFolderContents(
                 modifier = Modifier.weight(1f),
                 library = library,
@@ -522,7 +592,7 @@ fun WebsiteBookmarkManagerScreen(
                     }
                 }
             )
-        } else if (query.isBlank()) {
+        } else if (query.isBlank() && selectedTag == null) {
             WebsiteOpenCountList(
                 modifier = Modifier.weight(1f),
                 library = library,
@@ -571,6 +641,7 @@ fun WebsiteBookmarkManagerScreen(
                 onOpenFolder = { folderId ->
                     currentFolderId = folderId
                     query = ""
+                    selectedTag = null
                 },
                 onOpenWebsite = onOpenWebsite,
                 onEditWebsite = { website ->
@@ -1134,6 +1205,17 @@ private fun WebsiteBookmarkRow(
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            if (website.tags.isNotEmpty()) {
+                Column(
+                    modifier = Modifier.widthIn(max = 88.dp),
+                    verticalArrangement = Arrangement.spacedBy(3.dp)
+                ) {
+                    website.tags.forEach { tag ->
+                        WebsiteTagBadge(tag = tag)
+                    }
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+            }
             Surface(
                 modifier = Modifier.size(36.dp),
                 shape = RoundedCornerShape(12.dp),
@@ -1238,6 +1320,34 @@ private fun WebsiteBookmarkRow(
                 }
             }
         }
+    }
+}
+
+/**
+ * 在网站收藏卡片最左侧显示一个紧凑标签。
+ *
+ * 使用方法：
+ * [WebsiteBookmarkRow]仅在网站标签列表非空时按保存顺序逐项调用。标签宽度受限并使用单行省略，
+ * 防止较长标签挤掉网站名称和“更多”操作；完整名称仍可在网站编辑器中查看和修改。
+ *
+ * @param tag 已清理且非空的网站标签名称。
+ *
+ * @return 无返回值，直接输出只读标签外观。
+ */
+@Composable
+private fun WebsiteTagBadge(tag: String) {
+    Surface(
+        shape = RoundedCornerShape(7.dp),
+        color = MaterialTheme.colorScheme.primaryContainer
+    ) {
+        Text(
+            text = tag,
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onPrimaryContainer,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
     }
 }
 
@@ -1758,7 +1868,7 @@ private fun WebsiteFolderEditorDialog(
 }
 
 /**
- * 新建或编辑网站的名称、网址、颜色、所属文件夹和首页轮播开关。
+ * 新建或编辑网站的名称、网址、颜色、所属文件夹和首页轮播开关；编辑已有网站时还可维护多个标签。
  *
  * @param library 当前完整网站库。
  * @param website 编辑目标；null表示新增。
@@ -1770,7 +1880,7 @@ private fun WebsiteFolderEditorDialog(
  * @return 无返回值。
  */
 @Composable
-private fun WebsiteBookmarkEditorDialog(
+internal fun WebsiteBookmarkEditorDialog(
     library: WebsiteLibrary,
     website: WebsiteShortcut?,
     initialFolderId: String?,
@@ -1783,6 +1893,12 @@ private fun WebsiteBookmarkEditorDialog(
     }
     var url by remember(website?.id) {
         mutableStateOf(website?.url.orEmpty())
+    }
+    var selectedTags by remember(website?.id) {
+        mutableStateOf(normalizeWebsiteTags(website?.tags.orEmpty()))
+    }
+    var tagInput by remember(website?.id) {
+        mutableStateOf("")
     }
     var palette by remember(website?.id) {
         mutableStateOf(website?.palette ?: WebsitePalette.OCEAN)
@@ -1802,11 +1918,40 @@ private fun WebsiteBookmarkEditorDialog(
     var folderMenuExpanded by remember {
         mutableStateOf(false)
     }
+    var tagMenuExpanded by remember {
+        mutableStateOf(false)
+    }
     var error by remember(website?.id) {
         mutableStateOf("")
     }
     val folderChoices = remember(library.folders) {
         websiteFolderChoices(library)
+    }
+    val tagChoices = remember(library.websites) {
+        websiteTagChoices(library.websites)
+    }
+    val availableTagChoices = remember(tagChoices, selectedTags) {
+        tagChoices.filterNot { choice ->
+            selectedTags.any { selected -> selected.equals(choice, ignoreCase = true) }
+        }
+    }
+    val addPendingTag = {
+        val normalizedInput = tagInput.trim()
+        when {
+            normalizedInput.isBlank() -> {
+                error = "请输入标签名称"
+            }
+
+            selectedTags.any { tag -> tag.equals(normalizedInput, ignoreCase = true) } -> {
+                error = "该标签已经添加"
+            }
+
+            else -> {
+                selectedTags = normalizeWebsiteTags(selectedTags + normalizedInput)
+                tagInput = ""
+                error = ""
+            }
+        }
     }
     val dismissEditor = {
         discardUncommittedWebsiteBackground(
@@ -1857,6 +2002,95 @@ private fun WebsiteBookmarkEditorDialog(
                         },
                         singleLine = true
                     )
+                }
+                if (website != null) {
+                    item {
+                        Text(
+                            text = "网站标签",
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        if (selectedTags.isEmpty()) {
+                            Text(
+                                text = "未设置标签",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        } else {
+                            LazyRow(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                items(
+                                    items = selectedTags,
+                                    key = { tag -> tag.lowercase(Locale.ROOT) }
+                                ) { tag ->
+                                    TextButton(
+                                        onClick = {
+                                            selectedTags = selectedTags.filterNot { selected ->
+                                                selected.equals(tag, ignoreCase = true)
+                                            }
+                                            error = ""
+                                        },
+                                        contentPadding = PaddingValues(horizontal = 8.dp)
+                                    ) {
+                                        Text(text = "$tag ×", maxLines = 1)
+                                    }
+                                }
+                            }
+                        }
+                        OutlinedTextField(
+                            value = tagInput,
+                            onValueChange = { newValue ->
+                                tagInput = newValue
+                                error = ""
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            label = {
+                                Text(text = "新标签名称")
+                            },
+                            supportingText = {
+                                Text(text = "输入后点击添加；直接保存也会加入当前输入")
+                            },
+                            trailingIcon = {
+                                TextButton(onClick = addPendingTag) {
+                                    Text(text = "添加")
+                                }
+                            },
+                            singleLine = true
+                        )
+                        Box {
+                            OutlinedButton(
+                                onClick = { tagMenuExpanded = true },
+                                enabled = availableTagChoices.isNotEmpty(),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(
+                                    text = if (availableTagChoices.isEmpty()) {
+                                        "暂无其他已有标签"
+                                    } else {
+                                        "从已有标签中选择"
+                                    }
+                                )
+                            }
+                            DropdownMenu(
+                                expanded = tagMenuExpanded,
+                                onDismissRequest = { tagMenuExpanded = false },
+                                modifier = Modifier.heightIn(max = 280.dp)
+                            ) {
+                                availableTagChoices.forEach { tag ->
+                                    DropdownMenuItem(
+                                        text = { Text(text = tag) },
+                                        onClick = {
+                                            selectedTags = normalizeWebsiteTags(selectedTags + tag)
+                                            tagMenuExpanded = false
+                                            error = ""
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
                 item {
                     WebsiteCardAppearanceEditor(
@@ -1954,6 +2188,11 @@ private fun WebsiteBookmarkEditorDialog(
                     }
 
                     val websiteId = website?.id ?: UUID.randomUUID().toString()
+                    val normalizedTags = if (website == null) {
+                        emptyList()
+                    } else {
+                        normalizeWebsiteTags(selectedTags + tagInput)
+                    }
                     val newOrder = if (website == null || website.folderId != folderId) {
                         nextWebsiteNodeOrder(library, folderId)
                     } else {
@@ -1970,7 +2209,8 @@ private fun WebsiteBookmarkEditorDialog(
                         showOnHome = showOnHome,
                         sortOrder = newOrder,
                         isPinned = website?.isPinned ?: false,
-                        openCount = website?.openCount ?: 0L
+                        openCount = website?.openCount ?: 0L,
+                        tags = normalizedTags
                     )
                     val updatedWebsites = if (website == null) {
                         library.websites + updatedWebsite
@@ -2307,37 +2547,48 @@ private fun websiteFolderChoices(library: WebsiteLibrary): List<WebsiteFolderCho
 }
 
 /**
- * 对全部文件夹和网站执行模糊搜索。
+ * 对全部文件夹和网站执行文字搜索，并按可选标签独立筛选网站。
  *
  * @param library 当前完整网站库。
- * @param query 用户输入的搜索词。
+ * @param query 用户输入的文字搜索词；为空时不限制名称、网址和文件夹路径。
+ * @param selectedTag 用户选择的完整标签名称；null表示不按标签限制结果。
  *
- * @return 文件夹结果在前、网站结果在后的有序列表；空查询返回空列表。
+ * @return 文件夹结果在前、网站结果在后的有序列表；文字和标签均未指定时返回空列表。选择标签时
+ * 只返回带有该标签的网站，文字搜索词不为空时继续与标签条件叠加。
  */
-private fun websiteSearchResults(
+internal fun websiteSearchResults(
     library: WebsiteLibrary,
-    query: String
+    query: String,
+    selectedTag: String?
 ): List<WebsiteSearchResult> {
     val normalizedQuery = query.trim().lowercase(Locale.ROOT)
-    if (normalizedQuery.isBlank()) {
+    val normalizedTag = selectedTag?.trim()?.takeIf(String::isNotBlank)
+    if (normalizedQuery.isBlank() && normalizedTag == null) {
         return emptyList()
     }
 
-    val folderResults = library.folders.mapNotNull { folder ->
-        val path = websiteFolderPath(library.folders, folder.id)
-        if (simpleFuzzyContains("${folder.name} $path".lowercase(Locale.ROOT), normalizedQuery)) {
-            WebsiteSearchResult(
-                key = "folder:${folder.id}",
-                path = path,
-                folder = folder
-            )
-        } else {
-            null
-        }
-    }.sortedBy { result -> result.path }
+    val folderResults = if (normalizedTag == null && normalizedQuery.isNotBlank()) {
+        library.folders.mapNotNull { folder ->
+            val path = websiteFolderPath(library.folders, folder.id)
+            if (simpleFuzzyContains("${folder.name} $path".lowercase(Locale.ROOT), normalizedQuery)) {
+                WebsiteSearchResult(
+                    key = "folder:${folder.id}",
+                    path = path,
+                    folder = folder
+                )
+            } else {
+                null
+            }
+        }.sortedBy { result -> result.path }
+    } else {
+        emptyList()
+    }
     val websiteResults = library.websites.mapNotNull { website ->
         val path = websiteFolderPath(library.folders, website.folderId)
-        if (websiteMatchesQuery(website, path, normalizedQuery)) {
+        val matchesQuery = normalizedQuery.isBlank() ||
+            websiteMatchesQuery(website, path, normalizedQuery)
+        val matchesTag = normalizedTag == null || websiteHasTag(website, normalizedTag)
+        if (matchesQuery && matchesTag) {
             WebsiteSearchResult(
                 key = "website:${website.id}",
                 path = path,
@@ -2404,7 +2655,7 @@ internal data class WebsiteManagerNode(
 )
 
 /** 搜索列表中的内部结果节点。 */
-private data class WebsiteSearchResult(
+internal data class WebsiteSearchResult(
     val key: String,
     val path: String,
     val folder: WebsiteFolder? = null,

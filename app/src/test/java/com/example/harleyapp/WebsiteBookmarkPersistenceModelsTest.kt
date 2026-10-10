@@ -56,6 +56,7 @@ class WebsiteBookmarkPersistenceModelsTest {
         assertFalse(website.showOnHome)
         assertFalse(website.isPinned)
         assertEquals(0L, website.openCount)
+        assertEquals(emptyList<String>(), website.tags)
     }
 
     /**
