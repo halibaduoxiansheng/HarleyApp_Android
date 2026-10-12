@@ -246,6 +246,12 @@ internal data class EbookMeasuredTextPage(
     val endOffset: Int
 )
 
+/** 当前屏幕快速重排完成、整本书分页仍在后台计算时使用的临时满屏页面。 */
+private data class EbookHeightReflowPreview(
+    val pageIndex: Int,
+    val page: EbookMeasuredTextPage
+)
+
 /**
  * 把前台朗读服务的低频关键断点按顺序保存回电子书目录。
  *
@@ -2416,6 +2422,12 @@ private fun EbookReader(
     var measuredTextPages by remember(book.id) {
         mutableStateOf<List<EbookMeasuredTextPage>>(emptyList())
     }
+    var measuredPaginationSpec by remember(book.id) {
+        mutableStateOf<EbookPaginationCacheSpec?>(null)
+    }
+    var heightReflowPreview by remember(book.id) {
+        mutableStateOf<EbookHeightReflowPreview?>(null)
+    }
     var paginationReady by remember(book.id) {
         mutableStateOf(book.format == EbookFormat.PDF)
     }
@@ -2613,7 +2625,11 @@ private fun EbookReader(
         (READER_PAGE_HORIZONTAL_PADDING * 2).roundToPx()
     }
     val pageVerticalInsetsPx = with(density) {
-        (READER_TOP_TEXT_INSET + READER_BOTTOM_TEXT_INSET).roundToPx()
+        if (controlsVisible) {
+            (READER_TOP_TEXT_INSET + READER_BOTTOM_TEXT_INSET).roundToPx()
+        } else {
+            (READER_IMMERSIVE_TEXT_PADDING * 2).roundToPx()
+        }
     }
     val pageContentWidthPx = (paginationViewportSize.width - pageHorizontalPaddingPx)
         .coerceAtLeast(0)
@@ -2668,10 +2684,32 @@ private fun EbookReader(
                 restoreMeasuredEbookPagesFromBoundaries(extractedText, cachedBoundaries)
             }
             if (cachedPages.isNotEmpty()) {
+                val mappedPage = findEbookPageIndexForOffset(cachedPages, currentTextOffset)
+                currentPage = mappedPage
                 measuredTextPages = cachedPages
+                measuredPaginationSpec = cacheSpec
+                heightReflowPreview = null
                 paginationProgress = 1f
                 paginationReady = true
                 return@LaunchedEffect
+            }
+        }
+
+        // 只有高度发生变化时，旧分页和新分页的换行位置完全相同。先从旧分页附近提取少量正文，
+        // 快速生成最终目标页，让超大书籍进入沉浸模式后立即铺满；整书分页继续在后台完成。
+        val previousSpec = measuredPaginationSpec
+        val previousPages = measuredTextPages
+        heightReflowPreview = if (previousSpec == null || previousPages.isEmpty()) {
+            null
+        } else {
+            withContext(Dispatchers.Default) {
+                buildEbookHeightReflowPreview(
+                    text = extractedText,
+                    pages = previousPages,
+                    currentTextOffset = currentTextOffset,
+                    previousSpec = previousSpec,
+                    targetSpec = cacheSpec
+                )?.copy(pageIndex = currentPage)
             }
         }
 
@@ -2686,7 +2724,11 @@ private fun EbookReader(
                 onProgress = { progress -> paginationProgress = progress }
             )
         }
+        val mappedPage = findEbookPageIndexForOffset(calculatedPages, currentTextOffset)
+        currentPage = mappedPage
         measuredTextPages = calculatedPages
+        measuredPaginationSpec = cacheSpec
+        heightReflowPreview = heightReflowPreview?.copy(pageIndex = mappedPage)
         paginationProgress = 1f
         paginationReady = true
         repository.savePaginationBoundaries(
@@ -2850,8 +2892,17 @@ private fun EbookReader(
     val originalPageText = if (book.format == EbookFormat.PDF) {
         ""
     } else {
-        textPages.getOrElse(currentPage) {
-            book.currentPagePreview.ifBlank { "没有可显示的正文" }
+        heightReflowPreview
+            ?.takeIf { preview -> preview.pageIndex == currentPage }
+            ?.page
+            ?.text
+            ?: textPages.getOrElse(currentPage) {
+                book.currentPagePreview.ifBlank { "没有可显示的正文" }
+            }
+    }
+    LaunchedEffect(currentPage, heightReflowPreview?.pageIndex) {
+        if (heightReflowPreview?.pageIndex != currentPage) {
+            heightReflowPreview = null
         }
     }
     val serviceSpokenTextForCurrentPage = currentBookPlayback
@@ -3160,8 +3211,7 @@ private fun EbookReader(
             .onSizeChanged { size ->
                 paginationViewportSize = resolveEbookPaginationViewportSize(
                     previousSize = paginationViewportSize,
-                    measuredSize = size,
-                    retainHeightOnlyChange = !controlsVisible
+                    measuredSize = size
                 )
             }
             .background(readerPalette.background)
@@ -5047,8 +5097,10 @@ private fun EbookTableOfContentsDialog(
     onDismiss: () -> Unit
 ) {
     var query by remember(chapters) { mutableStateOf("") }
-    val listState = rememberLazyListState()
-    val currentChapterIndex = chapters.indexOfLast { chapter -> chapter.pageIndex <= currentPage }
+    val currentChapterIndex = resolveEbookCurrentChapterIndex(chapters, currentPage)
+    val listState = rememberLazyListState(
+        initialFirstVisibleItemIndex = currentChapterIndex.coerceAtLeast(0)
+    )
     val currentChapter = chapters.getOrNull(currentChapterIndex)
     val filteredChapters = remember(chapters, query) {
         val keyword = query.trim()
@@ -5173,6 +5225,25 @@ private fun EbookTableOfContentsDialog(
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } }
     )
+}
+
+/**
+ * 查找当前阅读页所属的目录章节索引。
+ *
+ * 使用方法：
+ * 打开目录弹窗或需要展示当前章节时，将按正文顺序排列的目录和当前零基页码传入。函数把最后一个
+ * 起始页不晚于当前页的章节视为当前节点，可用于默认滚动位置、高亮状态和章节标题显示。
+ *
+ * @param chapters 按正文顺序排列的完整章节目录。
+ * @param currentPage 阅读器当前零基页码；负数会按第0页处理。
+ * @return 当前章节在[chapters]中的零基索引；目录为空或当前页位于首个章节之前时返回-1。
+ */
+internal fun resolveEbookCurrentChapterIndex(
+    chapters: List<EbookChapter>,
+    currentPage: Int
+): Int {
+    val safeCurrentPage = currentPage.coerceAtLeast(0)
+    return chapters.indexOfLast { chapter -> chapter.pageIndex <= safeCurrentPage }
 }
 
 /**
@@ -5539,30 +5610,23 @@ internal fun resolveEbookReaderPageCount(
 }
 
 /**
- * 选择本次文本分页应使用的稳定阅读区域尺寸。
+ * 选择本次文本分页应使用的阅读区域尺寸。
  *
  * 使用方法：
- * 阅读器的onSizeChanged每次收到新尺寸后调用。普通模式或屏幕宽度改变时使用真实新尺寸；进入沉浸
- * 模式仅隐藏外层底部导航，通常只会增加高度，此时继续沿用进入前的分页高度，让当前页立即保持可读，
- * 不为一次工具栏显隐重新计算整本书。旋转屏幕会改变宽度，仍会触发必要的后台重新分页。
+ * 阅读器的onSizeChanged每次收到新尺寸后调用。普通模式、沉浸模式、横竖屏切换都使用最新有效尺寸，
+ * 使分页结果完整覆盖真实可读区域。调用方在后台计算新分页并继续展示已有页面，因此尺寸变化期间
+ * 不需要切回等待页；相同尺寸的结果会由分页缓存直接恢复。
  *
- * @param previousSize 当前已经用于分页的稳定尺寸；首次测量时传[IntSize.Zero]。
+ * @param previousSize 当前已经用于分页的尺寸；首次测量时传[IntSize.Zero]，新尺寸无效时用于兜底。
  * @param measuredSize Compose最新测得的阅读器完整像素尺寸。
- * @param retainHeightOnlyChange true表示当前正在进入或处于沉浸模式，可忽略宽度不变的纯高度变化。
  * @return 应保存并用于本次分页缓存身份的尺寸；非法新尺寸不会覆盖已有有效值。
  */
 internal fun resolveEbookPaginationViewportSize(
     previousSize: IntSize,
-    measuredSize: IntSize,
-    retainHeightOnlyChange: Boolean
+    measuredSize: IntSize
 ): IntSize {
     if (measuredSize.width <= 0 || measuredSize.height <= 0) return previousSize
-    if (previousSize.width <= 0 || previousSize.height <= 0) return measuredSize
-    return if (retainHeightOnlyChange && measuredSize.width == previousSize.width) {
-        previousSize
-    } else {
-        measuredSize
-    }
+    return measuredSize
 }
 
 /**
@@ -5636,6 +5700,109 @@ internal fun restoreMeasuredEbookPagesFromBoundaries(
             )
         }
     }
+}
+
+/**
+ * 在整本书重新分页前，利用旧分页快速生成高度变化后的当前满屏页面。
+ *
+ * 使用方法：
+ * 仅当阅读区宽度、字号、字体和正文均未变化、只有可用高度变化时调用。函数根据旧分页每页固定行数
+ * 推算目标页的全局行号，只排版目标附近少量正文，因此大型书籍也能在进入沉浸模式后迅速填满屏幕。
+ * 整书分页完成后仍应以正式分页结果替换页码和缓存。
+ *
+ * @param text 完整离线正文。
+ * @param pages 当前正在显示的旧分页结果。
+ * @param currentTextOffset 当前阅读字符锚点。
+ * @param previousSpec 旧分页使用的完整排版条件。
+ * @param targetSpec 新高度对应的目标排版条件。
+ * @return 目标分页中的当前页和零基页码；条件不兼容或无法安全排版时返回null。
+ */
+private fun buildEbookHeightReflowPreview(
+    text: String,
+    pages: List<EbookMeasuredTextPage>,
+    currentTextOffset: Int,
+    previousSpec: EbookPaginationCacheSpec,
+    targetSpec: EbookPaginationCacheSpec
+): EbookHeightReflowPreview? {
+    if (
+        text.isEmpty() || pages.isEmpty() ||
+        previousSpec.bookId != targetSpec.bookId ||
+        previousSpec.textLength != targetSpec.textLength ||
+        previousSpec.contentWidthPx != targetSpec.contentWidthPx ||
+        previousSpec.fontSizePx != targetSpec.fontSizePx ||
+        previousSpec.lineHeightPx != targetSpec.lineHeightPx ||
+        previousSpec.fontFamily != targetSpec.fontFamily ||
+        previousSpec.contentHeightPx == targetSpec.contentHeightPx
+    ) {
+        return null
+    }
+
+    val oldMaxLines = (previousSpec.contentHeightPx / previousSpec.lineHeightPx.coerceAtLeast(1f))
+        .toInt()
+        .coerceAtLeast(1)
+    val newMaxLines = (targetSpec.contentHeightPx / targetSpec.lineHeightPx.coerceAtLeast(1f))
+        .toInt()
+        .coerceAtLeast(1)
+    val oldPageIndex = findEbookPageIndexForOffset(pages, currentTextOffset)
+    val oldPage = pages[oldPageIndex]
+    val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+        textSize = targetSpec.fontSizePx.coerceAtLeast(1f)
+        typeface = androidTypeface(targetSpec.fontFamily)
+    }
+    val lineSpacingExtra = (
+        targetSpec.lineHeightPx.coerceAtLeast(1f) - textPaint.fontSpacing
+        ).coerceAtLeast(0f)
+
+    fun createLayout(startOffset: Int, endOffset: Int): StaticLayout {
+        val windowText = text.substring(startOffset, endOffset)
+        return StaticLayout.Builder.obtain(
+            windowText,
+            0,
+            windowText.length,
+            textPaint,
+            targetSpec.contentWidthPx
+        )
+            .setAlignment(Layout.Alignment.ALIGN_NORMAL)
+            .setBreakStrategy(LineBreaker.BREAK_STRATEGY_SIMPLE)
+            .setHyphenationFrequency(Layout.HYPHENATION_FREQUENCY_NONE)
+            .setIncludePad(false)
+            .setLineSpacing(lineSpacingExtra, 1f)
+            .build()
+    }
+
+    val oldPageLayout = createLayout(oldPage.startOffset, oldPage.endOffset)
+    val relativeAnchor = currentTextOffset.coerceIn(oldPage.startOffset, oldPage.endOffset) -
+        oldPage.startOffset
+    val anchorLineInOldPage = oldPageLayout.getLineForOffset(relativeAnchor)
+    val globalAnchorLine = oldPageIndex.toLong() * oldMaxLines + anchorLineInOldPage
+    val targetPageIndex = (globalAnchorLine / newMaxLines).toInt().coerceAtLeast(0)
+    val targetFirstLine = targetPageIndex.toLong() * newMaxLines
+    val sourcePageIndex = (targetFirstLine / oldMaxLines).toInt().coerceIn(pages.indices)
+    val firstLineInWindow = (targetFirstLine % oldMaxLines).toInt()
+    val requiredLastLine = firstLineInWindow + newMaxLines - 1
+    val windowLastPageIndex = (sourcePageIndex + requiredLastLine / oldMaxLines)
+        .coerceIn(pages.indices)
+    val windowStart = pages[sourcePageIndex].startOffset
+    val windowEnd = pages[windowLastPageIndex].endOffset
+    val windowLayout = createLayout(windowStart, windowEnd)
+    if (firstLineInWindow >= windowLayout.lineCount) return null
+
+    val lastLine = (firstLineInWindow + newMaxLines - 1)
+        .coerceAtMost(windowLayout.lineCount - 1)
+    val pageStart = (windowStart + windowLayout.getLineStart(firstLineInWindow))
+        .coerceIn(windowStart, windowEnd)
+    val pageEnd = (windowStart + windowLayout.getLineEnd(lastLine))
+        .coerceIn(pageStart, windowEnd)
+    if (pageEnd <= pageStart) return null
+
+    return EbookHeightReflowPreview(
+        pageIndex = targetPageIndex,
+        page = EbookMeasuredTextPage(
+            text = text.substring(pageStart, pageEnd).trim(),
+            startOffset = pageStart,
+            endOffset = pageEnd
+        )
+    )
 }
 
 /** @return 分页缓存边界连续覆盖全文时返回true。 */

@@ -7,6 +7,7 @@ import com.example.harleyapp.data.normalizeEbookShelfSlots
 import com.example.harleyapp.data.validateEbookPaginationBoundaries
 import com.example.harleyapp.model.AppVisualTheme
 import com.example.harleyapp.model.EbookBook
+import com.example.harleyapp.model.EbookChapter
 import com.example.harleyapp.model.EbookFormat
 import com.example.harleyapp.model.EbookShelfSkin
 import com.example.harleyapp.system.detectEbookLanguageCode
@@ -25,6 +26,7 @@ import com.example.harleyapp.ui.screens.measuredEbookPagesToBoundaries
 import com.example.harleyapp.ui.screens.moveEbookShelfBookToSlot
 import com.example.harleyapp.ui.screens.normalizeEbookNoteSelection
 import com.example.harleyapp.ui.screens.paginateEbookText
+import com.example.harleyapp.ui.screens.resolveEbookCurrentChapterIndex
 import com.example.harleyapp.ui.screens.resolveEbookReaderPageCount
 import com.example.harleyapp.ui.screens.resolveEbookPaginationViewportSize
 import com.example.harleyapp.ui.screens.restoreMeasuredEbookPagesFromBoundaries
@@ -109,12 +111,12 @@ class EbookModelsTest {
     }
 
     /**
-     * 验证沉浸模式仅增加可用高度时沿用当前分页尺寸，而旋转屏幕改变宽度后仍采用新尺寸。
+     * 验证沉浸模式增加可用高度时采用完整新尺寸，旋转屏幕和无效测量也能正确处理。
      *
-     * @return 无返回值；沉浸切换触发无谓分页或横竖屏变化未更新尺寸时由JUnit报告失败。
+     * @return 无返回值；沉浸模式未覆盖新增空间、横竖屏未更新或无效尺寸破坏旧值时由JUnit报告失败。
      */
     @Test
-    fun ebookImmersiveModeRetainsPaginationUntilWidthChanges() {
+    fun ebookImmersiveModeUsesFullMeasuredViewport() {
         val normalSize = IntSize(width = 1080, height = 2010)
         val immersiveSize = IntSize(width = 1080, height = 2190)
         val landscapeSize = IntSize(width = 2190, height = 950)
@@ -123,26 +125,50 @@ class EbookModelsTest {
             normalSize,
             resolveEbookPaginationViewportSize(
                 previousSize = IntSize.Zero,
-                measuredSize = normalSize,
-                retainHeightOnlyChange = false
+                measuredSize = normalSize
             )
         )
         assertEquals(
-            normalSize,
+            immersiveSize,
             resolveEbookPaginationViewportSize(
                 previousSize = normalSize,
-                measuredSize = immersiveSize,
-                retainHeightOnlyChange = true
+                measuredSize = immersiveSize
             )
         )
         assertEquals(
             landscapeSize,
             resolveEbookPaginationViewportSize(
                 previousSize = normalSize,
-                measuredSize = landscapeSize,
-                retainHeightOnlyChange = true
+                measuredSize = landscapeSize
             )
         )
+        assertEquals(
+            normalSize,
+            resolveEbookPaginationViewportSize(
+                previousSize = normalSize,
+                measuredSize = IntSize.Zero
+            )
+        )
+    }
+
+    /**
+     * 验证目录打开时能够找出当前阅读页所属节点，并覆盖首章之前、章节边界与空目录情况。
+     *
+     * @return 无返回值；当前章节索引错误时由JUnit报告失败。
+     */
+    @Test
+    fun tableOfContentsResolvesCurrentChapterNode() {
+        val chapters = listOf(
+            EbookChapter(title = "第一章", pageIndex = 3),
+            EbookChapter(title = "第二章", pageIndex = 18),
+            EbookChapter(title = "第三章", pageIndex = 42)
+        )
+
+        assertEquals(-1, resolveEbookCurrentChapterIndex(emptyList(), currentPage = 10))
+        assertEquals(-1, resolveEbookCurrentChapterIndex(chapters, currentPage = 2))
+        assertEquals(0, resolveEbookCurrentChapterIndex(chapters, currentPage = 3))
+        assertEquals(1, resolveEbookCurrentChapterIndex(chapters, currentPage = 30))
+        assertEquals(2, resolveEbookCurrentChapterIndex(chapters, currentPage = 99))
     }
 
     /**
